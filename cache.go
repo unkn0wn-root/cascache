@@ -79,8 +79,10 @@ func newCache[V any](opts Options[V]) (*cache[V], error) {
 	return c, nil
 }
 
+// Enabled reports whether the cache is enabled
 func (c *cache[V]) Enabled() bool { return c.enabled }
 
+// Close flushes resources for the GenStore and Provider
 func (c *cache[V]) Close(ctx context.Context) error {
 	// Close gen store first (best effort)
 	if c.gen != nil {
@@ -92,6 +94,8 @@ func (c *cache[V]) Close(ctx context.Context) error {
 	return nil
 }
 
+// Get returns the value for key if present and not stale, performing
+// read-side generation validation and self-healing on corruption.
 func (c *cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
 	var zero V
 	if !c.enabled {
@@ -120,6 +124,8 @@ func (c *cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
 	return v, true, nil
 }
 
+// SetWithGen writes value using CAS: the write is accepted only if the
+// current generation equals observedGen.
 func (c *cache[V]) SetWithGen(ctx context.Context, key string, value V, observedGen uint64, ttl time.Duration) error {
 	if !c.enabled {
 		return nil
@@ -148,6 +154,7 @@ func (c *cache[V]) SetWithGen(ctx context.Context, key string, value V, observed
 	return nil
 }
 
+// Invalidate bumps the generation for key and deletes the single-entry value.
 func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 	if !c.enabled {
 		return nil
@@ -159,6 +166,8 @@ func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 	return nil
 }
 
+// GetBulk returns cached values for keys using a bulk entry if valid,
+// otherwise falls back to single reads. Missing keys are returned separately.
 func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []string, error) {
 	out := make(map[string]V, len(keys))
 	if !c.enabled {
@@ -229,6 +238,8 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 	return out, missing, nil
 }
 
+// SetBulkWithGens writes a bulk entry using CAS across all members.
+// If any member’s observed gen mismatches, it seeds singles instead.
 func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, observedGens map[string]uint64, ttl time.Duration) error {
 	if !c.enabled || len(items) == 0 {
 		return nil
@@ -309,11 +320,13 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 	return nil
 }
 
+// SnapshotGen returns the current generation for key.
 func (c *cache[V]) SnapshotGen(key string) uint64 {
 	k := c.singleKey(key)
 	return c.snapshotGen(k)
 }
 
+// SnapshotGens returns current generations for multiple keys.
 func (c *cache[V]) SnapshotGens(keys []string) map[string]uint64 {
 	storage := make([]string, len(keys))
 	for i, k := range keys {
@@ -354,16 +367,19 @@ func (c *cache[V]) bumpGen(storageKey string) uint64 {
 	return g
 }
 
+// singleKey returns the storage key for a logical key within the namespace.
 func (c *cache[V]) singleKey(userKey string) string {
 	// isolate by namespace
 	return "single:" + c.ns + ":" + userKey
 }
 
+// bulkKeySorted builds the bulk storage key from sorted logical keys.
 func (c *cache[V]) bulkKeySorted(sortedKeys []string) string {
 	// sortedKeys must be sorted ascending
 	return util.BulkKeySorted("bulk:"+c.ns, sortedKeys)
 }
 
+// bulkValid validates that each bulk item’s generation equals the current generation.
 func (c *cache[V]) bulkValid(items []wire.BulkItem) bool {
 	for _, it := range items {
 		if it.Gen != c.snapshotGen(c.singleKey(it.Key)) {
@@ -373,7 +389,7 @@ func (c *cache[V]) bulkValid(items []wire.BulkItem) bool {
 	return true
 }
 
-func isLocalGenStore(gs GenStore) bool {
-	_, ok := gs.(*LocalGenStore)
+func isLocalGenStore(gs gen.GenStore) bool {
+	_, ok := gs.(*gen.LocalGenStore)
 	return ok
 }
