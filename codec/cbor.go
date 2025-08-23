@@ -1,4 +1,4 @@
-package codecs
+package codec
 
 import (
 	"github.com/fxamacker/cbor/v2"

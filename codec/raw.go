@@ -1,5 +1,4 @@
-// codecs/raw.go
-package codecs
+package codec
 
 type BytesCodec struct{}
 

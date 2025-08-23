@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	cds "github.com/unkn0wn-root/cascache/codecs"
+	c "github.com/unkn0wn-root/cascache/codec"
 	gen "github.com/unkn0wn-root/cascache/genstore"
 	pr "github.com/unkn0wn-root/cascache/provider"
 )
@@ -37,7 +37,7 @@ type Options[V any] struct {
 	// Required
 	Namespace string // logical namespace to avoid collisions. e.g. "user", "profile", "order"
 	Provider  pr.Provider
-	Codec     cds.Codec[V]
+	Codec     c.Codec[V]
 
 	Logger          Logger        // if nil, NopLogger is used
 	DefaultTTL      time.Duration // singles; 0 => 10m
