@@ -9,7 +9,9 @@ require (
 	github.com/dgraph-io/ristretto v0.1.1
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/redis/go-redis/v9 v9.5.2
+	github.com/sirupsen/logrus v1.9.3
 	github.com/vmihailenco/msgpack/v5 v5.4.1
+	go.uber.org/zap v1.27.0
 	google.golang.org/protobuf v1.36.8
 )
 
@@ -21,5 +23,6 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
+	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/sys v0.0.0-20221010170243-090e33056c14 // indirect
 )
