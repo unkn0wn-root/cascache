@@ -47,6 +47,7 @@ type Options[V any] struct {
 	Disabled        bool          // default false (enabled)
 	ComputeSetCost  SetCostFunc   // default 1
 	GenStore        gen.GenStore  // nil => LocalGenStore (in-process)
+	DisableBulk     bool          // default false => bulk enabled
 }
 
 func New[V any](opts Options[V]) (CAS[V], error) {

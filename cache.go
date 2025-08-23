@@ -30,6 +30,7 @@ type cache[V any] struct {
 	genRetention   time.Duration
 	computeSetCost SetCostFunc
 	gen            gen.GenStore
+	bulkEnabled    bool
 }
 
 func newCache[V any](opts Options[V]) (*cache[V], error) {
@@ -68,6 +69,11 @@ func newCache[V any](opts Options[V]) (*cache[V], error) {
 	} else {
 		// default to in-process generations with periodic cleanup
 		c.gen = gen.NewLocalGenStore(c.sweepInterval, c.genRetention)
+	}
+
+	c.bulkEnabled = !opts.DisableBulk
+	if c.bulkEnabled && isLocalGenStore(c.gen) {
+		c.log.Warn("bulk enabled with local generations; stale bulks possible in multi-replica deployments", nil)
 	}
 
 	return c, nil
@@ -156,12 +162,24 @@ func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []string, error) {
 	out := make(map[string]V, len(keys))
 	if !c.enabled {
-		missing := make([]string, 0, len(keys))
-		missing = append(missing, keys...)
+		missing := append([]string(nil), keys...)
 		return out, missing, nil
 	}
 	if len(keys) == 0 {
 		return out, nil, nil
+	}
+
+	// Bulk disabled -> use singles.
+	if !c.bulkEnabled {
+		var missing []string
+		for _, k := range keys {
+			if v, ok, _ := c.Get(ctx, k); ok {
+				out[k] = v
+			} else {
+				missing = append(missing, k)
+			}
+		}
+		return out, missing, nil
 	}
 
 	// sort a copy once; reuse for both bulk key and deterministic decode-order mapping
@@ -215,6 +233,20 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 	if !c.enabled || len(items) == 0 {
 		return nil
 	}
+
+	if !c.bulkEnabled {
+		sttl := ttl
+		if sttl == 0 {
+			sttl = c.defaultTTL
+		}
+		for k, v := range items {
+			if obs, ok := observedGens[k]; ok {
+				_ = c.SetWithGen(ctx, k, v, obs, sttl)
+			}
+		}
+		return nil
+	}
+
 	if ttl == 0 {
 		ttl = c.bulkTTL
 	}
@@ -224,7 +256,7 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 		kk := c.singleKey(k)
 		obs, ok := observedGens[k]
 		if !ok || c.snapshotGen(kk) != obs {
-			// skip bulk; seed singles instead
+			// skip bulk; seed singles instead (use default single TTL)
 			c.log.Debug("SetBulkWithGens skipped (gen mismatch)", Fields{"key": k})
 			for kk2, v := range items {
 				if obs2, ok := observedGens[kk2]; ok {
@@ -339,4 +371,9 @@ func (c *cache[V]) bulkValid(items []wire.BulkItem) bool {
 		}
 	}
 	return true
+}
+
+func isLocalGenStore(gs GenStore) bool {
+	_, ok := gs.(*LocalGenStore)
+	return ok
 }
