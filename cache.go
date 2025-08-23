@@ -25,6 +25,8 @@ type CAS[V any] interface {
 	SnapshotGens(keys []string) map[string]uint64
 }
 
+type SetCostFunc func(key string, raw []byte, isBulk bool, bulkCount int) int64
+
 // Options tune the behavior of the generic CAS cache.
 // Only Namespace and Provider are required; others have sensible defaults.
 type Options[V any] struct {
@@ -33,14 +35,13 @@ type Options[V any] struct {
 	Provider  Provider
 	Codec     Codec[V]
 
-	// Optional
-	Logger          Logger                                                         // if nil, logging is disabled
-	DefaultTTL      time.Duration                                                  // default single entry TTL (if SetWithGen ttl == 0)
-	BulkTTL         time.Duration                                                  // default bulk entry TTL (if SetBulkWithGens ttl == 0)
-	CleanupInterval time.Duration                                                  // sweep interval for stale generation metadata; default 1h
-	GenRetention    time.Duration                                                  // prune generations not bumped for this long; default 30d
-	Disabled        bool                                                           // default true
-	ComputeSetCost  func(key string, raw []byte, isBulk bool, bulkCount int) int64 // default returns 1
+	Logger          Logger        // if nil, NopLogger is used
+	DefaultTTL      time.Duration // singles; 0 => 10m
+	BulkTTL         time.Duration // bulks; 0 => 10m
+	CleanupInterval time.Duration // 0 => 1h
+	GenRetention    time.Duration // 0 => 30d
+	Disabled        bool          // default false (enabled)
+	ComputeSetCost  SetCostFunc   // default 1
 }
 
 func New[V any](opts Options[V]) (CAS[V], error) {

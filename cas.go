@@ -33,69 +33,65 @@ type cache[V any] struct {
 	bulkTTL        time.Duration
 	sweepInterval  time.Duration
 	genRetention   time.Duration
-	computeSetCost func(key string, raw []byte, isBulk bool, bulkCount int) int64
+	computeSetCost SetCostFunc
 
 	// generation map (in-memory only; missing treated as gen=0)
 	genMu sync.RWMutex
 	gens  map[string]genEntry
 
 	// background cleanup
-	ticker   *time.Ticker
-	stopCh   chan struct{}
-	closeWg  sync.WaitGroup
-	closeMux sync.Once
+	ticker    *time.Ticker
+	stopCh    chan struct{}
+	closeWg   sync.WaitGroup
+	closeOnce sync.Once
 }
 
 func newCache[V any](opts Options[V]) (*cache[V], error) {
-    if opts.Provider == nil {
-        return nil, fmt.Errorf("cascache: provider is required")
-    }
-    if opts.Codec == nil {
-        return nil, fmt.Errorf("cascache: codec is required")
-    }
-    if opts.Namespace == "" {
-        return nil, fmt.Errorf("cascache: namespace is required")
-    }
+	if opts.Provider == nil {
+		return nil, fmt.Errorf("cascache: provider is required")
+	}
+	if opts.Codec == nil {
+		return nil, fmt.Errorf("cascache: codec is required")
+	}
+	if opts.Namespace == "" {
+		return nil, fmt.Errorf("cascache: namespace is required")
+	}
 
-    c := &cache[V]{
-        ns:       opts.Namespace,
-        provider: opts.Provider,
-        codec:    opts.Codec,
-        gens:     make(map[string]genEntry),
-    }
+	c := &cache[V]{
+		ns:       opts.Namespace,
+		provider: opts.Provider,
+		codec:    opts.Codec,
+		gens:     make(map[string]genEntry),
+	}
 
-    coalesce := func[T comparable](v, def T) T {
-        var zero T
-        if v == zero {
-            return def
-        }
-        return v
-    }
+	defaultCost := SetCostFunc(func(_ string, _ []byte, _ bool, _ int) int64 { return 1 })
+	if opts.ComputeSetCost != nil {
+		c.computeSetCost = opts.ComputeSetCost
+	} else {
+		c.computeSetCost = defaultCost
+	}
 
-    var defaultCost func(string, []byte, bool, int) int64 = func(_ string, _ []byte, _ bool, _ int) int64 { return 1 }
+	c.log = coalesce[Logger](opts.Logger, NopLogger{})
+	c.defaultTTL = coalesce[time.Duration](opts.DefaultTTL, 10*time.Minute)
+	c.bulkTTL = coalesce[time.Duration](opts.BulkTTL, 10*time.Minute)
+	c.sweepInterval = coalesce[time.Duration](opts.CleanupInterval, defaultSweep)
+	c.genRetention = coalesce[time.Duration](opts.GenRetention, defaultGenRetention)
 
-    c.log            = coalesce[Logger](opts.Logger, NopLogger{})
-    c.defaultTTL     = coalesce[time.Duration](opts.DefaultTTL,      10*time.Minute)
-    c.bulkTTL        = coalesce[time.Duration](opts.BulkTTL,         10*time.Minute)
-    c.sweepInterval  = coalesce[time.Duration](opts.CleanupInterval, defaultSweep)
-    c.genRetention   = coalesce[time.Duration](opts.GenRetention,    defaultGenRetention)
-    c.computeSetCost = coalesce[func(string, []byte, bool, int) int64](opts.ComputeSetCost, defaultCost)
+	c.enabled = !opts.Disabled
 
-    c.enabled = !opts.Disabled
-
-    if c.enabled {
-        c.ticker = time.NewTicker(c.sweepInterval)
-        c.stopCh = make(chan struct{})
-        c.closeWg.Add(1)
-        go c.cleanupLoop()
-    }
-    return c, nil
+	if c.enabled {
+		c.ticker = time.NewTicker(c.sweepInterval)
+		c.stopCh = make(chan struct{})
+		c.closeWg.Add(1)
+		go c.cleanupLoop()
+	}
+	return c, nil
 }
 
 func (c *cache[V]) Enabled() bool { return c.enabled }
 
 func (c *cache[V]) Close(ctx context.Context) error {
-	c.closeMux.Do(func() {
+	c.closeOnce.Do(func() {
 		if c.stopCh != nil {
 			close(c.stopCh)
 			c.closeWg.Wait()
