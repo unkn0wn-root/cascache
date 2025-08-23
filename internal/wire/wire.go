@@ -1,3 +1,19 @@
+// Package wire contains the compact, versioned on-the-wire format used by cascache
+// to store values in the underlying Provider. It provides zero-copy decoders and
+// pre-sized encoders for both single entries and bulk entries.
+//
+// Encoding choices:
+//   - All integers are big-endian (network byte order).
+//   - A 4-byte ASCII magic ("CASC") allows quick format discrimination.
+//   - A 1-byte version enables forward/backward compatibility in place.
+//   - "kind" distinguishes single vs bulk payloads.
+//   - The payload after the fixed header is codec-opaque ([]byte).
+//   - Decoders are written for bounds safety: every slice operation is preceded by
+//     length checks; on any mismatch they return ErrCorrupt.
+//   - Decoders return subslices of the original buffer for payloads (zero-copy).
+//   - Encode paths pre-compute capacity and bytes.Buffer.Grow to avoid realloc.
+//   - Bulk decode allocates exactly one string per item to materialize the key
+//     (stable map key semantics).
 package wire
 
 import (
@@ -7,29 +23,47 @@ import (
 )
 
 const (
-	version    byte = 1
+	// version is the wire-format version. Bump only on incompatible layout changes.
+	version byte = 1
+
+	// kinds of records stored in the provider.
 	kindSingle byte = 1
 	kindBulk   byte = 2
 )
 
 var (
+	// ErrCorrupt is returned when a byte slice doesn't conform to the expected
+	// structure (bad magic/version/kind/lengths).
 	ErrCorrupt = errors.New("cascache: corrupt entry")
-	magic4     = [...]byte{'C', 'A', 'S', 'C'}
+
+	// magic4 is the fixed 4-byte magic header ("CASC").
+	magic4 = [...]byte{'C', 'A', 'S', 'C'}
 )
 
+// hasMagic reports whether b starts with the "CASC" header.
+// It does a zero-alloc compare against a static array.
 func hasMagic(b []byte) bool {
 	return len(b) >= 4 && bytes.Equal(b[:4], magic4[:])
 }
 
-// Single: magic(4) | ver(1) | kind(1=single) | gen(u64 be) | vlen(u32 be) | payload(vlen)
+// EncodeSingle encodes a single entry.
+//
+// Layout (big-endian):
+//
+//	magic(4) | ver(1) | kind(1=single) | gen(u64) | vlen(u32) | payload(vlen)
+//
+// The payload is the codec-encoded value. gen is the per-key generation used for
+// read-side validation (CAS).
 func EncodeSingle(gen uint64, payload []byte) []byte {
 	var buf bytes.Buffer
 	buf.Grow(4 + 1 + 1 + 8 + 4 + len(payload))
 
+	// header
 	buf.Write(magic4[:])
 	buf.WriteByte(version)
 	buf.WriteByte(kindSingle)
 
+	// body
 	var u8 [8]byte
 	var u4 [4]byte
 
@@ -43,6 +77,8 @@ func EncodeSingle(gen uint64, payload []byte) []byte {
 	return buf.Bytes()
 }
 
+// DecodeSingle parses a single entry and returns (gen, payload).
+// The returned payload is a subslice of b (zero-copy).
 func DecodeSingle(b []byte) (gen uint64, payload []byte, err error) {
 	const hdr = 4 + 1 + 1 + 8 + 4
 	if len(b) < hdr || !hasMagic(b) || b[4] != version || b[5] != kindSingle {
@@ -61,23 +97,34 @@ func DecodeSingle(b []byte) (gen uint64, payload []byte, err error) {
 	}
 	vlen := int(binary.BigEndian.Uint32(b[off : off+4]))
 	off += 4
-	if vlen < 0 || vlen > len(b)-off { // overflow-safe bound check
+	// overflow-safe bound check: vlen must fit into remaining bytes
+	if vlen < 0 || vlen > len(b)-off {
 		return 0, nil, ErrCorrupt
 	}
 
+	// zero-copy slice into original buffer
 	return gen, b[off : off+vlen], nil
 }
 
-// Bulk:
-//
-//	magic(4) | ver(1) | kind(1=bulk) | n(u32 be)
-//	keyLen(u16 be) | key(keyLen) | gen(u64 be) | vlen(u32 be) | payload(vlen) * n
+// BulkItem holds one member of a bulk-encoded set.
+// Key is materialized as a Go string (one allocation) for stable map key use.
 type BulkItem struct {
 	Key     string
 	Gen     uint64
 	Payload []byte
 }
 
+// EncodeBulk encodes a bulk set of items in a single value.
+//
+// Layout (big-endian):
+//
+//	magic(4) | ver(1) | kind(1=bulk) | n(u32)
+//	repeated n times:
+//	  keyLen(u16) | key(keyLen) | gen(u64) | vlen(u32) | payload(vlen)
+//
+// Notes:
+//   - keyLen must be in (0, 0xFFFF]; invalid lengths panic because this indicates
+//     a programmer error at the call site (not untrusted input).
 func EncodeBulk(items []BulkItem) []byte {
 	total := 4 + 1 + 1 + 4
 	for _, it := range items {
@@ -87,6 +134,7 @@ func EncodeBulk(items []BulkItem) []byte {
 	var buf bytes.Buffer
 	buf.Grow(total)
 
+	// header
 	buf.Write(magic4[:])
 	buf.WriteByte(version)
 	buf.WriteByte(kindBulk)
@@ -98,8 +146,10 @@ func EncodeBulk(items []BulkItem) []byte {
 	binary.BigEndian.PutUint32(u4[:], uint32(len(items)))
 	buf.Write(u4[:])
 
+	// items
 	for _, it := range items {
 		if l := len(it.Key); l == 0 || l > 0xFFFF {
+			// keys must be non-empty and <= 65535 bytes.
 			panic("cascache: invalid key length in bulk")
 		}
 		binary.BigEndian.PutUint16(u2[:], uint16(len(it.Key)))
@@ -117,6 +167,10 @@ func EncodeBulk(items []BulkItem) []byte {
 	return buf.Bytes()
 }
 
+// DecodeBulk parses a bulk entry into a slice of items.
+//
+// For each item, Payload is a zero-copy subslice of b. Key is converted to a
+// string (one allocation per item).
 func DecodeBulk(b []byte) ([]BulkItem, error) {
 	const hdr = 4 + 1 + 1 + 4
 	if len(b) < hdr || !hasMagic(b) || b[4] != version || b[5] != kindBulk {
@@ -124,8 +178,6 @@ func DecodeBulk(b []byte) ([]BulkItem, error) {
 	}
 
 	off := 6
-
-	// n
 	n := int(binary.BigEndian.Uint32(b[off : off+4]))
 	off += 4
 	if n < 0 {
@@ -143,7 +195,6 @@ func DecodeBulk(b []byte) ([]BulkItem, error) {
 		if klen <= 0 || klen > len(b)-off {
 			return nil, ErrCorrupt
 		}
-
 		// key (slice, then string alloc)
 		keyBytes := b[off : off+klen]
 		off += klen
@@ -165,6 +216,7 @@ func DecodeBulk(b []byte) ([]BulkItem, error) {
 			return nil, ErrCorrupt
 		}
 
+		// payload (zero-copy slice)
 		payload := b[off : off+vlen]
 		off += vlen
 
