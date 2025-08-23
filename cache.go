@@ -6,11 +6,11 @@ import (
 	"sort"
 	"time"
 
-	"github.com/unkn0wn-root/cascache/codecs"
+	cds "github.com/unkn0wn-root/cascache/codecs"
 	"github.com/unkn0wn-root/cascache/genstore"
 	"github.com/unkn0wn-root/cascache/internal/util"
 	"github.com/unkn0wn-root/cascache/internal/wire"
-	"github.com/unkn0wn-root/cascache/provider"
+	pr "github.com/unkn0wn-root/cascache/provider"
 )
 
 const (
@@ -20,8 +20,8 @@ const (
 
 type cache[V any] struct {
 	ns             string
-	provider       provider.Provider
-	codec          codecs.Codec[V]
+	provider       pr.Provider
+	codec          cds.Codec[V]
 	log            Logger
 	enabled        bool
 	defaultTTL     time.Duration
