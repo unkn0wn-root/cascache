@@ -1,6 +1,6 @@
 # cascache
 
-Provider-agnostic CAS (Compare-And-Set) cache with pluggable codecs and a pluggable generation store.
+Provider-agnostic CAS (**C**ompare-**A**nd-**S**et) cache with pluggable codecs and a pluggable generation store.
 Safe single-key reads (no stale values), optional bulk caching with read-side validation,
 and an opt‑in distributed mode for multi-replica deployments.
 
