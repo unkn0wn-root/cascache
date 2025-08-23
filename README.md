@@ -199,6 +199,8 @@ import "github.com/redis/go-redis/v9"
 
 rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})
 gs  := cascache.NewRedisGenStore(rdb, "user") // namespace should match Options.Namespace
+// or, with TTL:
+// gs  := gen.NewRedisGenStoreWithTTL(rdb, "user", 90*24*time.Hour) // with TTL to prevent growth
 
 cache, _ := cascache.New[User](cascache.Options[User]{
     Namespace: "user",
@@ -213,7 +215,9 @@ cache, _ := cascache.New[User](cascache.Options[User]{
 - Bulks: validated against shared generations across replicas.
 - Restarts: generations persist; valid entries remain valid.
 
-If you don’t use a distributed `GenStore`, consider disabling bulks or using a short `BulkTTL` in multi-replica deployments.
+> If you do not use a distributed GenStore in a multi-replica deployment,
+set Options.DisableBulk = true (or use a very short BulkTTL). Singles remain safe:
+they never return stale data.
 
 ---
 
