@@ -11,6 +11,8 @@ import (
 
 type SetCostFunc func(key string, raw []byte, isBulk bool, bulkCount int) int64
 
+type Cache[V any] = CAS[V] // just and alias -> cascache.Cache[User] or cascache.CAS[User]
+
 // CAS is the high-level, provider-agnostic cache API with CAS safety via per-key generations.
 // V is the caller's value type. Serialization is handled by a pluggable Codec[V].
 type CAS[V any] interface {
