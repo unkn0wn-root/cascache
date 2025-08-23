@@ -15,6 +15,8 @@ and an opt‑in distributed mode for multi-replica deployments.
 - [Codecs](#codecs)
 - [Distributed generations](#distributed-generations)
 - [API](#api)
+- [Type alias: Cache](#type-alias-cache)
+- [Performance notes](#performance-notes)
 
 ---
 
@@ -102,6 +104,8 @@ func readUser(ctx context.Context, c cascache.CAS[User], id string) (User, bool)
     return u, true
 }
 ```
+
+> **Alternative type name:** You can use `cascache.Cache[V]` instead of `cascache.CAS[V]`. See [Type alias: Cache](#type-alias-cache).
 
 ---
 
@@ -234,8 +238,31 @@ type CAS[V any] interface {
     SnapshotGens(keys []string) map[string]uint64
 }
 ```
+---
+
+## Type alias: Cache
+
+For readability, we provide a type alias:
+
+```go
+type Cache[V any] = CAS[V]
+```
+
+You may use either name—they are **identical types**. Example:
+
+```go
+var a cascache.CAS[User]
+var b cascache.Cache[User]
+
+a = b // ok
+b = a // ok
+```
+
+In examples we often use `CAS` to emphasize the CAS semantics, but `Cache` is equally valid and may read more naturally in your codebase.
 
 ---
+
+## Performance notes
 
 - **Time:** O(1) singles; O(n) bulk for n members.
 - **Allocations:** zero-copy wire decode; one `string` alloc per bulk item.
