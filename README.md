@@ -15,7 +15,7 @@ and an opt‑in distributed mode for multi-replica deployments.
 - [Codecs](#codecs)
 - [Distributed generations](#distributed-generations)
 - [API](#api)
-- [Type alias: Cache](#type-alias-cache)
+- [Cache Type alias](#cache-type-alias)
 - [Performance notes](#performance-notes)
 
 ---
@@ -105,7 +105,7 @@ func readUser(ctx context.Context, c cascache.CAS[User], id string) (User, bool)
 }
 ```
 
-> **Alternative type name:** You can use `cascache.Cache[V]` instead of `cascache.CAS[V]`. See [Type alias: Cache](#type-alias-cache).
+> **Alternative type name:** You can use `cascache.Cache[V]` instead of `cascache.CAS[V]`. See [Cache Type alias](#cache-type-alias).
 
 ---
 
@@ -240,7 +240,7 @@ type CAS[V any] interface {
 ```
 ---
 
-## Type alias: Cache
+## Cache Type Alias
 
 For readability, we provide a type alias:
 
@@ -248,7 +248,7 @@ For readability, we provide a type alias:
 type Cache[V any] = CAS[V]
 ```
 
-You may use either name—they are **identical types**. Example:
+You may use either name. They are **identical types**. Example:
 
 ```go
 var a cascache.CAS[User]

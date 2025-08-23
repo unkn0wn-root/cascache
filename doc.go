@@ -10,8 +10,8 @@
 //
 // Keys:
 //
-//	single:<ns>:<key>  — single entries
-//	bulk:<ns>:<hash>   — set-shaped entries (hash over sorted keys)
+//	single:<ns>:<key>  - single entries
+//	bulk:<ns>:<hash>   - set-shaped entries (hash over sorted keys)
 //
 // CAS pattern:
 //
