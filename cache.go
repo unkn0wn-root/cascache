@@ -6,8 +6,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/yourorg/cascache/internal/util"
-	"github.com/yourorg/cascache/internal/wire"
+	"github.com/unkn0wn-root/cascache/internal/util"
+	"github.com/unkn0wn-root/cascache/internal/wire"
 )
 
 const (
