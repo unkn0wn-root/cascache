@@ -11,8 +11,8 @@ type localGenEntry struct {
 	UpdatedAt time.Time
 }
 
-// LocalGenStore keeps generations in-process (the default).
-// It includes an optional cleanup loop to prune long-inactive entries.
+// LocalGenStore keeps generations in-process (default).
+// Optional cleanup loop to prune long-inactive entries.
 type LocalGenStore struct {
 	mu     sync.RWMutex
 	gens   map[string]localGenEntry
@@ -57,20 +57,24 @@ func (s *LocalGenStore) Snapshot(_ context.Context, k string) (uint64, error) {
 	return e.Gen, nil
 }
 
-func (s *LocalGenStore) SnapshotMany(ctx context.Context, ks []string) (map[string]uint64, error) {
+// SnapshotMany acquires the read lock once and reads all requested keys.
+// this avoids per-key lock/unlock overhead.
+func (s *LocalGenStore) SnapshotMany(_ context.Context, ks []string) (map[string]uint64, error) {
 	out := make(map[string]uint64, len(ks))
+	s.mu.RLock()
 	for _, k := range ks {
-		g, _ := s.Snapshot(ctx, k)
-		out[k] = g
+		out[k] = s.gens[k].Gen // zero value (0) if missing
 	}
+	s.mu.RUnlock()
 	return out, nil
 }
 
 func (s *LocalGenStore) Bump(_ context.Context, k string) (uint64, error) {
+	now := time.Now()
 	s.mu.Lock()
 	e := s.gens[k]
 	e.Gen++
-	e.UpdatedAt = time.Now()
+	e.UpdatedAt = now
 	s.gens[k] = e
 	s.mu.Unlock()
 	return e.Gen, nil
@@ -91,13 +95,13 @@ func (s *LocalGenStore) Cleanup(retention time.Duration) {
 	s.mu.Unlock()
 }
 
-func (s *LocalGenStore) Close(context.Context) error {
+func (s *LocalGenStore) Close(_ context.Context) error {
 	if s.stopCh != nil {
 		close(s.stopCh)
-		s.wg.Wait()
 		if s.ticker != nil {
-			s.ticker.Stop()
+			s.ticker.Stop() // stop ticker before waiting
 		}
+		s.wg.Wait()
 	}
 	return nil
 }
