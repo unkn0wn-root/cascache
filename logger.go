@@ -3,7 +3,7 @@ package cascache
 // Fields is a minimal structured field map for logs.
 type Fields map[string]any
 
-// Logger is a tiny leveled logger. Provide an adapter around your logging stack.
+// Logger is a tiny leveled logger. Provide an adapter around logging stack.
 // If Logger is nil in Options, logging is disabled.
 type Logger interface {
 	Debug(msg string, f Fields)
