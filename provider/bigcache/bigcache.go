@@ -5,11 +5,16 @@ import (
 	"time"
 
 	bc "github.com/allegro/bigcache/v3"
+
+	pr "github.com/unkn0wn-root/cascache/provider"
 )
 
-type Provider struct {
+// Note: BigCache has a global LifeWindow; it ignores per-entry TTLs passed to Set.
+type BigCache struct {
 	c *bc.BigCache
 }
+
+var _ pr.Provider = (*BigCache)(nil)
 
 type Config struct {
 	LifeWindow         time.Duration
@@ -19,7 +24,7 @@ type Config struct {
 	HardMaxCacheSizeMB int // ~ memory limit; 0 = unlimited
 }
 
-func New(cfg Config) (*Provider, error) {
+func New(cfg Config) (*BigCache, error) {
 	conf := bc.DefaultConfig(cfg.LifeWindow)
 	if cfg.CleanWindow > 0 {
 		conf.CleanWindow = cfg.CleanWindow
@@ -37,10 +42,10 @@ func New(cfg Config) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Provider{c: c}, nil
+	return &BigCache{c: c}, nil
 }
 
-func (p *Provider) Get(_ context.Context, key string) ([]byte, bool, error) {
+func (p *BigCache) Get(_ context.Context, key string) ([]byte, bool, error) {
 	b, err := p.c.Get(key)
 	if err == bc.ErrEntryNotFound {
 		return nil, false, nil
@@ -48,15 +53,15 @@ func (p *Provider) Get(_ context.Context, key string) ([]byte, bool, error) {
 	return b, err == nil, err
 }
 
-func (p *Provider) Set(_ context.Context, key string, value []byte, _ int64, _ time.Duration) (bool, error) {
-	// BigCache does not support per-entry TTL; uses global LifeWindow.
+func (p *BigCache) Set(_ context.Context, key string, value []byte, _ int64, _ time.Duration) (bool, error) {
+	// Per-entry TTL not supported; LifeWindow applies.
 	return true, p.c.Set(key, value)
 }
 
-func (p *Provider) Del(_ context.Context, key string) error {
+func (p *BigCache) Del(_ context.Context, key string) error {
 	return p.c.Delete(key)
 }
 
-func (p *Provider) Close(_ context.Context) error {
+func (p *BigCache) Close(_ context.Context) error {
 	return p.c.Close()
 }

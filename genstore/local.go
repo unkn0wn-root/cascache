@@ -6,8 +6,6 @@ import (
 	"time"
 )
 
-var _ GenStore = (*LocalGenStore)(nil)
-
 // localGenEntry holds the per-key generation and the time of the last bump.
 //
 // UpdatedAt is set only on bumps (writes). Reads do NOT modify timestamps,
@@ -39,6 +37,8 @@ type LocalGenStore struct {
 	// pruned by Cleanup. A non-positive retention disables pruning.
 	retention time.Duration
 }
+
+var _ GenStore = (*LocalGenStore)(nil)
 
 // NewLocalGenStore constructs a LocalGenStore.
 //

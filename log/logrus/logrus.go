@@ -5,9 +5,9 @@ import (
 	"github.com/unkn0wn-root/cascache"
 )
 
-var _ cascache.Logger = LogrusLogger{}
-
 type LogrusLogger struct{ E *logrus.Entry }
+
+var _ cascache.Logger = LogrusLogger{}
 
 func (l LogrusLogger) Debug(msg string, f cascache.Fields) {
 	l.E.WithFields(logrus.Fields(f)).Debug(msg)

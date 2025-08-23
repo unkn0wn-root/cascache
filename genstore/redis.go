@@ -9,8 +9,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-var _ GenStore = (*RedisGenStore)(nil)
-
 // RedisGenStore shares per-key generations across processes and survives restarts.
 // Optionally, a TTL can be applied to generation keys to prevent unbounded growth.
 // If a generation key expires, readers observe gen=0 and cache entries self-heal.
@@ -19,6 +17,8 @@ type RedisGenStore struct {
 	ns  string        // logical namespace; should match Options.Namespace
 	ttl time.Duration // optional TTL for generation keys; 0 disables expiry
 }
+
+var _ GenStore = (*RedisGenStore)(nil)
 
 // NewRedisGenStore creates a Redis-backed generation store without TTL.
 func NewRedisGenStore(client redis.UniversalClient, namespace string) *RedisGenStore {

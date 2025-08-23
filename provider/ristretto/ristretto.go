@@ -6,21 +6,25 @@ import (
 	"time"
 
 	rc "github.com/dgraph-io/ristretto"
+
+	pr "github.com/unkn0wn-root/cascache/provider"
 )
 
-type Provider struct {
+type Ristretto struct {
 	c *rc.Cache
 }
+
+var _ pr.Provider = (*Ristretto)(nil)
 
 type Config struct {
 	NumCounters int64
 	MaxCost     int64
 	BufferItems int64
 	Metrics     bool
-	// Cost in Ristretto is provided by the caller (cascache passes cost per Set).
+	// Note: cascache passes per-entry cost in Set; we don't need rc.Config.Cost.
 }
 
-func New(cfg Config) (*Provider, error) {
+func New(cfg Config) (*Ristretto, error) {
 	if cfg.NumCounters <= 0 || cfg.MaxCost <= 0 || cfg.BufferItems <= 0 {
 		return nil, errors.New("ristretto: invalid config")
 	}
@@ -33,37 +37,38 @@ func New(cfg Config) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Provider{c: c}, nil
+	return &Ristretto{c: c}, nil
 }
 
-func (p *Provider) Get(_ context.Context, key string) ([]byte, bool, error) {
+func (p *Ristretto) Get(_ context.Context, key string) ([]byte, bool, error) {
 	v, ok := p.c.Get(key)
 	if !ok {
 		return nil, false, nil
 	}
 	b, _ := v.([]byte)
 	if b == nil {
-		// self-heal: drop unexpected entry shape
+		// Self-heal: unexpected entry shape -> delete and miss.
 		p.c.Del(key)
 		return nil, false, nil
 	}
 	return b, true, nil
 }
 
-func (p *Provider) Set(_ context.Context, key string, value []byte, cost int64, ttl time.Duration) (bool, error) {
+func (p *Ristretto) Set(_ context.Context, key string, value []byte, cost int64, ttl time.Duration) (bool, error) {
+	// Ristretto can reject writes under pressure -> ok=false, err=nil.
 	return p.c.SetWithTTL(key, value, cost, ttl), nil
 }
 
-func (p *Provider) Del(_ context.Context, key string) error {
+func (p *Ristretto) Del(_ context.Context, key string) error {
 	p.c.Del(key)
 	return nil
 }
 
-func (p *Provider) Close(_ context.Context) error {
-	p.c.Wait()
-	p.c.Close()
+func (p *Ristretto) Close(_ context.Context) error {
+	p.c.Wait()  // flush pending sets
+	p.c.Close() // release resources
 	return nil
 }
 
-// Helper to expose metrics if desired by the application (not part of cascache.Provider).
-func (p *Provider) Metrics() *rc.Metrics { return p.c.Metrics }
+// Optional helper (not part of cascache.Provider).
+func (p *Ristretto) Metrics() *rc.Metrics { return p.c.Metrics }

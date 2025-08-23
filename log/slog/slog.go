@@ -9,9 +9,9 @@ import (
 	"github.com/unkn0wn-root/cascache"
 )
 
-var _ cascache.Logger = Logger{}
-
 type Logger struct{ L *stdslog.Logger }
+
+var _ cascache.Logger = Logger{}
 
 func (s Logger) Debug(msg string, f cascache.Fields) {
 	s.L.LogAttrs(context.Background(), stdslog.LevelDebug, msg, attrs(f)...)
