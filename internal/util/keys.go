@@ -7,12 +7,18 @@ import (
 	"strings"
 )
 
-// BulkKey returns a deterministic composite key of sorted members with a short hash.
+// BulkKey returns "prefix:<first16hex(sha256(sorted(keys)))>" and sorts a copy.
 func BulkKey(prefix string, keys []string) string {
 	s := make([]string, len(keys))
 	copy(s, keys)
 	sort.Strings(s)
-	joined := strings.Join(s, ",")
+	return BulkKeySorted(prefix, s)
+}
+
+// BulkKeySorted returns the bulk key for an already-sorted slice of keys.
+func BulkKeySorted(prefix string, sortedKeys []string) string {
+	joined := strings.Join(sortedKeys, ",")
 	sum := sha256.Sum256([]byte(joined))
-	return fmt.Sprintf("%s:%x", prefix, sum)[:len(prefix)+1+16] // prefix + ":" + first 16 hex chars
+	hex := fmt.Sprintf("%x", sum[:])
+	return fmt.Sprintf("%s:%s", prefix, hex[:16])
 }
