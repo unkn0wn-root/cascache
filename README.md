@@ -15,7 +15,6 @@ and an opt‑in distributed mode for multi-replica deployments.
 - [Codecs](#codecs)
 - [Distributed generations](#distributed-generations)
 - [API](#api)
-- [Performance & tuning](#performance--tuning)
 
 ---
 
