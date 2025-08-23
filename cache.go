@@ -6,8 +6,11 @@ import (
 	"sort"
 	"time"
 
+	"github.com/unkn0wn-root/cascache/codecs"
+	"github.com/unkn0wn-root/cascache/genstore"
 	"github.com/unkn0wn-root/cascache/internal/util"
 	"github.com/unkn0wn-root/cascache/internal/wire"
+	"github.com/unkn0wn-root/cascache/provider"
 )
 
 const (
@@ -17,8 +20,8 @@ const (
 
 type cache[V any] struct {
 	ns             string
-	provider       Provider
-	codec          Codec[V]
+	provider       provider.Provider
+	codec          codecs.Codec[V]
 	log            Logger
 	enabled        bool
 	defaultTTL     time.Duration
@@ -26,7 +29,7 @@ type cache[V any] struct {
 	sweepInterval  time.Duration
 	genRetention   time.Duration
 	computeSetCost SetCostFunc
-	gen            GenStore
+	gen            genstore.GenStore
 }
 
 func newCache[V any](opts Options[V]) (*cache[V], error) {

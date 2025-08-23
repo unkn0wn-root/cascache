@@ -3,6 +3,9 @@ package cascache
 import (
 	"context"
 	"time"
+
+	"github.com/unkn0wn-root/cascache/codecs"
+	"github.com/unkn0wn-root/cascache/provider"
 )
 
 type SetCostFunc func(key string, raw []byte, isBulk bool, bulkCount int) int64
@@ -32,8 +35,8 @@ type CAS[V any] interface {
 type Options[V any] struct {
 	// Required
 	Namespace string // logical namespace to avoid collisions. e.g. "user", "profile", "order"
-	Provider  Provider
-	Codec     Codec[V]
+	Provider  provider.Provider
+	Codec     codecs.Codec[V]
 
 	Logger          Logger        // if nil, NopLogger is used
 	DefaultTTL      time.Duration // singles; 0 => 10m
