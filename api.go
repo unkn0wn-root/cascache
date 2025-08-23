@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+type SetCostFunc func(key string, raw []byte, isBulk bool, bulkCount int) int64
+
 // CAS is the high-level, provider-agnostic cache API with CAS safety via per-key generations.
 // V is the caller's value type. Serialization is handled by a pluggable Codec[V].
 type CAS[V any] interface {
@@ -24,8 +26,6 @@ type CAS[V any] interface {
 	SnapshotGen(key string) uint64
 	SnapshotGens(keys []string) map[string]uint64
 }
-
-type SetCostFunc func(key string, raw []byte, isBulk bool, bulkCount int) int64
 
 // Options tune the behavior of the generic CAS cache.
 // Only Namespace and Provider are required; others have sensible defaults.
