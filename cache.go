@@ -7,7 +7,7 @@ import (
 	"time"
 
 	cds "github.com/unkn0wn-root/cascache/codecs"
-	"github.com/unkn0wn-root/cascache/genstore"
+	gen "github.com/unkn0wn-root/cascache/genstore"
 	"github.com/unkn0wn-root/cascache/internal/util"
 	"github.com/unkn0wn-root/cascache/internal/wire"
 	pr "github.com/unkn0wn-root/cascache/provider"
@@ -29,7 +29,7 @@ type cache[V any] struct {
 	sweepInterval  time.Duration
 	genRetention   time.Duration
 	computeSetCost SetCostFunc
-	gen            genstore.GenStore
+	gen            gen.GenStore
 }
 
 func newCache[V any](opts Options[V]) (*cache[V], error) {
@@ -67,7 +67,7 @@ func newCache[V any](opts Options[V]) (*cache[V], error) {
 		c.gen = opts.GenStore
 	} else {
 		// default to in-process generations with periodic cleanup
-		c.gen = NewLocalGenStore(c.sweepInterval, c.genRetention)
+		c.gen = gen.NewLocalGenStore(c.sweepInterval, c.genRetention)
 	}
 
 	return c, nil

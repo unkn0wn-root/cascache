@@ -5,6 +5,7 @@ import (
 	"time"
 
 	cds "github.com/unkn0wn-root/cascache/codecs"
+	gen "github.com/unkn0wn-root/cascache/genstore"
 	pr "github.com/unkn0wn-root/cascache/provider"
 )
 
@@ -45,6 +46,7 @@ type Options[V any] struct {
 	GenRetention    time.Duration // 0 => 30d
 	Disabled        bool          // default false (enabled)
 	ComputeSetCost  SetCostFunc   // default 1
+	GenStore        gen.GenStore  // nil => LocalGenStore (in-process)
 }
 
 func New[V any](opts Options[V]) (CAS[V], error) {
