@@ -5,6 +5,8 @@ import (
 	"go.uber.org/zap"
 )
 
+var _ cascache.Logger = ZapLogger{}
+
 type ZapLogger struct{ L *zap.Logger }
 
 func (z ZapLogger) Debug(msg string, f cascache.Fields) { z.L.Debug(msg, zf(f)...) }

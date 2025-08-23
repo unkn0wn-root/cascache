@@ -9,6 +9,8 @@ import (
 	"github.com/unkn0wn-root/cascache"
 )
 
+var _ cascache.Logger = Logger{}
+
 type Logger struct{ L *stdslog.Logger }
 
 func (s Logger) Debug(msg string, f cascache.Fields) {

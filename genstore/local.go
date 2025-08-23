@@ -1,7 +1,3 @@
-// Package genstore contains generation store implementations.
-// A generation store maintains a monotonically increasing counter per logical key.
-// The counter is used by cascache to provide CAS (compare-and-set) safety and
-// read-side validation (no stale single-key reads).
 package genstore
 
 import (
@@ -9,6 +5,8 @@ import (
 	"sync"
 	"time"
 )
+
+var _ GenStore = (*LocalGenStore)(nil)
 
 // localGenEntry holds the per-key generation and the time of the last bump.
 //
@@ -24,12 +22,11 @@ type localGenEntry struct {
 // Optionally starts a background cleanup goroutine that periodically prunes
 // keys whose generation hasn't been bumped for at least `retention` duration.
 //
-// Concurrency:
 //   - Reads take a shared RLock (Snapshot, SnapshotMany).
 //   - Bumps take an exclusive Lock and are O(1).
 //   - Cleanup takes an exclusive Lock and scans the map.
 //
-// Context parameters are accepted to satisfy the GenStore interface, but are
+// Ctx parameters are accepted to satisfy the GenStore interface, but are
 // ignored in this implementation because all operations are local and non-blocking.
 type LocalGenStore struct {
 	mu     sync.RWMutex
