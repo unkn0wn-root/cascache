@@ -39,7 +39,7 @@ type Options[V any] struct {
 	BulkTTL         time.Duration                                                  // default bulk entry TTL (if SetBulkWithGens ttl == 0)
 	CleanupInterval time.Duration                                                  // sweep interval for stale generation metadata; default 1h
 	GenRetention    time.Duration                                                  // prune generations not bumped for this long; default 30d
-	Enabled         bool                                                           // default true
+	Disabled        bool                                                           // default true
 	ComputeSetCost  func(key string, raw []byte, isBulk bool, bulkCount int) int64 // default returns 1
 }
 

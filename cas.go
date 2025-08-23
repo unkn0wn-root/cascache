@@ -47,65 +47,49 @@ type cache[V any] struct {
 }
 
 func newCache[V any](opts Options[V]) (*cache[V], error) {
-	if opts.Provider == nil {
-		return nil, fmt.Errorf("cascache: provider is required")
-	}
-	if opts.Codec == nil {
-		return nil, fmt.Errorf("cascache: codec is required")
-	}
-	if opts.Namespace == "" {
-		return nil, fmt.Errorf("cascache: namespace is required")
-	}
-	c := &cache[V]{
-		ns:       opts.Namespace,
-		provider: opts.Provider,
-		codec:    opts.Codec,
-		log:      opts.Logger,
-		enabled:  true,
-		gens:     make(map[string]genEntry),
-	}
-	if opts.Enabled == false {
-		c.enabled = false
-	}
-	if c.log == nil {
-		c.log = NopLogger{}
-	}
+    if opts.Provider == nil {
+        return nil, fmt.Errorf("cascache: provider is required")
+    }
+    if opts.Codec == nil {
+        return nil, fmt.Errorf("cascache: codec is required")
+    }
+    if opts.Namespace == "" {
+        return nil, fmt.Errorf("cascache: namespace is required")
+    }
 
-	if opts.DefaultTTL > 0 {
-		c.defaultTTL = opts.DefaultTTL
-	} else {
-		c.defaultTTL = 10 * time.Minute
-	}
-	if opts.BulkTTL > 0 {
-		c.bulkTTL = opts.BulkTTL
-	} else {
-		c.bulkTTL = 10 * time.Minute
-	}
-	if opts.CleanupInterval > 0 {
-		c.sweepInterval = opts.CleanupInterval
-	} else {
-		c.sweepInterval = defaultSweep
-	}
-	if opts.GenRetention > 0 {
-		c.genRetention = opts.GenRetention
-	} else {
-		c.genRetention = defaultGenRetention
-	}
-	if opts.ComputeSetCost != nil {
-		c.computeSetCost = opts.ComputeSetCost
-	} else {
-		c.computeSetCost = func(_ string, _ []byte, _ bool, _ int) int64 { return 1 }
-	}
+    c := &cache[V]{
+        ns:       opts.Namespace,
+        provider: opts.Provider,
+        codec:    opts.Codec,
+        gens:     make(map[string]genEntry),
+    }
 
-	// start cleanup goroutine only when enabled
-	if c.enabled {
-		c.ticker = time.NewTicker(c.sweepInterval)
-		c.stopCh = make(chan struct{})
-		c.closeWg.Add(1)
-		go c.cleanupLoop()
-	}
+    coalesce := func[T comparable](v, def T) T {
+        var zero T
+        if v == zero {
+            return def
+        }
+        return v
+    }
 
-	return c, nil
+    var defaultCost func(string, []byte, bool, int) int64 = func(_ string, _ []byte, _ bool, _ int) int64 { return 1 }
+
+    c.log            = coalesce[Logger](opts.Logger, NopLogger{})
+    c.defaultTTL     = coalesce[time.Duration](opts.DefaultTTL,      10*time.Minute)
+    c.bulkTTL        = coalesce[time.Duration](opts.BulkTTL,         10*time.Minute)
+    c.sweepInterval  = coalesce[time.Duration](opts.CleanupInterval, defaultSweep)
+    c.genRetention   = coalesce[time.Duration](opts.GenRetention,    defaultGenRetention)
+    c.computeSetCost = coalesce[func(string, []byte, bool, int) int64](opts.ComputeSetCost, defaultCost)
+
+    c.enabled = !opts.Disabled
+
+    if c.enabled {
+        c.ticker = time.NewTicker(c.sweepInterval)
+        c.stopCh = make(chan struct{})
+        c.closeWg.Add(1)
+        go c.cleanupLoop()
+    }
+    return c, nil
 }
 
 func (c *cache[V]) Enabled() bool { return c.enabled }
