@@ -124,7 +124,7 @@ type BulkItem struct {
 //
 // Notes:
 //   - keyLen must be in (0, 0xFFFF]; invalid lengths panic because this indicates
-//     a programmer error at the call site (not untrusted input).
+//     error at the call site (not untrusted input).
 func EncodeBulk(items []BulkItem) []byte {
 	total := 4 + 1 + 1 + 4
 	for _, it := range items {

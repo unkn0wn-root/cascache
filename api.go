@@ -41,6 +41,7 @@ type Options[V any] struct {
 	Provider  pr.Provider
 	Codec     c.Codec[V]
 
+	// Optional
 	Logger          Logger        // if nil, NopLogger is used
 	DefaultTTL      time.Duration // singles; 0 => 10m
 	BulkTTL         time.Duration // bulks; 0 => 10m

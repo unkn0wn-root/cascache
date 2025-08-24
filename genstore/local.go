@@ -25,7 +25,7 @@ type localGenEntry struct {
 //   - Cleanup takes an exclusive Lock and scans the map.
 //
 // Ctx parameters are accepted to satisfy the GenStore interface, but are
-// ignored in this implementation because all operations are local and non-blocking.
+// ignored because all operations are local and non-blocking.
 type LocalGenStore struct {
 	mu     sync.RWMutex
 	gens   map[string]localGenEntry
@@ -139,7 +139,7 @@ func (s *LocalGenStore) Close(_ context.Context) error {
 	if s.stopCh != nil {
 		close(s.stopCh)
 		if s.ticker != nil {
-			s.ticker.Stop() // stop ticker before waiting
+			s.ticker.Stop()
 		}
 		s.wg.Wait()
 	}
