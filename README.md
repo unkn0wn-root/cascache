@@ -1,6 +1,6 @@
 # cascache
 
-Provider-agnostic CAS (**C**ompare-**A**nd-**S**et) cache with pluggable codecs and a pluggable generation store.
+Provider-agnostic CAS like (**C**ompare-**A**nd-**S**et or generation-guarded conditional set) cache with pluggable codecs and a pluggable generation store.
 Safe single-key reads (no stale values), optional bulk caching with read-side validation,
 and an opt‑in distributed mode for multi-replica deployments.
 
@@ -193,6 +193,9 @@ You can drop in Msgpack/CBOR/Proto or decorators (compression/encryption). CAS i
 
 Local generations are correct for singles but bulk validation can be stale across replicas.
 Use a shared `GenStore` to eliminate this window and survive restarts.
+
+>Important: LocalGenStore is single-process only. In multi-replica setups, both singles and bulks can be stale on nodes that haven’t observed the bump.
+Use a shared GenStore (e.g., Redis) for cross-replica correctness or run a single instance.
 
 ```go
 import "github.com/redis/go-redis/v9"

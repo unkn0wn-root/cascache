@@ -101,21 +101,25 @@ func (c *cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
 	if !c.enabled {
 		return zero, false, nil
 	}
+
 	k := c.singleKey(key)
 	raw, ok, err := c.provider.Get(ctx, k)
 	if err != nil || !ok {
 		return zero, false, err
 	}
+
 	gen, payload, err := wire.DecodeSingle(raw)
 	if err != nil {
 		_ = c.provider.Del(ctx, k) // self-heal corrupt
 		return zero, false, nil
 	}
+
 	// validate generation
 	if gen != c.snapshotGen(k) {
 		_ = c.provider.Del(ctx, k)
 		return zero, false, nil
 	}
+
 	v, err := c.codec.Decode(payload)
 	if err != nil {
 		_ = c.provider.Del(ctx, k) // self-heal
@@ -130,19 +134,23 @@ func (c *cache[V]) SetWithGen(ctx context.Context, key string, value V, observed
 	if !c.enabled {
 		return nil
 	}
+
 	if ttl == 0 {
 		ttl = c.defaultTTL
 	}
+
 	k := c.singleKey(key)
 	if c.snapshotGen(k) != observedGen {
 		// generation moved; skip stale write
 		c.log.Debug("SetWithGen skipped (gen mismatch)", Fields{"key": key, "obs": observedGen})
 		return nil
 	}
+
 	payload, err := c.codec.Encode(value)
 	if err != nil {
 		return err
 	}
+
 	wireb := wire.EncodeSingle(observedGen, payload)
 	ok, err := c.provider.Set(ctx, k, wireb, c.computeSetCost(k, wireb, false, 1), ttl)
 	if err != nil {
@@ -159,6 +167,7 @@ func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 	if !c.enabled {
 		return nil
 	}
+
 	k := c.singleKey(key)
 	newGen := c.bumpGen(k)
 	_ = c.provider.Del(ctx, k)
@@ -176,6 +185,7 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 		missing = append(missing, keys...)
 		return out, missing, nil
 	}
+
 	if len(keys) == 0 {
 		return out, nil, nil
 	}
@@ -236,6 +246,7 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 		if sttl == 0 {
 			sttl = c.defaultTTL
 		}
+
 		for k, v := range items {
 			if obs, ok := observedGens[k]; ok {
 				_ = c.SetWithGen(ctx, k, v, obs, sttl)
@@ -318,6 +329,7 @@ func (c *cache[V]) SnapshotGens(keys []string) map[string]uint64 {
 	for i, k := range keys {
 		storage[i] = c.singleKey(k)
 	}
+
 	m, err := c.gen.SnapshotMany(context.Background(), storage)
 	if err != nil {
 		// conservative fallback: one by one
@@ -327,6 +339,7 @@ func (c *cache[V]) SnapshotGens(keys []string) map[string]uint64 {
 		}
 		return out
 	}
+
 	out := make(map[string]uint64, len(keys))
 	for _, k := range keys {
 		out[k] = m[c.singleKey(k)]
@@ -429,6 +442,7 @@ func uniqSorted(keys []string) []string {
 	for _, k := range keys {
 		m[k] = struct{}{}
 	}
+
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
