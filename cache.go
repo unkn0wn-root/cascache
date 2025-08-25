@@ -170,8 +170,10 @@ func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 // otherwise falls back to single reads. Missing keys are returned separately.
 func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []string, error) {
 	out := make(map[string]V, len(keys))
+	missing := make([]string, 0, len(keys))
+
 	if !c.enabled {
-		missing := append([]string(nil), keys...)
+		missing = append(missing, keys...)
 		return out, missing, nil
 	}
 	if len(keys) == 0 {
@@ -191,15 +193,13 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 		return out, missing, nil
 	}
 
-	// sort a copy once; reuse for both bulk key and deterministic decode-order mapping
-	sorted := make([]string, len(keys))
-	copy(sorted, keys)
-	sort.Strings(sorted)
+	// unique + sorted for key + validation
+	us := uniqSorted(keys) // unique + sorted
+	bk := c.bulkKeySorted(us)
 
-	bulkKey := c.bulkKeySorted(sorted)
-	if raw, ok, err := c.provider.Get(ctx, bulkKey); err == nil && ok {
+	if raw, ok, err := c.provider.Get(ctx, bk); err == nil && ok {
 		items, err := wire.DecodeBulk(raw)
-		if err == nil && c.bulkValid(items) {
+		if err == nil && c.bulkValid(us, items) {
 			byKey := make(map[string]V, len(items))
 			genByKey := make(map[string]uint64, len(items))
 			for _, it := range items {
@@ -210,24 +210,29 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 				byKey[it.Key] = val
 				genByKey[it.Key] = it.Gen
 			}
-			var missing []string
+
+			// Build response in caller order (preserves duplicates)
 			for _, k := range keys {
 				if v, ok := byKey[k]; ok {
 					out[k] = v
-					// opportunistic single warmup (CAS-protected)
-					_ = c.SetWithGen(ctx, k, v, genByKey[k], c.defaultTTL)
 				} else {
 					missing = append(missing, k)
 				}
 			}
+
+			// Warm singles once per unique key
+			for _, k := range us {
+				if v, ok := byKey[k]; ok {
+					_ = c.SetWithGen(ctx, k, v, genByKey[k], c.defaultTTL)
+				}
+			}
+
 			return out, missing, nil
 		}
-		// stale or corrupt bulk; drop
-		_ = c.provider.Del(ctx, bulkKey)
+		_ = c.provider.Del(ctx, bk) // self-heal on corrupt/stale/missing
 	}
 
 	// Fallback: try singles
-	var missing []string
 	for _, k := range keys {
 		if v, ok, _ := c.Get(ctx, k); ok {
 			out[k] = v
@@ -367,6 +372,38 @@ func (c *cache[V]) bumpGen(storageKey string) uint64 {
 	return g
 }
 
+// - Every requested key must exist in the bulk and be fresh (gen equal to current).
+// - Extras in the bulk are ignored.
+// - The input slice is the already-sorted (but not deduplicated) requested keys.
+func (c *cache[V]) bulkValid(sortedRequested []string, items []wire.BulkItem) bool {
+	itemGen := make(map[string]uint64, len(items))
+	for _, it := range items {
+		itemGen[it.Key] = it.Gen // duplicates in stored items: last wins
+	}
+
+	storage := make([]string, len(sortedRequested))
+	for i, k := range sortedRequested {
+		storage[i] = c.singleKey(k)
+	}
+
+	gens, err := c.gen.SnapshotMany(context.Background(), storage)
+	if err != nil {
+		c.log.Warn("gen snapshot many failed", Fields{"err": err})
+		return false
+	}
+
+	for _, k := range sortedRequested {
+		g, ok := itemGen[k]
+		if !ok {
+			return false // missing member in bulk
+		}
+		if g != gens[c.singleKey(k)] {
+			return false // stale member
+		}
+	}
+	return true
+}
+
 // singleKey returns the storage key for a logical key within the namespace.
 func (c *cache[V]) singleKey(userKey string) string {
 	// isolate by namespace
@@ -379,14 +416,17 @@ func (c *cache[V]) bulkKeySorted(sortedKeys []string) string {
 	return util.BulkKeySorted("bulk:"+c.ns, sortedKeys)
 }
 
-// bulkValid validates that each bulk item’s generation equals the current generation.
-func (c *cache[V]) bulkValid(items []wire.BulkItem) bool {
-	for _, it := range items {
-		if it.Gen != c.snapshotGen(c.singleKey(it.Key)) {
-			return false
-		}
+func uniqSorted(keys []string) []string {
+	m := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		m[k] = struct{}{}
 	}
-	return true
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func isLocalGenStore(gs gen.GenStore) bool {
