@@ -180,19 +180,12 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 		return out, nil, nil
 	}
 
-	// Bulk disabled -> use singles.
+	// Bulk disabled -> singles with memoization
 	if !c.bulkEnabled {
-		for _, k := range keys {
-			if v, ok, _ := c.Get(ctx, k); ok {
-				out[k] = v
-			} else {
-				missing = append(missing, k)
-			}
-		}
+		missing = c.memoizedSingles(ctx, keys, out)
 		return out, missing, nil
 	}
 
-	// unique + sorted for key + validation
 	us := uniqSorted(keys)
 	bk := c.bulkKeySorted(us)
 
@@ -202,15 +195,13 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 			byKey := make(map[string]V, len(items))
 			genByKey := make(map[string]uint64, len(items))
 			for _, it := range items {
-				val, err := c.codec.Decode(it.Payload)
+				v, err := c.codec.Decode(it.Payload)
 				if err != nil {
 					continue
 				}
-				byKey[it.Key] = val
+				byKey[it.Key] = v
 				genByKey[it.Key] = it.Gen
 			}
-
-			// Build response in caller order (preserves duplicates)
 			for _, k := range keys {
 				if v, ok := byKey[k]; ok {
 					out[k] = v
@@ -218,26 +209,18 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 					missing = append(missing, k)
 				}
 			}
-
-			// Warm singles once per unique key
-			for _, k := range us {
+			for _, k := range us { // warm once per unique
 				if v, ok := byKey[k]; ok {
 					_ = c.SetWithGen(ctx, k, v, genByKey[k], c.defaultTTL)
 				}
 			}
 			return out, missing, nil
 		}
-		_ = c.provider.Del(ctx, bk) // self-heal on corrupt/stale/missing
+		_ = c.provider.Del(ctx, bk) // self-heal
 	}
 
-	// Fallback: try singles
-	for _, k := range keys {
-		if v, ok, _ := c.Get(ctx, k); ok {
-			out[k] = v
-		} else {
-			missing = append(missing, k)
-		}
-	}
+	// Fallback: singles with memoization
+	missing = c.memoizedSingles(ctx, keys, out)
 	return out, missing, nil
 }
 
@@ -400,6 +383,33 @@ func (c *cache[V]) bulkValid(sortedRequested []string, items []wire.BulkItem) bo
 		}
 	}
 	return true
+}
+
+// memoizedSingles does at most one Get per unique key,
+// fills 'out', and returns 'missing' preserving caller order & duplicates.
+func (c *cache[V]) memoizedSingles(ctx context.Context, keys []string, out map[string]V) []string {
+	type res struct {
+		v  V
+		ok bool
+	}
+
+	us := uniqSorted(keys) // unique set for memoization
+	tmp := make(map[string]res, len(us))
+	for _, k := range us {
+		v, ok, _ := c.Get(ctx, k) // ignore err → treat as miss
+		tmp[k] = res{v: v, ok: ok}
+	}
+
+	missing := make([]string, 0, len(keys))
+	for _, k := range keys { // preserve caller order & duplicates
+		r := tmp[k]
+		if r.ok {
+			out[k] = r.v
+		} else {
+			missing = append(missing, k)
+		}
+	}
+	return missing
 }
 
 // singleKey returns the storage key for a logical key within the namespace.
