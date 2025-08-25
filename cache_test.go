@@ -232,7 +232,7 @@ func TestBulkHappyAndStale(t *testing.T) {
 		t.Fatalf("expected 'c' present after bulk rejection")
 	}
 
-	// Ensure the bulk was dropped from provider on stale validation.
+	// Ensure the stale bulk was dropped from provider.
 	for k := range mp.m {
 		if strings.HasPrefix(k, "bulk:user:") {
 			t.Fatalf("stale bulk should have been deleted, found %q", k)
@@ -276,5 +276,110 @@ func TestBulkDisabled(t *testing.T) {
 		if strings.HasPrefix(k, "bulk:user:") {
 			t.Fatalf("bulk disabled but found bulk key %q written", k)
 		}
+	}
+}
+
+// TestBulkOrderInsensitiveHit: Same set, different order → same bulk key, bulk hit.
+func TestBulkOrderInsensitiveHit(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	cc := newTestCache(t, "user", mp, nil)
+	defer cc.Close(ctx)
+
+	impl := mustImpl(t, cc)
+
+	// Write a bulk for {u1,u3,u4}
+	items := map[string]user{
+		"u1": {ID: "u1", Name: "A"},
+		"u3": {ID: "u3", Name: "B"},
+		"u4": {ID: "u4", Name: "C"},
+	}
+	snap := cc.SnapshotGens([]string{"u1", "u3", "u4"})
+	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
+		t.Fatalf("SetBulkWithGens: %v", err)
+	}
+
+	// Remove singles so GetBulk must rely on the bulk entry
+	for k := range items {
+		_ = impl.provider.Del(ctx, impl.singleKey(k))
+	}
+
+	// Request same set, different order → should hit bulk, no missing
+	got, missing, err := cc.GetBulk(ctx, []string{"u3", "u1", "u4"})
+	if err != nil {
+		t.Fatalf("GetBulk: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("expected no missing, got %v", missing)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 values, got %d (%v)", len(got), got)
+	}
+
+	// Bulk should remain (valid hit)
+	foundBulk := false
+	for k := range mp.m {
+		if strings.HasPrefix(k, "bulk:user:") {
+			foundBulk = true
+			break
+		}
+	}
+	if !foundBulk {
+		t.Fatalf("expected bulk entry to remain after valid hit")
+	}
+}
+
+// TestBulkDuplicateRequestHit: Request has duplicates → still hits unique-set bulk.
+func TestBulkDuplicateRequestHit(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	cc := newTestCache(t, "user", mp, nil)
+	defer cc.Close(ctx)
+
+	impl := mustImpl(t, cc)
+
+	// Write a bulk for {u1,u3,u4}
+	items := map[string]user{
+		"u1": {ID: "u1", Name: "A"},
+		"u3": {ID: "u3", Name: "B"},
+		"u4": {ID: "u4", Name: "C"},
+	}
+	snap := cc.SnapshotGens([]string{"u1", "u3", "u4"})
+	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
+		t.Fatalf("SetBulkWithGens: %v", err)
+	}
+
+	// Remove singles so GetBulk must rely on the bulk entry
+	for k := range items {
+		_ = impl.provider.Del(ctx, impl.singleKey(k))
+	}
+
+	// Request contains duplicates → should still hit the same bulk key
+	req := []string{"u1", "u3", "u3", "u4"}
+	got, missing, err := cc.GetBulk(ctx, req)
+	if err != nil {
+		t.Fatalf("GetBulk dup: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("expected no missing for dup request, got %v", missing)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 unique results, got %d (%v)", len(got), got)
+	}
+}
+
+// TestBulkKeyCanonicalization: equal sets (order/dups ignored) produce same bulk key.
+func TestBulkKeyCanonicalization(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	cc := newTestCache(t, "user", mp, nil)
+	defer cc.Close(ctx)
+
+	impl := mustImpl(t, cc)
+
+	k1 := impl.bulkKeySorted(uniqSorted([]string{"u3", "u1", "u4"}))
+	k2 := impl.bulkKeySorted(uniqSorted([]string{"u1", "u3", "u3", "u4"}))
+	if k1 != k2 {
+		t.Fatalf("bulk keys differ for equivalent sets: %q vs %q", k1, k2)
 	}
 }
