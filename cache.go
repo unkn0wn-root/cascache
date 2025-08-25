@@ -182,7 +182,6 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 
 	// Bulk disabled -> use singles.
 	if !c.bulkEnabled {
-		var missing []string
 		for _, k := range keys {
 			if v, ok, _ := c.Get(ctx, k); ok {
 				out[k] = v
@@ -194,7 +193,7 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 	}
 
 	// unique + sorted for key + validation
-	us := uniqSorted(keys) // unique + sorted
+	us := uniqSorted(keys)
 	bk := c.bulkKeySorted(us)
 
 	if raw, ok, err := c.provider.Get(ctx, bk); err == nil && ok {
@@ -226,7 +225,6 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 					_ = c.SetWithGen(ctx, k, v, genByKey[k], c.defaultTTL)
 				}
 			}
-
 			return out, missing, nil
 		}
 		_ = c.provider.Del(ctx, bk) // self-heal on corrupt/stale/missing
