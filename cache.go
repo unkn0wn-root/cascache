@@ -294,7 +294,11 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 			Payload: payload,
 		})
 	}
-	wireb := wire.EncodeBulk(wireItems)
+
+	wireb, err := wire.EncodeBulk(wireItems)
+	if err != nil {
+		return err
+	}
 
 	// Use sorted keys for bulk key too
 	bk := c.bulkKeySorted(keys)

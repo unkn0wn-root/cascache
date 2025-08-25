@@ -1,7 +1,9 @@
 package cascache
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"strings"
 	"testing"
 	"time"
@@ -381,5 +383,110 @@ func TestBulkKeyCanonicalization(t *testing.T) {
 	k2 := impl.bulkKeySorted(uniqSorted([]string{"u1", "u3", "u3", "u4"}))
 	if k1 != k2 {
 		t.Fatalf("bulk keys differ for equivalent sets: %q vs %q", k1, k2)
+	}
+}
+
+// DecodeSingle must reject trailing bytes (strict framing).
+func TestWireDecodeSingleRejectsTrailing(t *testing.T) {
+	b := wire.EncodeSingle(7, []byte("x"))
+	b = append(b, 0xDE, 0xAD) // trailing junk
+	if _, _, err := wire.DecodeSingle(b); err == nil {
+		t.Fatalf("DecodeSingle should reject trailing bytes")
+	}
+}
+
+// DecodeBulk must reject trailing bytes (strict framing).
+func TestWireDecodeBulkRejectsTrailing(t *testing.T) {
+	enc, err := wire.EncodeBulk([]wire.BulkItem{
+		{Key: "k", Gen: 1, Payload: []byte("v")},
+	})
+	if err != nil {
+		t.Fatalf("EncodeBulk: %v", err)
+	}
+	enc = append(enc, 0xBE, 0xEF)
+	if _, err := wire.DecodeBulk(enc); err == nil {
+		t.Fatalf("DecodeBulk should reject trailing bytes")
+	}
+}
+
+// EncodeBulk should error on invalid key lengths (0 and > 0xFFFF),
+// and succeed on boundary length 0xFFFF.
+func TestEncodeBulkKeyLengthValidation(t *testing.T) {
+	// Empty key -> error
+	if _, err := wire.EncodeBulk([]wire.BulkItem{
+		{Key: "", Gen: 1, Payload: []byte("x")},
+	}); err == nil {
+		t.Fatalf("EncodeBulk should error on empty key")
+	}
+
+	// Too long key (65536) -> error
+	longKey := strings.Repeat("a", 0x10000)
+	if _, err := wire.EncodeBulk([]wire.BulkItem{
+		{Key: longKey, Gen: 1, Payload: []byte("x")},
+	}); err == nil {
+		t.Fatalf("EncodeBulk should error on key length > 0xFFFF")
+	}
+
+	// Boundary (65535) -> ok
+	boundaryKey := strings.Repeat("b", 0xFFFF)
+	if _, err := wire.EncodeBulk([]wire.BulkItem{
+		{Key: boundaryKey, Gen: 1, Payload: []byte("x")},
+	}); err != nil {
+		t.Fatalf("EncodeBulk should succeed at 0xFFFF key length, got err: %v", err)
+	}
+}
+
+// Bogus n in bulk header should not preallocate huge capacity and should error cleanly.
+func TestDecodeBulkFakeNNotPrealloc(t *testing.T) {
+	var buf bytes.Buffer
+	// magic "CASC"
+	buf.Write([]byte{'C', 'A', 'S', 'C'})
+	// version
+	buf.WriteByte(1)
+	// kind bulk
+	buf.WriteByte(2)
+	// n = 0xFFFFFFFF
+	var u4 [4]byte
+	binary.BigEndian.PutUint32(u4[:], ^uint32(0))
+	buf.Write(u4[:])
+	// no items
+
+	if _, err := wire.DecodeBulk(buf.Bytes()); err == nil {
+		t.Fatalf("DecodeBulk should fail on wrong n with insufficient bytes")
+	}
+}
+
+// Self-heal when a valid single has trailing bytes appended in the provider.
+func TestSelfHealOnGenMismatchSingle(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	cc := newTestCache(t, "user", mp, nil)
+	defer cc.Close(ctx)
+
+	impl := mustImpl(t, cc)
+	k := "gen-mismatch"
+	storageKey := impl.singleKey(k)
+
+	// GenStore has never been bumped for this key -> snapshot is 0.
+	val := user{ID: "u1", Name: "Mismatch"}
+	payload, err := c.JSONCodec[user]{}.Encode(val)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	// Write a valid frame with gen=1 (mismatches snapshot=0).
+	b := wire.EncodeSingle(1, payload)
+	if ok, err := impl.provider.Set(ctx, storageKey, b, 1, time.Minute); err != nil || !ok {
+		t.Fatalf("inject single: ok=%v err=%v", ok, err)
+	}
+
+	// Get should detect gen mismatch, delete, and miss.
+	if _, ok, err := cc.Get(ctx, k); err != nil || ok {
+		t.Fatalf("expected miss on gen mismatch, ok=%v err=%v", ok, err)
+	}
+
+	// Ensure self-heal actually deleted the bad entry.
+	if _, ok, _ := mp.Get(ctx, storageKey); ok {
+		t.Fatalf("gen-mismatch single was not deleted by self-heal")
 	}
 }

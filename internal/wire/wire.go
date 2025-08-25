@@ -11,24 +11,29 @@
 //   - Decoders are written for bounds safety: every slice operation is preceded by
 //     length checks; on any mismatch they return ErrCorrupt.
 //   - Decoders return subslices of the original buffer for payloads (zero-copy).
+//     NOTE: callers must keep the original []byte alive while using the subslices,
+//     or copy if they need to persist beyond the source buffer’s lifetime.
 //   - Encode paths pre-compute capacity and bytes.Buffer.Grow to avoid realloc.
 //   - Bulk decode allocates exactly one string per item to materialize the key
 //     (stable map key semantics).
+//
+// Strict framing:
+//   - Decoders require that a frame consume the entire buffer (no trailing bytes).
+//     This detects corruption/foreign writers early.
 package wire
 
 import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 )
 
 const (
 	// version is the wire-format version. Bump only on incompatible layout changes.
-	version byte = 1
-
-	// kinds of records stored in the provider.
-	kindSingle byte = 1
-	kindBulk   byte = 2
+	version    byte = 1
+	kindSingle      = 1
+	kindBulk        = 2
 )
 
 var (
@@ -41,7 +46,6 @@ var (
 )
 
 // hasMagic reports whether b starts with the "CASC" header.
-// It does a zero-alloc compare against a static array.
 func hasMagic(b []byte) bool {
 	return len(b) >= 4 && bytes.Equal(b[:4], magic4[:])
 }
@@ -53,7 +57,7 @@ func hasMagic(b []byte) bool {
 //	magic(4) | ver(1) | kind(1=single) | gen(u64) | vlen(u32) | payload(vlen)
 //
 // The payload is the codec-encoded value. gen is the per-key generation used for
-// read-side validation (CAS).
+// read-side validation (CAS). Payload length is limited to <= 4 GiB (uint32).
 func EncodeSingle(gen uint64, payload []byte) []byte {
 	var buf bytes.Buffer
 	buf.Grow(4 + 1 + 1 + 8 + 4 + len(payload))
@@ -95,19 +99,16 @@ func DecodeSingle(b []byte) (gen uint64, payload []byte, err error) {
 	if off+4 > len(b) {
 		return 0, nil, ErrCorrupt
 	}
+
 	vlen := int(binary.BigEndian.Uint32(b[off : off+4]))
 	off += 4
-	// overflow-safe bound check: vlen must fit into remaining bytes
-	if vlen < 0 || vlen > len(b)-off {
+	if vlen < 0 || off+vlen != len(b) { // strict: no trailing bytes allowed
 		return 0, nil, ErrCorrupt
 	}
-
-	// zero-copy slice into original buffer
 	return gen, b[off : off+vlen], nil
 }
 
 // BulkItem holds one member of a bulk-encoded set.
-// Key is materialized as a Go string (one allocation) for stable map key use.
 type BulkItem struct {
 	Key     string
 	Gen     uint64
@@ -122,13 +123,15 @@ type BulkItem struct {
 //	repeated n times:
 //	  keyLen(u16) | key(keyLen) | gen(u64) | vlen(u32) | payload(vlen)
 //
-// Notes:
-//   - keyLen must be in (0, 0xFFFF]; invalid lengths panic because this indicates
-//     error at the call site (not untrusted input).
-func EncodeBulk(items []BulkItem) []byte {
+// Returns an error if any key length is 0 or > 65535 (u16).
+func EncodeBulk(items []BulkItem) ([]byte, error) {
 	total := 4 + 1 + 1 + 4
 	for _, it := range items {
-		total += 2 + len(it.Key) + 8 + 4 + len(it.Payload)
+		l := len(it.Key)
+		if l == 0 || l > 0xFFFF {
+			return nil, fmt.Errorf("cascache: invalid key length %d", l)
+		}
+		total += 2 + l + 8 + 4 + len(it.Payload)
 	}
 
 	var buf bytes.Buffer
@@ -146,12 +149,7 @@ func EncodeBulk(items []BulkItem) []byte {
 	binary.BigEndian.PutUint32(u4[:], uint32(len(items)))
 	buf.Write(u4[:])
 
-	// items
 	for _, it := range items {
-		if l := len(it.Key); l == 0 || l > 0xFFFF {
-			// keys must be non-empty and <= 65535 bytes.
-			panic("cascache: invalid key length in bulk")
-		}
 		binary.BigEndian.PutUint16(u2[:], uint16(len(it.Key)))
 		buf.Write(u2[:])
 		buf.WriteString(it.Key)
@@ -164,13 +162,14 @@ func EncodeBulk(items []BulkItem) []byte {
 		buf.Write(it.Payload)
 	}
 
-	return buf.Bytes()
+	return buf.Bytes(), nil
 }
 
 // DecodeBulk parses a bulk entry into a slice of items.
 //
 // For each item, Payload is a zero-copy subslice of b. Key is converted to a
-// string (one allocation per item).
+// string (one allocation per item). Duplicate keys in the stored items are
+// allowed; the last occurrence wins.
 func DecodeBulk(b []byte) ([]BulkItem, error) {
 	const hdr = 4 + 1 + 1 + 4
 	if len(b) < hdr || !hasMagic(b) || b[4] != version || b[5] != kindBulk {
@@ -184,7 +183,22 @@ func DecodeBulk(b []byte) ([]BulkItem, error) {
 		return nil, ErrCorrupt
 	}
 
-	items := make([]BulkItem, 0, n)
+	// cap preallocation by what the buffer could plausibly contain to avoid
+	// adversarial OOM if n iss bogus. We assume the minimal per-item footprint:
+	//   klen(2) + min key(1) + gen(8) + vlen(4) + min payload(0) = 15 bytes.
+	rem := len(b) - off
+	const minItem = 2 + 1 + 8 + 4
+	maxPlausible := 0
+	if rem >= minItem {
+		maxPlausible = rem / minItem
+	}
+
+	capHint := n
+	if capHint > maxPlausible {
+		capHint = maxPlausible
+	}
+	items := make([]BulkItem, 0, capHint)
+
 	for i := 0; i < n; i++ {
 		// keyLen
 		if off+2 > len(b) {
@@ -195,6 +209,7 @@ func DecodeBulk(b []byte) ([]BulkItem, error) {
 		if klen <= 0 || klen > len(b)-off {
 			return nil, ErrCorrupt
 		}
+
 		// key (slice, then string alloc)
 		keyBytes := b[off : off+klen]
 		off += klen
@@ -212,11 +227,11 @@ func DecodeBulk(b []byte) ([]BulkItem, error) {
 		}
 		vlen := int(binary.BigEndian.Uint32(b[off : off+4]))
 		off += 4
+		// guard against 32-bit int overflow (vlen < 0) and out-of-bounds.
 		if vlen < 0 || vlen > len(b)-off {
 			return nil, ErrCorrupt
 		}
 
-		// payload (zero-copy slice)
 		payload := b[off : off+vlen]
 		off += vlen
 
@@ -225,6 +240,11 @@ func DecodeBulk(b []byte) ([]BulkItem, error) {
 			Gen:     gen,
 			Payload: payload,
 		})
+	}
+
+	// no trailing bytes allowed (frame must consume entire buffer).
+	if off != len(b) {
+		return nil, ErrCorrupt
 	}
 
 	return items, nil
