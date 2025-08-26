@@ -31,6 +31,12 @@
 //   - ttl is the desired time-to-live for the key. If the store doesn’t support
 //     TTLs, it may ignore it. If ttl<=0, treat as “no expiry” when supported.
 //
+// Mutability & ownership:
+//   - Callers MUST NOT mutate the value slice after Set returns. Providers may
+//     retain the reference and treat it as immutable.
+//   - Get returns a slice that MUST be treated as read-only by callers. Mutating
+//     it may corrupt cached state; providers may return the original reference.
+//
 // Values are treated as opaque bytes meaning cascache’s wire layer enforces integrity
 // and will self-heal by deleting entries on corruption.
 package provider

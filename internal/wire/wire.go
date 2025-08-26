@@ -11,8 +11,9 @@
 //   - Decoders are written for bounds safety: every slice operation is preceded by
 //     length checks; on any mismatch they return ErrCorrupt.
 //   - Decoders return subslices of the original buffer for payloads (zero-copy).
-//     NOTE: callers must keep the original []byte alive while using the subslices,
-//     or copy if they need to persist beyond the source buffer’s lifetime.
+//     NOTE: holding any subslice is sufficient to keep the backing array alive.
+//     If you need to retain or mutate the payload beyond the frame’s lifetime,
+//     make your own copy.
 //   - Encode paths pre-compute capacity and bytes.Buffer.Grow to avoid realloc.
 //   - Bulk decode allocates exactly one string per item to materialize the key
 //     (stable map key semantics).
@@ -82,7 +83,7 @@ func EncodeSingle(gen uint64, payload []byte) []byte {
 }
 
 // DecodeSingle parses a single entry and returns (gen, payload).
-// The returned payload is a subslice of b (zero-copy).
+// The returned payload is a zero-copy subslice of b and must be treated as read-only.
 func DecodeSingle(b []byte) (gen uint64, payload []byte, err error) {
 	const hdr = 4 + 1 + 1 + 8 + 4
 	if len(b) < hdr || !hasMagic(b) || b[4] != version || b[5] != kindSingle {
@@ -165,7 +166,8 @@ func EncodeBulk(items []BulkItem) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// DecodeBulk parses a bulk entry into a slice of items.
+// DecodeBulk parses a bulk entry into items.
+// Each item’s Payload is a zero-copy subslice of b and must be treated as read-only.
 //
 // For each item, Payload is a zero-copy subslice of b. Key is converted to a
 // string (one allocation per item). Duplicate keys in the stored items are
