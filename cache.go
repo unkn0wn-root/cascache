@@ -185,7 +185,6 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 		missing = append(missing, keys...)
 		return out, missing, nil
 	}
-
 	if len(keys) == 0 {
 		return out, nil, nil
 	}
@@ -240,7 +239,6 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 	if !c.enabled || len(items) == 0 {
 		return nil
 	}
-
 	if !c.bulkEnabled {
 		for k, v := range items {
 			if obs, ok := observedGens[k]; ok {

@@ -228,6 +228,7 @@ func DecodeBulk(b []byte) ([]BulkItem, error) {
 		if off+4 > len(b) {
 			return nil, ErrCorrupt
 		}
+
 		vlen := int(binary.BigEndian.Uint32(b[off : off+4]))
 		off += 4
 		// guard against 32-bit int overflow (vlen < 0) and out-of-bounds.
