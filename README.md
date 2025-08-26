@@ -1,4 +1,4 @@
-# cascache
+# CasCache
 
 Provider-agnostic CAS like (**C**ompare-**A**nd-**S**et or generation-guarded conditional set) cache with pluggable codecs and a pluggable generation store.
 Safe single-key reads (no stale values), optional bulk caching with read-side validation,
@@ -22,29 +22,76 @@ and an opt‑in distributed mode for multi-replica deployments.
 
 ## Why CasCache
 
-Use **cascache** when you need a cache that **never serves stale reads** after a write without manual “delete-then-set” gymnastics or race conditions.
+#### TL;DR
+If you’ve ever shipped “delete-then-set” and still served stale data (or fought weird race windows in multi-replica setups), **cascache** gives you a simple guarantee:
 
-- **CAS safety:** Writers snapshot a per-key **generation** before the DB read. Cache writes commit only if the generation is unchanged.
-- **Freshness:** A cached value is returned only if its **generation** matches the current generation. Otherwise it self-heals (deleted + miss).
-- **Bulk safety:** Cache “sets” of keys. On read, validate every member’s generation; if **any** member is stale, the bulk is dropped and you fall back to safe singles.
-- **Pluggable:** Choose your value store (Ristretto / BigCache / Redis) and your codec (JSON / Msgpack / CBOR / Proto). Generations can be **local** (default) or **shared** (Redis) for multi-replica correctness.
+> **After you invalidate a key, the cache will never serve the old value again.**
+> No ad-hoc deletes, no timing games, no best-effort TTLs.
 
-> Not a fit if “a little staleness is fine,” or if keys are write-hot enough that caching yields little benefit.
+It does this with **generation-guarded writes** (CAS) and **read-side validation** using a tiny per-key counter.
 
-## Before → After: the problem it solves
+---
 
-#### Before (plain cache, easy to go stale):
-```go
-// 1) GET user -> miss -> read DB -> cache "user:42"
-// 2) UPDATE user -> write DB -> (delete might be racing/forgotten)
-// 3) GET right after -> stale value may still be served
-```
+### What goes wrong with “normal” caches
 
-#### After (cascache, no stale read):
-```go
-// 1) GET user -> miss -> snapshot generation BEFORE DB read -> cache only if gen unchanged
-// 2) UPDATE user -> Invalidate(key) (bump generation) -> any old entry becomes invalid
-// 3) GET right after -> old entry fails validation and self-heals; fresh data is returned
+| Pattern             | What you do                            | What still goes wrong                                                                 |
+|---------------------|----------------------------------------|---------------------------------------------------------------------------------------|
+| **TTL only**        | Set `user:42` for 5m                   | Readers can see **up to 5m stale** after a write. Reducing TTL increases DB load.     |
+| **Delete then set** | `DEL user:42` then `SET user:42`       | Races: a reader between `DEL` and new `SET` repopulates from **old DB snapshot**.     |
+| **Write-through**   | Update DB, then cache                  | Concurrent readers can serve **old data** until invalidation is coordinated perfectly.|
+| **Version in value**| Store `{version, payload}`             | Readers still need **current version**; coordinating that is the same hard problem.   |
+
+---
+
+### What CasCache guarantees
+
+- **No stale reads after invalidate.**
+  Each key has a **generation**. Mutations call `Invalidate(key)` → bump gen. Reads accept a cached value **only if** its stored gen == current gen; otherwise it is **deleted** and treated as a miss.
+
+- **Safe conditional writes (CAS).**
+  Writers snapshot gen **before** reading the DB. `SetWithGen(k, v, obs)` only commits if gen hasn’t changed. If something else updated the key, your write is **skipped** (prevents racing old data into the cache).
+
+- **Graceful failure modes.**
+  If the gen store is slow/unavailable, singles/reads **self-heal** (treat as miss) and CAS writes **skip**. You don’t serve stale; you just do a little more work.
+
+- **Optional bulk that isn’t risky.**
+  Bulk entries are validated **member-by-member** on read. If any is stale, the bulk is dropped and you fall back to singles. (Extras in the bulk are ignored; missing members invalidate the bulk.)
+
+- **Pluggable & fast.**
+  Works with **Ristretto/BigCache/Redis** for values and **JSON/CBOR/Msgpack/Proto** for payloads. Wire decode is tight and zero-copy for payloads.
+
+---
+
+### When to use it
+
+- You render entities that **must not be stale** after updates (profiles, product detail, permissions, pricing, feature flags).
+- You’ve got **multiple replicas** and coordinating invalidations is painful.
+- You want **predictable semantics** under incidents: serve fresh or miss, never “maybe stale.”
+
+### When *not* to use it
+
+- “A little staleness is fine” (feed pages, metrics tiles). Plain TTL might be enough.
+- Keys are **write-hot** (every read followed by a write) - caching won’t help.
+- You need **dogpile prevention** (single-flight). CasCache doesn’t include it; add it at the call site if needed.
+
+---
+
+### Why this beats the usual tricks
+
+- **TTL** trades freshness for load. CasCache gives **freshness** and keeps TTLs for eviction only.
+- **Delete-then-set** has races. Generations remove the race by making freshness a **property of the read**, not perfect timing.
+- **Write-through** still needs coordination. CAS makes coordination trivial: **bump → snapshot → compare**.
+
+---
+
+### Minimal mental model
+
+```text
+DB write succeeds  →  Cache.Invalidate(k)       // bump gen; clear single
+Read slow path     →  snap := SnapshotGen(k) → load DB → SetWithGen(k, v, snap)
+Read fast path     →  Get(k) validates stored gen == current; else self-heals
+Bulk read          →  every member’s gen must match; else drop bulk → singles
+Multi-replica      →  use RedisGenStore so all nodes see the same gen
 ```
 
 ---
