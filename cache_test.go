@@ -172,7 +172,7 @@ func TestSelfHealOnCorrupt(t *testing.T) {
 	if ok, err := impl.provider.Set(ctx, storageKey, wireEntry, 1, time.Minute); err != nil || !ok {
 		t.Fatalf("inject valid stale: ok=%v err=%v", ok, err)
 	}
-	_ = impl.bumpGen(storageKey) // make it stale
+	_ = impl.bumpGen(context.Background(), storageKey) // make it stale
 
 	if _, ok, err := cc.Get(ctx, k); err != nil || ok {
 		t.Fatalf("Get on stale single should miss, ok=%v err=%v", ok, err)

@@ -108,14 +108,14 @@ func (c *cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
 		return zero, false, err
 	}
 
-	gen, payload, err := wire.DecodeSingle(raw)
+	dgen, payload, err := wire.DecodeSingle(raw)
 	if err != nil {
 		_ = c.provider.Del(ctx, k) // self-heal corrupt
 		return zero, false, nil
 	}
 
 	// validate generation
-	if gen != c.snapshotGen(k) {
+	if dgen != c.snapshotGen(ctx, k) {
 		_ = c.provider.Del(ctx, k)
 		return zero, false, nil
 	}
@@ -140,7 +140,7 @@ func (c *cache[V]) SetWithGen(ctx context.Context, key string, value V, observed
 	}
 
 	k := c.singleKey(key)
-	if c.snapshotGen(k) != observedGen {
+	if c.snapshotGen(ctx, k) != observedGen {
 		// generation moved; skip stale write
 		c.log.Debug("SetWithGen skipped (gen mismatch)", Fields{"key": key, "obs": observedGen})
 		return nil
@@ -169,7 +169,7 @@ func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 	}
 
 	k := c.singleKey(key)
-	newGen := c.bumpGen(k)
+	newGen := c.bumpGen(ctx, k)
 	_ = c.provider.Del(ctx, k)
 	c.log.Debug("invalidated key (bumped gen + cleared single)", Fields{"key": key, "newGen": newGen})
 	return nil
@@ -201,7 +201,7 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 
 	if raw, ok, err := c.provider.Get(ctx, bk); err == nil && ok {
 		items, err := wire.DecodeBulk(raw)
-		if err == nil && c.bulkValid(us, items) {
+		if err == nil && c.bulkValid(ctx, us, items) {
 			byKey := make(map[string]V, len(items))
 			genByKey := make(map[string]uint64, len(items))
 			for _, it := range items {
@@ -242,14 +242,9 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 	}
 
 	if !c.bulkEnabled {
-		sttl := ttl
-		if sttl == 0 {
-			sttl = c.defaultTTL
-		}
-
 		for k, v := range items {
 			if obs, ok := observedGens[k]; ok {
-				_ = c.SetWithGen(ctx, k, v, obs, sttl)
+				_ = c.SetWithGen(ctx, k, v, obs, ttl)
 			}
 		}
 		return nil
@@ -263,7 +258,7 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 	for k := range items {
 		kk := c.singleKey(k)
 		obs, ok := observedGens[k]
-		if !ok || c.snapshotGen(kk) != obs {
+		if !ok || c.snapshotGen(ctx, kk) != obs {
 			// skip bulk; seed singles instead (use default single TTL)
 			c.log.Debug("SetBulkWithGens skipped (gen mismatch)", Fields{"key": k})
 			for kk2, v := range items {
@@ -323,8 +318,7 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 
 // SnapshotGen returns the current generation for key.
 func (c *cache[V]) SnapshotGen(key string) uint64 {
-	k := c.singleKey(key)
-	return c.snapshotGen(k)
+	return c.snapshotGen(context.Background(), c.singleKey(key))
 }
 
 // SnapshotGens returns current generations for multiple keys.
@@ -336,7 +330,7 @@ func (c *cache[V]) SnapshotGens(keys []string) map[string]uint64 {
 
 	m, err := c.gen.SnapshotMany(context.Background(), storage)
 	if err != nil {
-		// conservative fallback: one by one
+		// fallback one by one
 		out := make(map[string]uint64, len(keys))
 		for _, k := range keys {
 			out[k] = c.SnapshotGen(k)
@@ -345,14 +339,14 @@ func (c *cache[V]) SnapshotGens(keys []string) map[string]uint64 {
 	}
 
 	out := make(map[string]uint64, len(keys))
-	for _, k := range keys {
-		out[k] = m[c.singleKey(k)]
+	for i, k := range keys {
+		out[k] = m[storage[i]]
 	}
 	return out
 }
 
-func (c *cache[V]) snapshotGen(storageKey string) uint64 {
-	g, err := c.gen.Snapshot(context.Background(), storageKey)
+func (c *cache[V]) snapshotGen(ctx context.Context, storageKey string) uint64 {
+	g, err := c.gen.Snapshot(ctx, storageKey)
 	if err != nil {
 		// Conservative: treat as 0 so CAS writes will skip; reads will self-heal
 		c.log.Warn("gen snapshot error", Fields{"key": storageKey, "err": err})
@@ -361,8 +355,8 @@ func (c *cache[V]) snapshotGen(storageKey string) uint64 {
 	return g
 }
 
-func (c *cache[V]) bumpGen(storageKey string) uint64 {
-	g, err := c.gen.Bump(context.Background(), storageKey)
+func (c *cache[V]) bumpGen(ctx context.Context, storageKey string) uint64 {
+	g, err := c.gen.Bump(ctx, storageKey)
 	if err != nil {
 		c.log.Error("gen bump error", Fields{"key": storageKey, "err": err})
 		return 0
@@ -373,7 +367,7 @@ func (c *cache[V]) bumpGen(storageKey string) uint64 {
 // - Every requested key must exist in the bulk and be fresh (gen equal to current).
 // - Extras in the bulk are ignored.
 // - The input slice is the already-sorted (but not deduplicated) requested keys.
-func (c *cache[V]) bulkValid(sortedRequested []string, items []wire.BulkItem) bool {
+func (c *cache[V]) bulkValid(ctx context.Context, sortedRequested []string, items []wire.BulkItem) bool {
 	itemGen := make(map[string]uint64, len(items))
 	for _, it := range items {
 		itemGen[it.Key] = it.Gen // duplicates in stored items: last wins
@@ -384,18 +378,19 @@ func (c *cache[V]) bulkValid(sortedRequested []string, items []wire.BulkItem) bo
 		storage[i] = c.singleKey(k)
 	}
 
-	gens, err := c.gen.SnapshotMany(context.Background(), storage)
+	gens, err := c.gen.SnapshotMany(ctx, storage)
 	if err != nil {
 		c.log.Warn("gen snapshot many failed", Fields{"err": err})
 		return false
 	}
 
-	for _, k := range sortedRequested {
+	for i, k := range sortedRequested {
 		g, ok := itemGen[k]
 		if !ok {
 			return false // missing member in bulk
 		}
-		if g != gens[c.singleKey(k)] {
+		sk := storage[i]
+		if g != gens[sk] {
 			return false // stale member
 		}
 	}
