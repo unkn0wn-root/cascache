@@ -1,12 +1,12 @@
 package codec
 
-type BytesCodec struct{}
+type Bytes struct{}
 
-func (BytesCodec) Encode(b []byte) ([]byte, error) { return b, nil }
-func (BytesCodec) Decode(b []byte) ([]byte, error) { return b, nil }
+func (Bytes) Encode(b []byte) ([]byte, error) { return b, nil }
+func (Bytes) Decode(b []byte) ([]byte, error) { return b, nil }
 
 // For string payloads
-type StringCodec struct{}
+type String struct{}
 
-func (StringCodec) Encode(s string) ([]byte, error) { return []byte(s), nil }
-func (StringCodec) Decode(b []byte) (string, error) { return string(b), nil }
+func (String) Encode(s string) ([]byte, error) { return []byte(s), nil }
+func (String) Decode(b []byte) (string, error) { return string(b), nil }

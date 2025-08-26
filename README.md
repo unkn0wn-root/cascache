@@ -58,6 +58,7 @@ import (
 	"time"
 
 	"github.com/unkn0wn-root/cascache"
+	"github.com/unkn0wn-root/cascache/codec"
 	rp "github.com/unkn0wn-root/cascache/provider/ristretto"
 )
 
@@ -75,7 +76,7 @@ func newUserCache() (cascache.CAS[User], error) {
 	return cascache.New[User](cascache.Options[User]{
 		Namespace:  "user",
 		Provider:   rist,
-		Codec:      cascache.JSONCodec[User]{},
+		Codec:      codec.JSON[User]{},
 		DefaultTTL: 5 * time.Minute,
 		BulkTTL:    5 * time.Minute,
 		// GenStore: nil -> Local (single-process) generations
@@ -169,7 +170,7 @@ func newUserCacheDistributed() (cascache.CAS[User], error) {
 	return cascache.New[User](cascache.Options[User]{
 		Namespace: "user",
 		Provider:  rist,                      // or Redis/BigCache for values
-		Codec:     cascache.JSONCodec[User]{},
+		Codec:     codec.JSON[User]{},
 		GenStore:  gs,                        // shared generations
 		BulkTTL:   5 * time.Minute,
 	})
@@ -289,7 +290,7 @@ type Codec[V any] interface {
     Encode(V) ([]byte, error)
     Decode([]byte) (V, error)
 }
-type JSONCodec[V any] struct{}
+type JSON[V any] struct{}
 ```
 
 You can drop in Msgpack/CBOR/Proto or decorators (compression/encryption). CAS is codec-agnostic.
