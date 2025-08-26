@@ -490,3 +490,153 @@ func TestSelfHealOnGenMismatchSingle(t *testing.T) {
 		t.Fatalf("gen-mismatch single was not deleted by self-heal")
 	}
 }
+
+func TestBulkValidTable(t *testing.T) {
+	ctx := context.Background()
+
+	newImpl := func(t *testing.T) *cache[user] {
+		t.Helper()
+		mp := newMemProvider()
+		cc := newTestCache(t, "user", mp, nil)
+		t.Cleanup(func() { _ = cc.Close(ctx) })
+		return mustImpl(t, cc)
+	}
+
+	// helper: bump to exactly 'n'
+	bumpTo := func(impl *cache[user], ukey string, n uint64) {
+		sk := impl.singleKey(ukey)
+		for i := uint64(0); i < n; i++ {
+			_ = impl.bumpGen(ctx, sk)
+		}
+	}
+
+	t.Run("valid_all_members_fresh", func(t *testing.T) {
+		impl := newImpl(t)
+		keys := []string{"a", "b", "c"} // already sorted
+
+		// current gens: a=1, b=1, c=1
+		for _, k := range keys {
+			bumpTo(impl, k, 1)
+		}
+
+		items := []wire.BulkItem{
+			{Key: "a", Gen: 1, Payload: nil},
+			{Key: "b", Gen: 1, Payload: nil},
+			{Key: "c", Gen: 1, Payload: nil},
+		}
+		if !impl.bulkValid(ctx, keys, items) {
+			t.Fatalf("bulkValid should be true for fresh members")
+		}
+	})
+
+	t.Run("missing_member_in_bulk", func(t *testing.T) {
+		impl := newImpl(t)
+		keys := []string{"a", "b", "c"}
+
+		// current gens: a=1, b=1, c=1
+		for _, k := range keys {
+			bumpTo(impl, k, 1)
+		}
+
+		// omit "b" from items
+		items := []wire.BulkItem{
+			{Key: "a", Gen: 1, Payload: nil},
+			{Key: "c", Gen: 1, Payload: nil},
+		}
+		if impl.bulkValid(ctx, keys, items) {
+			t.Fatalf("bulkValid should be false when a requested member is missing")
+		}
+	})
+
+	t.Run("stale_member_gen_mismatch", func(t *testing.T) {
+		impl := newImpl(t)
+		keys := []string{"a", "b", "c"}
+
+		// current gens: a=1, b=1, c=1
+		for _, k := range keys {
+			bumpTo(impl, k, 1)
+		}
+
+		// Make "b" stale by putting Gen=0 (current is 1)
+		items := []wire.BulkItem{
+			{Key: "a", Gen: 1, Payload: nil},
+			{Key: "b", Gen: 0, Payload: nil}, // stale
+			{Key: "c", Gen: 1, Payload: nil},
+		}
+		if impl.bulkValid(ctx, keys, items) {
+			t.Fatalf("bulkValid should be false when any member is stale")
+		}
+	})
+
+	t.Run("extra_member_ignored", func(t *testing.T) {
+		impl := newImpl(t)
+		keys := []string{"a", "b"}
+
+		// current gens: a=1, b=1
+		for _, k := range keys {
+			bumpTo(impl, k, 1)
+		}
+
+		// Include an extra "z" that isn't requested. Should be ignored.
+		items := []wire.BulkItem{
+			{Key: "a", Gen: 1, Payload: nil},
+			{Key: "b", Gen: 1, Payload: nil},
+			{Key: "z", Gen: 999, Payload: nil}, // extra
+		}
+		if !impl.bulkValid(ctx, keys, items) {
+			t.Fatalf("bulkValid should be true; extras in bulk are ignored")
+		}
+	})
+}
+
+func equalU64(a, b map[string]uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// Covers: empty input, duplicates, missing (0), and mixed bumped gens.
+func TestSnapshotGensBehavior(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	cc := newTestCache(t, "user", mp, nil)
+	t.Cleanup(func() { _ = cc.Close(ctx) })
+	impl := mustImpl(t, cc)
+
+	t.Run("empty", func(t *testing.T) {
+		got := cc.SnapshotGens(nil)
+		if len(got) != 0 {
+			t.Fatalf("empty: expected empty map, got %v", got)
+		}
+	})
+
+	t.Run("duplicates_and_zero_missing", func(t *testing.T) {
+		// No bumps yet → everything is 0
+		keys := []string{"dupa", "dupa", "other"}
+		got := cc.SnapshotGens(keys)
+		want := map[string]uint64{"dupa": 0, "other": 0}
+		if !equalU64(got, want) {
+			t.Fatalf("dups/zeros: got %v want %v", got, want)
+		}
+	})
+
+	t.Run("mixed", func(t *testing.T) {
+		// m1 -> 1, m3 -> 3, m2 -> 0
+		_ = impl.bumpGen(ctx, impl.singleKey("m1"))
+		for i := 0; i < 3; i++ {
+			_ = impl.bumpGen(ctx, impl.singleKey("m3"))
+		}
+		keys := []string{"m1", "m2", "m3", "m1"} // include duplicate
+		got := cc.SnapshotGens(keys)
+		want := map[string]uint64{"m1": 1, "m2": 0, "m3": 3}
+		if !equalU64(got, want) {
+			t.Fatalf("mixed: got %v want %v", got, want)
+		}
+	})
+}
