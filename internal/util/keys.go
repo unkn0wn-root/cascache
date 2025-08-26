@@ -2,12 +2,11 @@ package util
 
 import (
 	"crypto/sha256"
-	"fmt"
+	"encoding/binary"
 	"sort"
-	"strings"
 )
 
-// BulkKey returns "prefix:<first16hex(sha256(sorted(keys)))>" and sorts a copy.
+// sorts a copy before calling BulkKeySorted
 func BulkKey(prefix string, keys []string) string {
 	s := make([]string, len(keys))
 	copy(s, keys)
@@ -15,10 +14,36 @@ func BulkKey(prefix string, keys []string) string {
 	return BulkKeySorted(prefix, s)
 }
 
-// BulkKeySorted returns the bulk key for an already-sorted slice of keys.
+// length-prefix each key into one preallocated []byte
 func BulkKeySorted(prefix string, sortedKeys []string) string {
-	joined := strings.Join(sortedKeys, ",")
-	sum := sha256.Sum256([]byte(joined))
-	hex := fmt.Sprintf("%x", sum[:])
-	return fmt.Sprintf("%s:%s", prefix, hex[:16])
+	// Compute exact buffer size: 4 bytes length + key bytes per key.
+	total := 0
+	for _, k := range sortedKeys {
+		total += 4 + len(k)
+	}
+
+	buf := make([]byte, total)
+	off := 0
+
+	for _, k := range sortedKeys {
+		binary.BigEndian.PutUint32(buf[off:off+4], uint32(len(k)))
+		off += 4
+		copy(buf[off:], k)
+		off += len(k)
+	}
+
+	sum := sha256.Sum256(buf)
+	return prefix + ":" + hex16(sum[:])
+}
+
+func hex16(b []byte) string {
+	const hexdigits = "0123456789abcdef"
+	// first 8 bytes -> 16 hex chars
+	out := make([]byte, 16)
+	for i := 0; i < 8; i++ {
+		v := b[i]
+		out[i*2] = hexdigits[v>>4]
+		out[i*2+1] = hexdigits[v&0x0f]
+	}
+	return string(out)
 }
