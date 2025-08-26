@@ -57,7 +57,7 @@ func newTestCache(t *testing.T, ns string, mp *memProvider, optsOpt func(*Option
 	opts := Options[user]{
 		Namespace: ns,
 		Provider:  mp,
-		Codec:     c.JSONCodec[user]{},
+		Codec:     c.JSON[user]{},
 	}
 	if optsOpt != nil {
 		optsOpt(&opts)
@@ -164,7 +164,7 @@ func TestSelfHealOnCorrupt(t *testing.T) {
 
 	// Now inject a valid single with gen=0, then bump generation to make it stale.
 	val := user{ID: "x", Name: "X"}
-	payload, err := c.JSONCodec[user]{}.Encode(val)
+	payload, err := c.JSON[user]{}.Encode(val)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -469,7 +469,7 @@ func TestSelfHealOnGenMismatchSingle(t *testing.T) {
 
 	// GenStore has never been bumped for this key -> snapshot is 0.
 	val := user{ID: "u1", Name: "Mismatch"}
-	payload, err := c.JSONCodec[user]{}.Encode(val)
+	payload, err := c.JSON[user]{}.Encode(val)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
