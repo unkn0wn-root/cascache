@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/unkn0wn-root/cascache"
+	"github.com/unkn0wn-root/cascache/codec"
 	rp "github.com/unkn0wn-root/cascache/provider/ristretto"
 )
 
@@ -83,7 +84,7 @@ func newUserCache() (cascache.CAS[User], error) {
 	return cascache.New[User](cascache.Options[User]{
 		Namespace:  "user",
 		Provider:   rist,
-		Codec:      cascache.JSONCodec[User]{},
+		Codec:      codec.JSONCodec[User]{},
 		DefaultTTL: 5 * time.Minute,
 		BulkTTL:    5 * time.Minute,
 	})
