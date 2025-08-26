@@ -67,7 +67,7 @@ func newCache[V any](opts Options[V]) (*cache[V], error) {
 	if opts.GenStore != nil {
 		c.gen = opts.GenStore
 	} else {
-		// default to in-process generations with periodic cleanup
+		// default to local (in-process) gen store
 		c.gen = gen.NewLocalGenStore(c.sweepInterval, c.genRetention)
 	}
 

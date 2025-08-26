@@ -10,6 +10,8 @@ import (
 	pr "github.com/unkn0wn-root/cascache/provider"
 )
 
+var ErrNilClient = errors.New("redis provider: nil client")
+
 type Redis struct {
 	rdb goredis.UniversalClient
 }
@@ -19,8 +21,6 @@ var _ pr.Provider = (*Redis)(nil)
 type Config struct {
 	Client goredis.UniversalClient
 }
-
-var ErrNilClient = errors.New("redis provider: nil client")
 
 func New(cfg Config) (*Redis, error) {
 	if cfg.Client == nil {

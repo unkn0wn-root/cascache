@@ -102,7 +102,7 @@ func DecodeSingle(b []byte) (gen uint64, payload []byte, err error) {
 
 	vlen := int(binary.BigEndian.Uint32(b[off : off+4]))
 	off += 4
-	if vlen < 0 || off+vlen != len(b) { // strict: no trailing bytes allowed
+	if vlen < 0 || off+vlen != len(b) { // no trailing bytes allowed
 		return 0, nil, ErrCorrupt
 	}
 	return gen, b[off : off+vlen], nil
@@ -185,7 +185,7 @@ func DecodeBulk(b []byte) ([]BulkItem, error) {
 
 	// cap preallocation by what the buffer could plausibly contain to avoid
 	// adversarial OOM if n iss bogus. We assume the minimal per-item footprint:
-	//   klen(2) + min key(1) + gen(8) + vlen(4) + min payload(0) = 15 bytes.
+	// klen(2) + min key(1) + gen(8) + vlen(4) + min payload(0) = 15 bytes.
 	rem := len(b) - off
 	const minItem = 2 + 1 + 8 + 4
 	maxPlausible := 0
@@ -204,6 +204,7 @@ func DecodeBulk(b []byte) ([]BulkItem, error) {
 		if off+2 > len(b) {
 			return nil, ErrCorrupt
 		}
+
 		klen := int(binary.BigEndian.Uint16(b[off : off+2]))
 		off += 2
 		if klen <= 0 || klen > len(b)-off {
