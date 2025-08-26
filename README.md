@@ -7,26 +7,183 @@ and an opt‑in distributed mode for multi-replica deployments.
 ---
 
 ## Contents
-- [Overview](#overview)
-- [Quick start](#quick-start)
+- [Why CasCache](#why-cascache)
+- [Getting started](#getting-started)
 - [Design](#design)
 - [Wire format](#wire-format)
 - [Providers](#providers)
 - [Codecs](#codecs)
-- [Distributed generations](#distributed-generations)
+- [Distributed generations (multi-replica)](#distributed-generations-multi-replica)
 - [API](#api)
 - [Cache Type alias](#cache-type-alias)
 - [Performance notes](#performance-notes)
 
 ---
 
-## Overview
+## Why CasCache
+
+Use **cascache** when you need a cache that **never serves stale reads** after a write without manual “delete-then-set” gymnastics or race conditions.
 
 - **CAS safety:** Writers snapshot a per-key **generation** before the DB read. Cache writes commit only if the generation is unchanged.
-- **Singles:** Never return stale values; corrupt/type-mismatched entries self-heal.
-- **Bulk:** Cache a set-shaped result. On read, validate every member’s generation. Reject the bulk if any member is stale.
-- **Composable:** Plug any value provider (Ristretto/BigCache/Redis) and any codec (JSON/Msgpack/CBOR/Proto).
-- **Distributed** Keep local generations (default) or plug a shared `GenStore` (e.g., Redis) for cross-replica correctness and warm restarts.
+- **Freshness:** A cached value is returned only if its **generation** matches the current generation. Otherwise it self-heals (deleted + miss).
+- **Bulk safety:** Cache “sets” of keys. On read, validate every member’s generation; if **any** member is stale, the bulk is dropped and you fall back to safe singles.
+- **Pluggable:** Choose your value store (Ristretto / BigCache / Redis) and your codec (JSON / Msgpack / CBOR / Proto). Generations can be **local** (default) or **shared** (Redis) for multi-replica correctness.
+
+> Not a fit if “a little staleness is fine,” or if keys are write-hot enough that caching yields little benefit.
+
+## Before → After: the problem it solves
+
+#### Before (plain cache, easy to go stale):
+```go
+// 1) GET user -> miss -> read DB -> cache "user:42"
+// 2) UPDATE user -> write DB -> (delete might be racing/forgotten)
+// 3) GET right after -> stale value may still be served
+```
+
+#### After (cascache, no stale read):
+```go
+// 1) GET user -> miss -> snapshot generation BEFORE DB read -> cache only if gen unchanged
+// 2) UPDATE user -> Invalidate(key) (bump generation) -> any old entry becomes invalid
+// 3) GET right after -> old entry fails validation and self-heals; fresh data is returned
+```
+
+---
+
+## Getting started
+#### 1) Build the cache
+
+```go
+import (
+	"context"
+	"time"
+
+	"github.com/unkn0wn-root/cascache"
+	rp "github.com/unkn0wn-root/cascache/provider/ristretto"
+)
+
+type User struct{ ID, Name string }
+
+func newUserCache() (cascache.CAS[User], error) {
+	rist, err := rp.New(rp.Config{
+		NumCounters: 1_000_000,
+		MaxCost:     64 << 20, // 64 MiB
+		BufferItems: 64,
+		Metrics:     false,
+	})
+	if err != nil { return nil, err }
+
+	return cascache.New[User](cascache.Options[User]{
+		Namespace:  "user",
+		Provider:   rist,
+		Codec:      cascache.JSONCodec[User]{},
+		DefaultTTL: 5 * time.Minute,
+		BulkTTL:    5 * time.Minute,
+		// GenStore: nil -> Local (single-process) generations
+	})
+}
+```
+
+#### 2) Safe single read (never stale)
+
+```go
+type UserRepo struct {
+	Cache cascache.CAS[User]
+	// db handle...
+}
+
+func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
+	if u, ok, _ := r.Cache.Get(ctx, id); ok {
+		return u, nil
+	}
+
+	// CAS snapshot BEFORE reading DB
+	obs := r.Cache.SnapshotGen(id)
+
+	u, err := r.dbSelectUser(ctx, id) // your DB load
+	if err != nil { return User{}, err }
+
+	// Conditionally cache only if generation didn't move
+	_ = r.Cache.SetWithGen(ctx, id, u, obs, 0)
+	return u, nil
+}
+```
+
+#### 3) Mutations invalidate (one line)
+> Rule: after a successful DB write, call Invalidate(key) to bump the generation.
+
+```go
+func (r *UserRepo) UpdateName(ctx context.Context, id, name string) error {
+	if err := r.dbUpdateName(ctx, id, name); err != nil { return err }
+	_ = r.Cache.Invalidate(ctx, id) // bump gen + clear single
+	return nil
+}
+```
+
+#### 4) Optional bulk (safe set caching)
+> If any member is stale, the bulk is dropped and you fall back to singles. In multi-replica apps, use a shared GenStore (below) or disable bulk.
+
+```go
+func (r *UserRepo) GetMany(ctx context.Context, ids []string) (map[string]User, error) {
+	values, missing, _ := r.Cache.GetBulk(ctx, ids)
+	if len(missing) == 0 {
+		return values, nil
+	}
+
+	// Snapshot *before* DB read
+	obs := r.Cache.SnapshotGens(missing)
+
+	// Load missing from DB in one shot
+	loaded, err := r.dbSelectUsers(ctx, missing)
+	if err != nil { return nil, err }
+
+	// Index for SetBulkWithGens
+	items := make(map[string]User, len(loaded))
+	for _, u := range loaded { items[u.ID] = u }
+
+	// Conditionally write bulk (or it will seed singles if any gen moved)
+	_ = r.Cache.SetBulkWithGens(ctx, items, obs, 0)
+
+	// Merge and return
+	for k, v := range items { values[k] = v }
+	return values, nil
+}
+```
+
+---
+
+## Distributed generations (multi-replica)
+
+Local generations are correct within a single process. In multi-replica deployments, share generations to eliminate cross-node windows and keep bulks safe across nodes.
+> LocalGenStore is single-process only. In multi-replica setups, both singles and bulks can be stale on nodes that haven’t observed the bump.
+Use a shared GenStore (e.g., Redis) for cross-replica correctness or run a single instance.
+
+
+```go
+import "github.com/redis/go-redis/v9"
+
+func newUserCacheDistributed() (cascache.CAS[User], error) {
+	rist, _ := rp.New(rp.Config{NumCounters:1_000_000, MaxCost:64<<20, BufferItems:64})
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})
+	gs  := cascache.NewRedisGenStoreWithTTL(rdb, "user", 90*24*time.Hour)
+
+	return cascache.New[User](cascache.Options[User]{
+		Namespace: "user",
+		Provider:  rist,                      // or Redis/BigCache for values
+		Codec:     cascache.JSONCodec[User]{},
+		GenStore:  gs,                        // shared generations
+		BulkTTL:   5 * time.Minute,
+	})
+}
+```
+> If you can’t use a shared GenStore yet, set DisableBulk: true (or a tiny BulkTTL) when running multiple replicas. Singles remain safe and never stale.
+
+---
+
+> **Alternative type name:** You can use `cascache.Cache[V]` instead of `cascache.CAS[V]`. See [Cache Type alias](#cache-type-alias).
+
+---
+
+## Design
 
 ### Read path (single)
 
@@ -60,56 +217,6 @@ for each item: gen == currentGen("single:<ns>:"+key) ?
 if all valid -> decode all, return
 else         -> drop bulk, fall back to singles
 ```
-
----
-
-## Quick start
-
-```go
-import (
-    "context"
-    "time"
-
-    "github.com/unkn0wn-root/cascache"
-    rp "github.com/unkn0wn-root/cascache/provider/ristretto"
-)
-
-type User struct{ ID, Name string }
-
-func buildCache() cascache.CAS[User] {
-    // Value provider (in-process)
-    rist, _ := rp.New(rp.Config{
-        NumCounters: 1_000_000,
-        MaxCost:     64 << 20, // 64 MiB
-        BufferItems: 64,
-        Metrics:     false,
-    })
-
-    cc, _ := cascache.New[User](cascache.Options[User]{
-        Namespace:  "user",
-        Provider:   rist,
-        Codec:      cascache.JSONCodec[User]{},
-        DefaultTTL: 5 * time.Minute,
-        BulkTTL:    5 * time.Minute,
-        // GenStore: nil -> Local (default). See "Distributed generations".
-    })
-    return cc
-}
-
-func readUser(ctx context.Context, c cascache.CAS[User], id string) (User, bool) {
-    if u, ok, _ := c.Get(ctx, id); ok { return u, true }
-    obs := c.SnapshotGen(id)  // CAS snapshot BEFORE DB read
-    u := loadFromDB(id)
-    _ = c.SetWithGen(ctx, id, u, obs, 0)
-    return u, true
-}
-```
-
-> **Alternative type name:** You can use `cascache.Cache[V]` instead of `cascache.CAS[V]`. See [Cache Type alias](#cache-type-alias).
-
----
-
-## Design
 
 ### Components
 - **Provider** - byte store with TTLs: Ristretto/BigCache/Redis.
@@ -186,41 +293,6 @@ type JSONCodec[V any] struct{}
 ```
 
 You can drop in Msgpack/CBOR/Proto or decorators (compression/encryption). CAS is codec-agnostic.
-
----
-
-## Distributed generations
-
-Local generations are correct for singles but bulk validation can be stale across replicas.
-Use a shared `GenStore` to eliminate this window and survive restarts.
-
->Important: LocalGenStore is single-process only. In multi-replica setups, both singles and bulks can be stale on nodes that haven’t observed the bump.
-Use a shared GenStore (e.g., Redis) for cross-replica correctness or run a single instance.
-
-```go
-import "github.com/redis/go-redis/v9"
-
-rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})
-gs  := cascache.NewRedisGenStore(rdb, "user") // namespace should match Options.Namespace
-// or, with TTL:
-// gs  := gen.NewRedisGenStoreWithTTL(rdb, "user", 90*24*time.Hour) // with TTL to prevent growth
-
-cache, _ := cascache.New[User](cascache.Options[User]{
-    Namespace: "user",
-    Provider:  ristrettoProvider, // or Redis, BigCache
-    Codec:     cascache.JSONCodec[User]{},
-    GenStore:  gs,                // shared generations
-})
-```
-
-**Behavior**
-- Singles: never stale (same as local).
-- Bulks: validated against shared generations across replicas.
-- Restarts: generations persist; valid entries remain valid.
-
-> If you do not use a distributed GenStore in a multi-replica deployment,
-set Options.DisableBulk = true (or use a very short BulkTTL). Singles remain safe:
-they never return stale data.
 
 ---
 
