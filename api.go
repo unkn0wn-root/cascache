@@ -42,7 +42,6 @@ type Options[V any] struct {
 	Codec     c.Codec[V]
 
 	// Optional
-	Logger          Logger        // if nil, NopLogger is used
 	DefaultTTL      time.Duration // singles; 0 => 10m
 	BulkTTL         time.Duration // bulks; 0 => 10m
 	CleanupInterval time.Duration // 0 => 1h
@@ -51,6 +50,7 @@ type Options[V any] struct {
 	ComputeSetCost  SetCostFunc   // default 1
 	GenStore        gen.GenStore  // nil => LocalGenStore (in-process)
 	DisableBulk     bool          // default false => bulk enabled
+	Hooks           Hooks         // high-signal events for metrics/telemetry/logging
 }
 
 func New[V any](opts Options[V]) (CAS[V], error) {
