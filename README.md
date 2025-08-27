@@ -202,7 +202,7 @@ func (r *UserRepo) GetMany(ctx context.Context, ids []string) (map[string]User, 
 ## Distributed generations (multi-replica)
 
 Local generations are correct within a single process. In multi-replica deployments, share generations to eliminate cross-node windows and keep bulks safe across nodes.
-> LocalGenStore is single-process only. In multi-replica setups, both singles and bulks can be stale on nodes that haven’t observed the bump.
+> LocalGenStore is **single-process only**. In multi-replica setups, both singles and bulks can be stale on nodes that haven’t observed the bump.
 Use a shared GenStore (e.g., Redis) for cross-replica correctness or run a single instance.
 
 
@@ -223,8 +223,33 @@ func newUserCacheDistributed() (cascache.CAS[User], error) {
 	})
 }
 ```
-> If you can’t use a shared GenStore yet, set DisableBulk: true (or a tiny BulkTTL) when running multiple replicas. Singles remain safe and never stale.
 
+You can reuse the same client across caches:
+
+```go
+rdb := redis.NewClusterClient(/* ... */) // or UniversalClient
+
+userCache, _ := cascache.New[user](cascache.Options[user]{
+    Namespace: "app:prod:user",
+    Provider:  myRedisProvider{Client: rdb},               // same client
+    Codec:     c.JSON[user]{},
+    GenStore:  gen.NewRedisGenStoreWithTTL(rdb, "app:prod:user", 24*time.Hour),
+})
+
+pageCache, _ := cascache.New[page](cascache.Options[page]{
+    Namespace: "app:prod:page",
+    Provider:  myRedisProvider{Client: rdb},               // same client
+    Codec:     c.JSON[page]{},
+    GenStore:  gen.NewRedisGenStoreWithTTL(rdb, "app:prod:page", 24*time.Hour),
+})
+
+permCache, _ := cascache.New[permission](cascache.Options[permission]{
+    Namespace: "app:prod:perm",
+    Provider:  myRedisProvider{Client: rdb},               // same client
+    Codec:     c.JSON[permission]{},
+    GenStore:  gen.NewRedisGenStoreWithTTL(rdb, "app:prod:perm", 24*time.Hour),
+})
+```
 ---
 
 > **Alternative type name:** You can use `cascache.Cache[V]` instead of `cascache.CAS[V]`. See [Cache Type alias](#cache-type-alias).
