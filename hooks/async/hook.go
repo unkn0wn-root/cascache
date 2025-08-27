@@ -1,5 +1,17 @@
 // usage:
 //
+// import (
+//
+//	"log/slog"
+//
+//	"github.com/unkn0wn-root/cascache"
+//	"github.com/unkn0wn-root/cascache/codec"
+//	"github.com/unkn0wn-root/cascache/genstore"
+//	hookasync "github.com/unkn0wn-root/cascache/hooks/async"
+//	sloghook  "github.com/unkn0wn-root/cascache/hooks/slog"
+//
+// )
+//
 //	raw := sloghook.New(slog.Default(), sloghook.Options{
 //	    SelfHealEvery:   10, // sample logs: ~every 10th self-heal
 //	    BulkRejectEvery: 1,  // log every bulk rejection
@@ -27,7 +39,10 @@ type Hooks struct {
 	inner cascache.Hooks
 	q     chan func()
 	wg    sync.WaitGroup
+	once  sync.Once
 }
+
+var _ cascache.Hooks = (*Hooks)(nil)
 
 func New(inner cascache.Hooks, workers, qlen int) *Hooks {
 	if workers <= 0 {
@@ -51,8 +66,10 @@ func New(inner cascache.Hooks, workers, qlen int) *Hooks {
 }
 
 func (h *Hooks) Close() {
-	close(h.q)
-	h.wg.Wait()
+	h.once.Do(func() {
+		close(h.q)
+		h.wg.Wait()
+	})
 }
 
 func (h *Hooks) try(f func()) {
@@ -74,7 +91,6 @@ func (h *Hooks) ProviderSetRejected(k string, b bool) {
 func (h *Hooks) GenSnapshotError(n int, err error) {
 	h.try(func() { h.inner.GenSnapshotError(n, err) })
 }
-
 func (h *Hooks) InvalidateOutage(k string, be, de error) {
 	h.try(func() { h.inner.InvalidateOutage(k, be, de) })
 }
