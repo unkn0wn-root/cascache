@@ -162,16 +162,42 @@ func (c *cache[V]) SetWithGen(ctx context.Context, key string, value V, observed
 	return nil
 }
 
-// Invalidate bumps the generation for key and deletes the single-entry value.
+// Invalidate bumps the per-key generation and best-effort deletes the single entry.
+// Ordering matters: we bump first so that even if the delete fails, readers will
+// observe a gen mismatch and self-heal.
+//
+// Failure modes:
+//  1. Bump OK, Delete FAILS  → Safe. Reads will see gen≠dgen and delete on read. (no error returned)
+//  2. Bump FAILS, Delete OK  → Partial. Single is gone, but bulks may reseed the single
+//     until the gen-store recovers or TTL expires. (no error returned)
+//  3. Bump FAILS, Delete FAILS → Likely full backend outage (e.g., Redis cluster down).
+//     We return an error so callers can react.
+//
+// Note: If Provider and GenStore share a Redis cluster, case (3) is the coupled failure.
+// TTLs still bound staleness; a later successful bump invalidates bulks.
 func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 	if !c.enabled {
 		return nil
 	}
 
 	k := c.singleKey(key)
-	newGen := c.bumpGen(ctx, k)
-	_ = c.provider.Del(ctx, k)
-	c.log.Debug("invalidated key (bumped gen + cleared single)", Fields{"key": key, "newGen": newGen})
+	newGen, bumpErr := c.bumpGen(ctx, k)
+	delErr := c.provider.Del(ctx, k)
+
+	// Only surface the coupled failure (likely full outage).
+	if bumpErr != nil && delErr != nil {
+		c.log.Error("invalidate: gen bump and delete failed",
+			Fields{
+				"key":      key,
+				"bump_err": bumpErr,
+				"del_err":  delErr,
+			})
+		return &InvalidateError{Key: key, BumpErr: bumpErr, DelErr: delErr}
+	}
+
+	c.log.Debug("invalidate",
+		Fields{"key": key, "bump_ok": bumpErr == nil, "del_ok": delErr == nil, "newGen": newGen})
+
 	return nil
 }
 
@@ -353,13 +379,13 @@ func (c *cache[V]) snapshotGen(ctx context.Context, storageKey string) uint64 {
 	return g
 }
 
-func (c *cache[V]) bumpGen(ctx context.Context, storageKey string) uint64 {
+func (c *cache[V]) bumpGen(ctx context.Context, storageKey string) (uint64, error) {
 	g, err := c.gen.Bump(ctx, storageKey)
 	if err != nil {
 		c.log.Error("gen bump error", Fields{"key": storageKey, "err": err})
-		return 0
+		return 0, err
 	}
-	return g
+	return g, nil
 }
 
 // - Every requested key must exist in the bulk and be fresh (gen equal to current).

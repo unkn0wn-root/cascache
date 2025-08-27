@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	c "github.com/unkn0wn-root/cascache/codec"
 	"github.com/unkn0wn-root/cascache/internal/wire"
+	pr "github.com/unkn0wn-root/cascache/provider"
 )
 
 type memEntry struct {
@@ -20,6 +22,8 @@ type memEntry struct {
 type memProvider struct {
 	m map[string]memEntry
 }
+
+var _ pr.Provider = (*memProvider)(nil)
 
 func newMemProvider() *memProvider { return &memProvider{m: make(map[string]memEntry)} }
 
@@ -52,7 +56,7 @@ type user struct {
 	Name string `json:"name"`
 }
 
-func newTestCache(t *testing.T, ns string, mp *memProvider, optsOpt func(*Options[user])) CAS[user] {
+func newTestCache(t *testing.T, ns string, mp pr.Provider, optsOpt func(*Options[user])) CAS[user] {
 	t.Helper()
 	opts := Options[user]{
 		Namespace: ns,
@@ -172,7 +176,7 @@ func TestSelfHealOnCorrupt(t *testing.T) {
 	if ok, err := impl.provider.Set(ctx, storageKey, wireEntry, 1, time.Minute); err != nil || !ok {
 		t.Fatalf("inject valid stale: ok=%v err=%v", ok, err)
 	}
-	_ = impl.bumpGen(context.Background(), storageKey) // make it stale
+	_, _ = impl.bumpGen(context.Background(), storageKey) // make it stale
 
 	if _, ok, err := cc.Get(ctx, k); err != nil || ok {
 		t.Fatalf("Get on stale single should miss, ok=%v err=%v", ok, err)
@@ -506,7 +510,7 @@ func TestBulkValidTable(t *testing.T) {
 	bumpTo := func(impl *cache[user], ukey string, n uint64) {
 		sk := impl.singleKey(ukey)
 		for i := uint64(0); i < n; i++ {
-			_ = impl.bumpGen(ctx, sk)
+			_, _ = impl.bumpGen(ctx, sk)
 		}
 	}
 
@@ -628,9 +632,9 @@ func TestSnapshotGensBehavior(t *testing.T) {
 
 	t.Run("mixed", func(t *testing.T) {
 		// m1 -> 1, m3 -> 3, m2 -> 0
-		_ = impl.bumpGen(ctx, impl.singleKey("m1"))
+		_, _ = impl.bumpGen(ctx, impl.singleKey("m1"))
 		for i := 0; i < 3; i++ {
-			_ = impl.bumpGen(ctx, impl.singleKey("m3"))
+			_, _ = impl.bumpGen(ctx, impl.singleKey("m3"))
 		}
 		keys := []string{"m1", "m2", "m3", "m1"} // include duplicate
 		got := cc.SnapshotGens(keys)
@@ -639,4 +643,82 @@ func TestSnapshotGensBehavior(t *testing.T) {
 			t.Fatalf("mixed: got %v want %v", got, want)
 		}
 	})
+}
+
+// Test cluster down behavior
+
+type failingGenStore struct{ bumpErr error }
+
+func (s *failingGenStore) Snapshot(context.Context, string) (uint64, error) { return 0, nil }
+func (s *failingGenStore) SnapshotMany(context.Context, []string) (map[string]uint64, error) {
+	return map[string]uint64{}, nil
+}
+func (s *failingGenStore) Bump(context.Context, string) (uint64, error) { return 0, s.bumpErr }
+func (s *failingGenStore) Cleanup(time.Duration)                        {}
+func (s *failingGenStore) Close(context.Context) error                  { return nil }
+
+type delErrProvider struct {
+	*memProvider
+	err error
+}
+
+var _ pr.Provider = (*delErrProvider)(nil)
+
+func (p *delErrProvider) Del(_ context.Context, key string) error { return p.err }
+
+func TestInvalidateBothFailReturnsError(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	sentinelDelErr := errors.New("del failed")
+	bumpFail := errors.New("bump failed")
+
+	cc := newTestCache(t, "user", &delErrProvider{memProvider: mp, err: sentinelDelErr}, func(o *Options[user]) {
+		o.GenStore = &failingGenStore{bumpErr: bumpFail}
+	})
+	defer cc.Close(ctx)
+
+	err := cc.Invalidate(ctx, "k1")
+	if err == nil {
+		t.Fatalf("expected error when both bump and delete fail")
+	}
+	var ie *InvalidateError
+	if !errors.As(err, &ie) {
+		t.Fatalf("expected InvalidateError, got %T: %v", err, err)
+	}
+	// Unwrap should expose underlying delete error.
+	if !errors.Is(err, sentinelDelErr) {
+		t.Fatalf("expected errors.Is(err, delErr) to be true")
+	}
+}
+
+func TestInvalidateBumpFailDeleteOKNoError(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.GenStore = &failingGenStore{bumpErr: errors.New("bump failed")}
+	})
+	defer cc.Close(ctx)
+
+	if err := cc.Invalidate(ctx, "k2"); err != nil {
+		t.Fatalf("expected no error when bump fails but delete succeeds; got %v", err)
+	}
+}
+
+func TestInvalidateBumpOKDeleteFailNoError(t *testing.T) {
+	ctx := context.Background()
+	sentinelDelErr := errors.New("del failed")
+	// normal genstore (local), provider delete fails
+	mp := &delErrProvider{memProvider: newMemProvider(), err: sentinelDelErr}
+
+	cc := newTestCache(t, "user", mp, nil)
+	defer cc.Close(ctx)
+
+	// Warm a gen so bump definitely succeeds.
+	impl := mustImpl(t, cc)
+	_, _ = impl.bumpGen(ctx, impl.singleKey("k3"))
+
+	if err := cc.Invalidate(ctx, "k3"); err != nil {
+		t.Fatalf("expected no error when delete fails but bump succeeds; got %v", err)
+	}
 }
