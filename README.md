@@ -45,19 +45,19 @@ It does this with **generation-guarded writes** (CAS) and **read-side validation
 
 ### What CasCache guarantees
 
-- **No stale reads after invalidate.**
+- **No stale reads after invalidate:**
   Each key has a **generation**. Mutations call `Invalidate(key)` → bump gen. Reads accept a cached value **only if** its stored gen == current gen; otherwise it is **deleted** and treated as a miss.
 
-- **Safe conditional writes (CAS).**
+- **Safe conditional writes (CAS):**
   Writers snapshot gen **before** reading the DB. `SetWithGen(k, v, obs)` only commits if gen hasn’t changed. If something else updated the key, your write is **skipped** (prevents racing old data into the cache).
 
-- **Graceful failure modes.**
+- **Graceful failure modes:**
   If the gen store is slow/unavailable, singles/reads **self-heal** (treat as miss) and CAS writes **skip**. You don’t serve stale; you just do a little more work.
 
-- **Optional bulk that isn’t risky.**
+- **Optional bulk that isn’t risky:**
   Bulk entries are validated **member-by-member** on read. If any is stale, the bulk is dropped and you fall back to singles. (Extras in the bulk are ignored; missing members invalidate the bulk.)
 
-- **Pluggable**
+- **Pluggable:**
   Works with **Ristretto/BigCache/Redis** for values and **JSON/CBOR/Msgpack/Proto** for payloads. Wire decode is tight and zero-copy for payloads.
 
 ---

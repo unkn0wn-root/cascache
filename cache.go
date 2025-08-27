@@ -183,7 +183,6 @@ func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 	k := c.singleKey(key)
 	newGen, bumpErr := c.bumpGen(ctx, k)
 	delErr := c.provider.Del(ctx, k)
-
 	// Only surface the coupled failure (likely full outage).
 	if bumpErr != nil && delErr != nil {
 		c.log.Error("invalidate: gen bump and delete failed",
@@ -194,7 +193,6 @@ func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 			})
 		return &InvalidateError{Key: key, BumpErr: bumpErr, DelErr: delErr}
 	}
-
 	c.log.Debug("invalidate",
 		Fields{"key": key, "bump_ok": bumpErr == nil, "del_ok": delErr == nil, "newGen": newGen})
 
