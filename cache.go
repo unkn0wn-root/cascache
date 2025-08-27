@@ -22,7 +22,7 @@ type cache[V any] struct {
 	ns             string
 	provider       pr.Provider
 	codec          c.Codec[V]
-	log            Logger
+	hooks          Hooks
 	enabled        bool
 	defaultTTL     time.Duration
 	bulkTTL        time.Duration
@@ -52,7 +52,7 @@ func newCache[V any](opts Options[V]) (*cache[V], error) {
 	}
 
 	// defaults
-	c.log = coalesce[Logger](opts.Logger, NopLogger{})
+	c.hooks = coalesce[Hooks](opts.Hooks, NopHooks{})
 	c.defaultTTL = coalesce[time.Duration](opts.DefaultTTL, 10*time.Minute)
 	c.bulkTTL = coalesce[time.Duration](opts.BulkTTL, 10*time.Minute)
 	c.sweepInterval = coalesce[time.Duration](opts.CleanupInterval, defaultSweep)
@@ -73,7 +73,7 @@ func newCache[V any](opts Options[V]) (*cache[V], error) {
 
 	c.bulkEnabled = !opts.DisableBulk
 	if c.bulkEnabled && isLocalGenStore(c.gen) {
-		c.log.Warn("bulk enabled with local generations; stale bulks possible in multi-replica deployments", nil)
+		c.hooks.LocalGenWithBulk()
 	}
 
 	return c, nil
@@ -111,18 +111,21 @@ func (c *cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
 	dgen, payload, err := wire.DecodeSingle(raw)
 	if err != nil {
 		_ = c.provider.Del(ctx, k) // self-heal corrupt
+		c.hooks.SelfHealSingle(k, "corrupt")
 		return zero, false, nil
 	}
 
 	// validate generation
 	if dgen != c.snapshotGen(ctx, k) {
 		_ = c.provider.Del(ctx, k)
+		c.hooks.SelfHealSingle(k, "gen_mismatch")
 		return zero, false, nil
 	}
 
 	v, err := c.codec.Decode(payload)
 	if err != nil {
 		_ = c.provider.Del(ctx, k) // self-heal
+		c.hooks.SelfHealSingle(k, "value_decode")
 		return zero, false, nil
 	}
 	return v, true, nil
@@ -142,7 +145,6 @@ func (c *cache[V]) SetWithGen(ctx context.Context, key string, value V, observed
 	k := c.singleKey(key)
 	if c.snapshotGen(ctx, k) != observedGen {
 		// generation moved; skip stale write
-		c.log.Debug("SetWithGen skipped (gen mismatch)", Fields{"key": key, "obs": observedGen})
 		return nil
 	}
 
@@ -157,7 +159,7 @@ func (c *cache[V]) SetWithGen(ctx context.Context, key string, value V, observed
 		return err
 	}
 	if !ok {
-		c.log.Debug("SetWithGen rejected by provider (pressure)", Fields{"key": key})
+		c.hooks.ProviderSetRejected(k, false)
 	}
 	return nil
 }
@@ -181,21 +183,14 @@ func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 	}
 
 	k := c.singleKey(key)
-	newGen, bumpErr := c.bumpGen(ctx, k)
+	_, bumpErr := c.bumpGen(ctx, k)
 	delErr := c.provider.Del(ctx, k)
+
 	// Only surface the coupled failure (likely full outage).
 	if bumpErr != nil && delErr != nil {
-		c.log.Error("invalidate: gen bump and delete failed",
-			Fields{
-				"key":      key,
-				"bump_err": bumpErr,
-				"del_err":  delErr,
-			})
+		c.hooks.InvalidateOutage(key, bumpErr, delErr)
 		return &InvalidateError{Key: key, BumpErr: bumpErr, DelErr: delErr}
 	}
-	c.log.Debug("invalidate",
-		Fields{"key": key, "bump_ok": bumpErr == nil, "del_ok": delErr == nil, "newGen": newGen})
-
 	return nil
 }
 
@@ -250,6 +245,11 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 			return out, missing, nil
 		}
 		_ = c.provider.Del(ctx, bk) // self-heal
+		reason := "invalid_or_stale"
+		if err != nil {
+			reason = "decode_error"
+		}
+		c.hooks.BulkRejected(c.ns, len(us), reason)
 	}
 
 	// Fallback: singles with memoization
@@ -282,7 +282,7 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 		obs, ok := observedGens[k]
 		if !ok || c.snapshotGen(ctx, kk) != obs {
 			// skip bulk; seed singles instead (use default single TTL)
-			c.log.Debug("SetBulkWithGens skipped (gen mismatch)", Fields{"key": k})
+			c.hooks.BulkRejected(c.ns, len(items), "gen_mismatch")
 			for kk2, v := range items {
 				if obs2, ok := observedGens[kk2]; ok {
 					_ = c.SetWithGen(ctx, kk2, v, obs2, c.defaultTTL)
@@ -324,7 +324,7 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 		return err
 	}
 	if !ok {
-		c.log.Debug("bulk Set rejected; seeding singles", Fields{"bulkKey": bk})
+		c.hooks.ProviderSetRejected(bk, true)
 		for k, v := range items {
 			_ = c.SetWithGen(ctx, k, v, observedGens[k], c.defaultTTL)
 		}
@@ -371,7 +371,7 @@ func (c *cache[V]) snapshotGen(ctx context.Context, storageKey string) uint64 {
 	g, err := c.gen.Snapshot(ctx, storageKey)
 	if err != nil {
 		// Conservative: treat as 0 so CAS writes will skip; reads will self-heal
-		c.log.Warn("gen snapshot error", Fields{"key": storageKey, "err": err})
+		c.hooks.GenSnapshotError(1, err)
 		return 0
 	}
 	return g
@@ -380,7 +380,7 @@ func (c *cache[V]) snapshotGen(ctx context.Context, storageKey string) uint64 {
 func (c *cache[V]) bumpGen(ctx context.Context, storageKey string) (uint64, error) {
 	g, err := c.gen.Bump(ctx, storageKey)
 	if err != nil {
-		c.log.Error("gen bump error", Fields{"key": storageKey, "err": err})
+		c.hooks.GenBumpError(storageKey, err)
 		return 0, err
 	}
 	return g, nil
@@ -402,7 +402,7 @@ func (c *cache[V]) bulkValid(ctx context.Context, sortedRequested []string, item
 
 	gens, err := c.gen.SnapshotMany(ctx, storage)
 	if err != nil {
-		c.log.Warn("gen snapshot many failed", Fields{"err": err})
+		c.hooks.GenSnapshotError(len(sortedRequested), err)
 		return false
 	}
 
