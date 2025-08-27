@@ -1,4 +1,6 @@
-package sloghooks
+// Package sloghook provides a slog-based implementation of cascache.Hooks.
+// It is optional: the core cascache package has no logging dependency.
+package sloghook
 
 import (
 	"crypto/sha256"
@@ -9,14 +11,17 @@ import (
 	"github.com/unkn0wn-root/cascache"
 )
 
+// Options configures the slog-based Hooks.
 type Options struct {
-	// Sampling to avoid floods; 0/1 = log all.
+	// Sampling to avoid log floods; 0 or 1 = log every event.
 	SelfHealEvery   uint64
 	BulkRejectEvery uint64
-	// Optional key redactor. Defaults to SHA-256 prefix.
+
+	// Optional key redactor. If nil, a short SHA-256 prefix is used.
 	Redact func(string) string
 }
 
+// Hooks is a slog-backed implementation of cascache.Hooks.
 type Hooks struct {
 	l    *slog.Logger
 	opts Options
@@ -27,6 +32,7 @@ type Hooks struct {
 
 var _ cascache.Hooks = (*Hooks)(nil)
 
+// New creates a slog-based Hooks.
 func New(l *slog.Logger, opts Options) *Hooks {
 	return &Hooks{l: l, opts: opts}
 }
@@ -36,13 +42,14 @@ func (h *Hooks) redact(k string) string {
 		return h.opts.Redact(k)
 	}
 	sum := sha256.Sum256([]byte(k))
-	return hex.EncodeToString(sum[:8])
+	return hex.EncodeToString(sum[:8]) // short prefix
 }
 
 func sample(n uint64, ctr *atomic.Uint64) bool {
 	if n == 0 || n == 1 {
 		return true
 	}
+	// Log the Nth, 2N-th, ... event.
 	return ctr.Add(1)%n == 0
 }
 
