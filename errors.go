@@ -1,4 +1,3 @@
-// errors.go
 package cascache
 
 import (

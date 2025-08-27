@@ -57,7 +57,7 @@ It does this with **generation-guarded writes** (CAS) and **read-side validation
 - **Optional bulk that isn’t risky.**
   Bulk entries are validated **member-by-member** on read. If any is stale, the bulk is dropped and you fall back to singles. (Extras in the bulk are ignored; missing members invalidate the bulk.)
 
-- **Pluggable & fast.**
+- **Pluggable**
   Works with **Ristretto/BigCache/Redis** for values and **JSON/CBOR/Msgpack/Proto** for payloads. Wire decode is tight and zero-copy for payloads.
 
 ---

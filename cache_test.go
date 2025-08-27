@@ -82,6 +82,10 @@ func mustImpl[V any](t *testing.T, c CAS[V]) *cache[V] {
 	return impl
 }
 
+// ==============================
+// Single-entry CAS tests
+// ==============================
+
 // TestSingleCASFlow verifies CAS write, read, invalidation, and stale write skip.
 func TestSingleCASFlow(t *testing.T) {
 	ctx := context.Background()
@@ -139,6 +143,10 @@ func TestSingleCASFlow(t *testing.T) {
 	}
 }
 
+// ==============================
+// Self-heal tests (corruption/gen mismatch)
+// ==============================
+
 // TestSelfHealOnCorrupt ensures corrupt provider bytes are deleted and missed,
 // and that a valid-but-stale single is rejected and removed.
 func TestSelfHealOnCorrupt(t *testing.T) {
@@ -185,6 +193,10 @@ func TestSelfHealOnCorrupt(t *testing.T) {
 		t.Fatalf("stale entry was not deleted by self-heal")
 	}
 }
+
+// ==============================
+// Bulk behavior tests
+// ==============================
 
 // TestBulkHappyAndStale validates bulk read, then invalidation of one member causes
 // bulk rejection and fallback to singles with missing reported for the invalidated key.
@@ -390,6 +402,10 @@ func TestBulkKeyCanonicalization(t *testing.T) {
 	}
 }
 
+// ==============================
+// Wire format tests
+// ==============================
+
 // DecodeSingle must reject trailing bytes (strict framing).
 func TestWireDecodeSingleRejectsTrailing(t *testing.T) {
 	b := wire.EncodeSingle(7, []byte("x"))
@@ -459,6 +475,10 @@ func TestDecodeBulkFakeNNotPrealloc(t *testing.T) {
 		t.Fatalf("DecodeBulk should fail on wrong n with insufficient bytes")
 	}
 }
+
+// ==============================
+// Snapshot gens tests
+// ==============================
 
 // Self-heal when a valid single has trailing bytes appended in the provider.
 func TestSelfHealOnGenMismatchSingle(t *testing.T) {
@@ -645,7 +665,9 @@ func TestSnapshotGensBehavior(t *testing.T) {
 	})
 }
 
-// Test cluster down behavior
+// ==============================
+// Invalidate edge-case behavior (cluster down etc.)
+// ==============================
 
 type failingGenStore struct{ bumpErr error }
 
