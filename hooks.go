@@ -1,33 +1,19 @@
 package cascache
 
-// Hooks lightweight callbacks for high-signal events.
-// Implementations MUST be cheap and non-blocking.
-// The cache calls them on hot paths.
+// Hooks are lightweight callbacks for high-signal events.
+// Implementations MUST be cheap and non-blocking; do not perform I/O.
+// If work may block, buffer it and drop on backpressure (best effort).
 type Hooks interface {
-	// A single entry was deleted by the cache on read.
-	// reason ∈ {"corrupt", "gen_mismatch", "value_decode"}
 	SelfHealSingle(storageKey, reason string)
-
-	// A bulk read path was rejected and fell back to singles.
-	// reason ∈ {"decode_error", "invalid_or_stale", "snapshot_error"}
 	BulkRejected(namespace string, requested int, reason string)
-
-	// Provider returned ok=false on Set (backpressure/eviction).
 	ProviderSetRejected(storageKey string, isBulk bool)
-
-	// GenStore errors (snapshot or bump).
-	// count is number of keys involved (1 for Snapshot/Bump, N for SnapshotMany).
 	GenSnapshotError(count int, err error)
 	GenBumpError(storageKey string, err error)
-
-	// Both gen bump and delete failed during Invalidate (likely backend outage).
 	InvalidateOutage(key string, bumpErr, delErr error)
-
-	// Bulk is enabled with a local GenStore (stale bulks possible across replicas).
 	LocalGenWithBulk()
 }
 
-// NopHooks is the default no-op
+// NopHooks is a default no-op.
 type NopHooks struct{}
 
 func (NopHooks) SelfHealSingle(string, string)         {}
@@ -37,3 +23,74 @@ func (NopHooks) GenSnapshotError(int, error)           {}
 func (NopHooks) GenBumpError(string, error)            {}
 func (NopHooks) InvalidateOutage(string, error, error) {}
 func (NopHooks) LocalGenWithBulk()                     {}
+
+// Multi returns a Hooks that fan-outs to all provided hooks, in order.
+// Nil entries are ignored.
+// Panics from a hook will propagate to the caller.
+//
+// example usage:
+//
+// logH   := sloghook.New(slog.Default(), sloghook.Options{SelfHealEvery: 10})
+// metH   := promhook.New(...)            // some kind og metrics adapter
+// auditH := myAuditHook{...}             // audit adapter
+//
+// // fan-out
+// mh := cascache.MultiHooks{logH, metH, auditH}
+//
+// // Either: single async queue for the whole fan-out
+// hooks := asynchook.New(mh, 1, 1000)
+//
+// // Or: give each hook its own queue (isolate backpressure)
+//
+//	hooks := cascache.MultiHooks{
+//	    asynchook.New(logH,   1, 1000),
+//	    asynchook.New(metH,   1, 1000),
+//	    asynchook.New(auditH, 1, 1000),
+//	}
+func Multi(hs ...Hooks) Hooks {
+	nn := make([]Hooks, 0, len(hs))
+	for _, h := range hs {
+		if h != nil {
+			nn = append(nn, h)
+		}
+	}
+	return multiHooks(nn)
+}
+
+type multiHooks []Hooks
+
+func (m multiHooks) SelfHealSingle(k, r string) {
+	for _, h := range m {
+		h.SelfHealSingle(k, r)
+	}
+}
+func (m multiHooks) BulkRejected(ns string, n int, r string) {
+	for _, h := range m {
+		h.BulkRejected(ns, n, r)
+	}
+}
+func (m multiHooks) ProviderSetRejected(k string, b bool) {
+	for _, h := range m {
+		h.ProviderSetRejected(k, b)
+	}
+}
+func (m multiHooks) GenSnapshotError(n int, err error) {
+	for _, h := range m {
+		h.GenSnapshotError(n, err)
+	}
+}
+func (m multiHooks) GenBumpError(k string, err error) {
+	for _, h := range m {
+		h.GenBumpError(k, err)
+	}
+}
+func (m multiHooks) InvalidateOutage(k string, be, de error) {
+	for _, h := range m {
+		h.InvalidateOutage(k, be, de)
+	}
+}
+func (m multiHooks) LocalGenWithBulk() {
+	for _, h := range m {
+		h.LocalGenWithBulk()
+	}
+}
