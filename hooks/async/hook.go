@@ -7,8 +7,8 @@
 //	"github.com/unkn0wn-root/cascache"
 //	"github.com/unkn0wn-root/cascache/codec"
 //	"github.com/unkn0wn-root/cascache/genstore"
-//	hookasync "github.com/unkn0wn-root/cascache/hooks/async"
-//	sloghook  "github.com/unkn0wn-root/cascache/hooks/slog"
+//	"github.com/unkn0wn-root/cascache/hooks/async"
+//	"github.com/unkn0wn-root/cascache/hooks/slog"
 //
 // )
 //
@@ -17,7 +17,7 @@
 //	    BulkRejectEvery: 1,  // log every bulk rejection
 //	})
 //
-// hooks := hookasync.New(raw, 1, 1000) // 1 worker; queue 1000 events
+// hooks := asynchook.New(raw, 1, 1000) // 1 worker; queue 1000 events
 // defer hooks.Close()
 //
 //	cache, _ := cascache.New[User](cascache.Options[User]{
@@ -27,7 +27,7 @@
 //	    GenStore:  genstore.NewRedisGenStoreWithTTL(rdb, "app:prod:user", 24*time.Hour),
 //	    Hooks:     hooks, // or `raw` if you don’t want async
 //	})
-package hookasync
+package asynchook
 
 import (
 	"sync"
