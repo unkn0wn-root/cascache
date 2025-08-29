@@ -51,13 +51,12 @@ func (p *Kioshun) Get(_ context.Context, key string) ([]byte, bool, error) {
 	return v, true, nil
 }
 
-//   - ttl<=0 => “no expiry” (translated to kioshun.NoExpiration)
-//   - cost is ignored (kioshun is item-capacity based, not cost-based)
-//   - ok==false && err==nil indicates an *intentional* refusal (AdmissionLFU under pressure)
-//
 // kioshun’s Set has no (ok) result. We detect admission refusal by checking existence
 // after Set. For new keys that were rejected, Exists() will be false.
 // For updates, the key already exists and will remain true → ok=true.
+//   - ttl<=0 => “no expiry” (translated to kioshun.NoExpiration)
+//   - cost is ignored (kioshun is item-capacity based, not cost-based)
+//   - ok==false && err==nil indicates an *intentional* refusal (AdmissionLFU under pressure)
 func (p *Kioshun) Set(_ context.Context, key string, value []byte, _ int64, ttl time.Duration) (bool, error) {
 	if ttl <= 0 {
 		ttl = kc.NoExpiration
@@ -65,7 +64,7 @@ func (p *Kioshun) Set(_ context.Context, key string, value []byte, _ int64, ttl 
 	if err := p.c.Set(key, value, ttl); err != nil {
 		return false, err
 	}
-	// Best-effort detection of admission rejection (only occurs for new keys under AdmissionLFU).
+
 	ok := p.c.Exists(key)
 	return ok, nil
 }
