@@ -7,6 +7,7 @@ require (
 	github.com/dgraph-io/ristretto v0.1.1
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/redis/go-redis/v9 v9.5.2
+	github.com/unkn0wn-root/kioshun v0.2.1
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	google.golang.org/protobuf v1.36.8
 )
