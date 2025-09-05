@@ -136,10 +136,16 @@ func (s *LocalGenStore) Cleanup(retention time.Duration) {
 // Close stops the optional cleanup goroutine and releases the ticker.
 // Safe to call Close multiple times; subsequent calls are no-ops.
 func (s *LocalGenStore) Close(_ context.Context) error {
-	if s.stopCh != nil {
-		close(s.stopCh)
-		if s.ticker != nil {
-			s.ticker.Stop()
+	s.mu.Lock()
+	stopCh := s.stopCh
+	ticker := s.ticker
+	s.stopCh, s.ticker = nil, nil
+	s.mu.Unlock()
+
+	if stopCh != nil {
+		close(stopCh)
+		if ticker != nil {
+			ticker.Stop()
 		}
 		s.wg.Wait()
 	}
