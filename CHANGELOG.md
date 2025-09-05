@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.1.1](https://github.com/unkn0wn-root/cascache/compare/v0.1.0...v0.1.1) (2025-09-05)
+
+
+### Features
+
+* **tests:** add new test to test close ([1d9e839](https://github.com/unkn0wn-root/cascache/commit/1d9e839ade7c9d9a5510d251c6d6a668eb00b488))
+
+
+### Bug Fixes
+
+* **genstore-local:** make Close idempotent ([3f7863e](https://github.com/unkn0wn-root/cascache/commit/3f7863eca25935b6a217f646f5c4b52c08a5d111))
+* **genstore-local:** use sync.Once for close ([9208e8c](https://github.com/unkn0wn-root/cascache/commit/9208e8cd06834a2199c5677edc31bfc1979c36a6))
+
 ## [0.1.0](https://github.com/unkn0wn-root/cascache/compare/v0.0.9...v0.1.0) (2025-08-29)
 
 
