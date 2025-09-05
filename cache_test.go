@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	c "github.com/unkn0wn-root/cascache/codec"
+	"github.com/unkn0wn-root/cascache/genstore"
 	"github.com/unkn0wn-root/cascache/internal/wire"
 	pr "github.com/unkn0wn-root/cascache/provider"
 )
@@ -191,6 +194,32 @@ func TestSelfHealOnCorrupt(t *testing.T) {
 	}
 	if _, ok, _ := mp.Get(ctx, storageKey); ok {
 		t.Fatalf("stale entry was not deleted by self-heal")
+	}
+}
+
+func TestLocalGenStoreCloseIdempotent(t *testing.T) {
+	s := genstore.NewLocalGenStore(50*time.Millisecond, time.Second)
+	defer s.Close(context.Background())
+
+	// Do some bumps to exercise the map while cleanup may run
+	for i := 0; i < 100; i++ {
+		_, _ = s.Bump(context.Background(), fmt.Sprintf("k%d", i))
+	}
+
+	// Close many times
+	for i := 0; i < 5; i++ {
+		_ = s.Close(context.Background())
+	}
+}
+
+func TestLocalGenStoreNoLeakOnClose(t *testing.T) {
+	before := runtime.NumGoroutine()
+	s := genstore.NewLocalGenStore(10*time.Millisecond, time.Second)
+	_ = s.Close(context.Background())
+	time.Sleep(20 * time.Millisecond) // give it a moment to exit
+	after := runtime.NumGoroutine()
+	if after > before+1 { // allow a little noise
+		t.Fatalf("goroutines leaked: before=%d after=%d", before, after)
 	}
 }
 
