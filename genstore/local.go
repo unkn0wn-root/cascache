@@ -27,11 +27,12 @@ type localGenEntry struct {
 // Ctx parameters are accepted to satisfy the GenStore interface, but are
 // ignored because all operations are local and non-blocking.
 type LocalGenStore struct {
-	mu     sync.RWMutex
-	gens   map[string]localGenEntry
-	ticker *time.Ticker
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	mu        sync.RWMutex
+	gens      map[string]localGenEntry
+	ticker    *time.Ticker
+	stopCh    chan struct{}
+	wg        sync.WaitGroup
+	closeOnce sync.Once
 
 	// retention is the minimum age since the last bump after which a key may be
 	// pruned by Cleanup. A non-positive retention disables pruning.
@@ -50,21 +51,23 @@ func NewLocalGenStore(cleanupInterval, retention time.Duration) *LocalGenStore {
 		gens:      make(map[string]localGenEntry),
 		retention: retention,
 	}
+
 	if cleanupInterval > 0 && retention > 0 {
-		s.ticker = time.NewTicker(cleanupInterval)
 		s.stopCh = make(chan struct{})
 		s.wg.Add(1)
-		go func() {
+		go func(stop <-chan struct{}) {
 			defer s.wg.Done()
+			t := time.NewTicker(cleanupInterval)
+			defer t.Stop()
 			for {
 				select {
-				case <-s.ticker.C:
+				case <-t.C:
 					s.Cleanup(retention)
-				case <-s.stopCh:
+				case <-stop:
 					return
 				}
 			}
-		}()
+		}(s.stopCh)
 	}
 	return s
 }
@@ -136,12 +139,12 @@ func (s *LocalGenStore) Cleanup(retention time.Duration) {
 // Close stops the optional cleanup goroutine and releases the ticker.
 // Safe to call Close multiple times; subsequent calls are no-ops.
 func (s *LocalGenStore) Close(_ context.Context) error {
-	if s.stopCh != nil {
-		close(s.stopCh)
-		if s.ticker != nil {
-			s.ticker.Stop()
-		}
-		s.wg.Wait()
+	if s.stopCh == nil {
+		return nil
 	}
+	s.closeOnce.Do(func() {
+		close(s.stopCh)
+		s.wg.Wait()
+	})
 	return nil
 }
