@@ -349,7 +349,10 @@ type Provider interface {
 
 - **Ristretto**: in-process; per-entry TTL; cost-based eviction.
 - **BigCache**: in-process; global life window; per-entry TTL ignored.
-- **Redis**: distributed (optional); per-entry TTL.
+- **Redis**: distributed (optional); per-entry TTL. Pass an existing
+  `goredis.UniversalClient` and reuse it across caches; set
+  `CloseClient: true` in the provider config only when this cache owns the
+  client and should close it on teardown.
 
 Use any provider for values. Generations can be local or distributed independently.
 
@@ -429,4 +432,3 @@ ComputeSetCost: func(key string, raw []byte, isBulk bool, n int) int64 {
 - **Cleanup (local gens):** periodic prune by last bump time (default retention 30d).
 
 ---
-
