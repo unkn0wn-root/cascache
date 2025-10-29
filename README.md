@@ -23,10 +23,10 @@ and an opt‑in distributed mode for multi-replica deployments.
 ## Why CasCache
 
 #### TL;DR
-If you’ve ever shipped “delete-then-set” and still served stale data (or fought weird race windows in multi-replica setups), **cascache** gives you a simple guarantee:
+Apps that rely on “delete-then-set” patterns can still surface stale data, especially when multiple replicas race one another. **cascache** offers a clear guarantee:
 
-> **After you invalidate a key, the cache will never serve the old value again.**
-> No ad-hoc deletes, no timing games, no best-effort TTLs.
+> **After you invalidate a key, the cache will never serve the previous value.**
+> No additional delete cycles, manual timing coordination, or best-effort TTL tuning.
 
 It does this with **generation-guarded writes** (CAS) and **read-side validation** using a tiny per-key counter.
 
@@ -45,42 +45,36 @@ It does this with **generation-guarded writes** (CAS) and **read-side validation
 
 ### What CasCache guarantees
 
-- **No stale reads after invalidate:**
-  Each key has a **generation**. Mutations call `Invalidate(key)` → bump gen. Reads accept a cached value **only if** its stored gen == current gen; otherwise it is **deleted** and treated as a miss.
+- **Post-invalidation freshness:**
+  Each key carries a **generation**. Mutations call `Invalidate(key)` to bump the generation. Reads accept a cached value **only if** its stored generation matches the current one; otherwise the entry is **deleted** and treated as a miss.
 
 - **Safe conditional writes (CAS):**
-  Writers snapshot gen **before** reading the DB. `SetWithGen(k, v, obs)` only commits if gen hasn’t changed. If something else updated the key, your write is **skipped** (prevents racing old data into the cache).
+  Writers snapshot the generation **before** reading from the backing store. `SetWithGen(k, v, obs)` commits only if the generation is unchanged. If another writer updated the key, the write is **skipped**, preventing stale data from being reintroduced.
 
 - **Graceful failure modes:**
-  If the gen store is slow/unavailable, singles/reads **self-heal** (treat as miss) and CAS writes **skip**. You don’t serve stale; you just do a little more work.
+  If the generation store is slow or unavailable, single-key reads **self-heal** by treating results as misses, and CAS writes **skip**. The cache never serves stale data; the system simply performs extra work.
 
-- **Optional bulk that isn’t risky:**
-  Bulk entries are validated **member-by-member** on read. If any is stale, the bulk is dropped and you fall back to singles. (Extras in the bulk are ignored; missing members invalidate the bulk.)
+- **Validated bulk caching:**
+  Bulk entries are checked **member by member** during reads. If any entry is stale, the bulk payload is discarded and CasCache falls back to single-key fetches. Extras in the bulk are ignored; missing members render it invalid.
 
-- **Pluggable:**
-  Works with **Ristretto/BigCache/Redis** for values and **JSON/CBOR/Msgpack/Proto** for payloads. Wire decode is tight and zero-copy for payloads.
+- **Pluggable components:**
+  Works with **Ristretto/BigCache/Redis** for storage and **JSON/CBOR/Msgpack/Proto** for payloads. Wire decoding stays tight and zero-copy for payloads.
 
 ---
 
 ### When to use it
 
-- You render entities that **must not be stale** after updates (profiles, product detail, permissions, pricing, feature flags).
-- You’ve got **multiple replicas** and coordinating invalidations is painful.
-- You want **predictable semantics** under incidents: serve fresh or miss, never “maybe stale.”
-
-### When *not* to use it
-
-- “A little staleness is fine” (feed pages, metrics tiles). Plain TTL might be enough.
-- Keys are **write-hot** (every read followed by a write) - caching won’t help.
-- You need **dogpile prevention** (single-flight). CasCache doesn’t include it; add it at the call site if needed.
+- Workloads that **must reflect updates immediately** (profile data, product catalogs, permissions, pricing, feature flags etc.)
+- Environments with **multiple replicas** where coordinating invalidations is error-prone.
+- Systems that need **predictable behaviour** under incidents: either serve fresh data or miss, never “maybe stale.”
 
 ---
 
-### Why this beats the usual tricks
+### Comparison with common patterns
 
-- **TTL** trades freshness for load. CasCache gives **freshness** and keeps TTLs for eviction only.
-- **Delete-then-set** has races. Generations remove the race by making freshness a **property of the read**, not perfect timing.
-- **Write-through** still needs coordination. CAS makes coordination trivial: **bump → snapshot → compare**.
+- **TTL-only caching** trades freshness for load. CasCache preserves freshness and uses TTLs strictly for eviction.
+- **Delete-then-set** introduces race windows. Generations make freshness a **read-time concern** instead of a timing exercise.
+- **Write-through caching** still needs coordination. CAS reduces coordination to an explicit sequence: **bump → snapshot → compare**.
 
 ---
 
