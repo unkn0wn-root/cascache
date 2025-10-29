@@ -126,6 +126,7 @@ func newUserCache() (cascache.CAS[User], error) {
 ```
 
 #### 2) Safe single read (never stale)
+> **Rule:** Snapshot the generation **before** touching the DB. If you read first, a concurrent invalidation can bump the generation and your later `SetWithGen` may reinsert stale data.
 
 ```go
 type UserRepo struct {
@@ -415,14 +416,12 @@ In examples we often use `CAS` to emphasize the CAS semantics, but `Cache` is eq
 
 - **Time:** O(1) singles; O(n) bulk for n members.
 - **Allocations:** zero-copy wire decode; one `string` alloc per bulk item.
-- **Ristretto cost hint:** evict bulks first under pressure.
 ```go
 ComputeSetCost: func(key string, raw []byte, isBulk bool, n int) int64 {
     if isBulk { return int64(n) }
     return 1
 }
 ```
-- **TTLs:** `DefaultTTL`, `BulkTTL`. For BigCache, the global life window applies.
 - **Cleanup (local gens):** periodic prune by last bump time (default retention 30d).
 
 ---
