@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.1.2](https://github.com/unkn0wn-root/cascache/compare/v0.1.1...v0.1.2) (2025-10-29)
+
+
+### Bug Fixes
+
+* **providers:** return proper error from bigcache and add lifetime redis client config ([10b929d](https://github.com/unkn0wn-root/cascache/commit/10b929dd182143be4d568d040c1cbee3ad19ce23))
+
 ### [0.1.1](https://github.com/unkn0wn-root/cascache/compare/v0.1.0...v0.1.1) (2025-09-05)
 
 
