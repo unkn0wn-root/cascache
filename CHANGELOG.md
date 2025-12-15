@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [0.2.0](https://github.com/unkn0wn-root/cascache/compare/v0.1.2...v0.2.0) (2025-12-15)
+
+
+### Features
+
+* breaking change - callers now can use own context ([f2d1296](https://github.com/unkn0wn-root/cascache/commit/f2d1296b5839b2ad5dace3e2b031405a4702b1f4))
+
 ### [0.1.2](https://github.com/unkn0wn-root/cascache/compare/v0.1.1...v0.1.2) (2025-10-29)
 
 
