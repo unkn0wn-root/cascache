@@ -339,23 +339,23 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 }
 
 // SnapshotGen returns the current generation for key.
-func (c *cache[V]) SnapshotGen(key string) uint64 {
-	return c.snapshotGen(context.Background(), c.singleKey(key))
+func (c *cache[V]) SnapshotGen(ctx context.Context, key string) uint64 {
+	return c.snapshotGen(ctx, c.singleKey(key))
 }
 
 // SnapshotGens returns current generations for multiple keys.
-func (c *cache[V]) SnapshotGens(keys []string) map[string]uint64 {
+func (c *cache[V]) SnapshotGens(ctx context.Context, keys []string) map[string]uint64 {
 	storage := make([]string, len(keys))
 	for i, k := range keys {
 		storage[i] = c.singleKey(k)
 	}
 
-	m, err := c.gen.SnapshotMany(context.Background(), storage)
+	m, err := c.gen.SnapshotMany(ctx, storage)
 	if err != nil {
 		// fallback one by one
 		out := make(map[string]uint64, len(keys))
 		for _, k := range keys {
-			out[k] = c.SnapshotGen(k)
+			out[k] = c.snapshotGen(ctx, c.singleKey(k))
 		}
 		return out
 	}

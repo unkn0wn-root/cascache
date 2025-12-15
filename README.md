@@ -82,7 +82,7 @@ It does this with **generation-guarded writes** (CAS) and **read-side validation
 
 ```text
 DB write succeeds  →  Cache.Invalidate(k)       // bump gen; clear single
-Read slow path     →  snap := SnapshotGen(k) → load DB → SetWithGen(k, v, snap)
+Read slow path     →  snap := SnapshotGen(ctx, k) → load DB → SetWithGen(k, v, snap)
 Read fast path     →  Get(k) validates stored gen == current; else self-heals
 Bulk read          →  every member’s gen must match; else drop bulk → singles
 Multi-replica      →  use RedisGenStore so all nodes see the same gen
@@ -140,7 +140,7 @@ func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
 	}
 
 	// CAS snapshot BEFORE reading DB
-	obs := r.Cache.SnapshotGen(id)
+	obs := r.Cache.SnapshotGen(ctx, id)
 
 	u, err := r.dbSelectUser(ctx, id) // your DB load
 	if err != nil { return User{}, err }
@@ -173,7 +173,7 @@ func (r *UserRepo) GetMany(ctx context.Context, ids []string) (map[string]User, 
 	}
 
 	// Snapshot *before* DB read
-	obs := r.Cache.SnapshotGens(missing)
+	obs := r.Cache.SnapshotGens(ctx, missing)
 
 	// Load missing from DB in one shot
 	loaded, err := r.dbSelectUsers(ctx, missing)
@@ -271,7 +271,7 @@ permCache, _ := cascache.New[permission](cascache.Options[permission]{
 ### Write path (single, CAS)
 
 ```
-obs := SnapshotGen(k)        // BEFORE DB read
+obs := SnapshotGen(ctx, k)   // BEFORE DB read
 v   := DB.Read(k)
 SetWithGen(k, v, obs)        // write iff currentGen(k) == obs
 ```
@@ -384,8 +384,8 @@ type CAS[V any] interface {
     SetBulkWithGens(ctx context.Context, items map[string]V, observedGens map[string]uint64, ttl time.Duration) error
 
     // Generations
-    SnapshotGen(key string) uint64
-    SnapshotGens(keys []string) map[string]uint64
+    SnapshotGen(ctx context.Context, key string) uint64
+    SnapshotGens(ctx context.Context, keys []string) map[string]uint64
 }
 ```
 ---
