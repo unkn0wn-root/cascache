@@ -105,7 +105,7 @@ func TestSingleCASFlow(t *testing.T) {
 	}
 
 	// CAS write with observed gen 0.
-	obs := cc.SnapshotGen(k)
+	obs := cc.SnapshotGen(ctx, k)
 	if obs != 0 {
 		t.Fatalf("SnapshotGen expected 0, got %d", obs)
 	}
@@ -137,7 +137,7 @@ func TestSingleCASFlow(t *testing.T) {
 	}
 
 	// Fresh write with observed current gen should succeed.
-	obs2 := cc.SnapshotGen(k)
+	obs2 := cc.SnapshotGen(ctx, k)
 	if err := cc.SetWithGen(ctx, k, v, obs2, 0); err != nil {
 		t.Fatalf("SetWithGen (fresh): %v", err)
 	}
@@ -243,7 +243,7 @@ func TestBulkHappyAndStale(t *testing.T) {
 	}
 
 	// Snapshot gens (all zero).
-	snap := cc.SnapshotGens(keys)
+	snap := cc.SnapshotGens(ctx, keys)
 
 	// Write bulk with gens.
 	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
@@ -302,7 +302,7 @@ func TestBulkDisabled(t *testing.T) {
 		"x": {ID: "x", Name: "X"},
 		"y": {ID: "y", Name: "Y"},
 	}
-	snap := cc.SnapshotGens(keys)
+	snap := cc.SnapshotGens(ctx, keys)
 
 	// Set bulk with gens -> should seed singles only (no bulk key).
 	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
@@ -341,7 +341,7 @@ func TestBulkOrderInsensitiveHit(t *testing.T) {
 		"u3": {ID: "u3", Name: "B"},
 		"u4": {ID: "u4", Name: "C"},
 	}
-	snap := cc.SnapshotGens([]string{"u1", "u3", "u4"})
+	snap := cc.SnapshotGens(ctx, []string{"u1", "u3", "u4"})
 	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
 		t.Fatalf("SetBulkWithGens: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestBulkDuplicateRequestHit(t *testing.T) {
 		"u3": {ID: "u3", Name: "B"},
 		"u4": {ID: "u4", Name: "C"},
 	}
-	snap := cc.SnapshotGens([]string{"u1", "u3", "u4"})
+	snap := cc.SnapshotGens(ctx, []string{"u1", "u3", "u4"})
 	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
 		t.Fatalf("SetBulkWithGens: %v", err)
 	}
@@ -663,7 +663,7 @@ func TestSnapshotGensBehavior(t *testing.T) {
 	impl := mustImpl(t, cc)
 
 	t.Run("empty", func(t *testing.T) {
-		got := cc.SnapshotGens(nil)
+		got := cc.SnapshotGens(ctx, nil)
 		if len(got) != 0 {
 			t.Fatalf("empty: expected empty map, got %v", got)
 		}
@@ -672,7 +672,7 @@ func TestSnapshotGensBehavior(t *testing.T) {
 	t.Run("duplicates_and_zero_missing", func(t *testing.T) {
 		// No bumps yet → everything is 0
 		keys := []string{"dupa", "dupa", "other"}
-		got := cc.SnapshotGens(keys)
+		got := cc.SnapshotGens(ctx, keys)
 		want := map[string]uint64{"dupa": 0, "other": 0}
 		if !equalU64(got, want) {
 			t.Fatalf("dups/zeros: got %v want %v", got, want)
@@ -686,7 +686,7 @@ func TestSnapshotGensBehavior(t *testing.T) {
 			_, _ = impl.bumpGen(ctx, impl.singleKey("m3"))
 		}
 		keys := []string{"m1", "m2", "m3", "m1"} // include duplicate
-		got := cc.SnapshotGens(keys)
+		got := cc.SnapshotGens(ctx, keys)
 		want := map[string]uint64{"m1": 1, "m2": 0, "m3": 3}
 		if !equalU64(got, want) {
 			t.Fatalf("mixed: got %v want %v", got, want)

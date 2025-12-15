@@ -29,8 +29,8 @@ type CAS[V any] interface {
 	SetBulkWithGens(ctx context.Context, items map[string]V, observedGens map[string]uint64, ttl time.Duration) error
 
 	// Generation snapshots (for CAS)
-	SnapshotGen(key string) uint64
-	SnapshotGens(keys []string) map[string]uint64
+	SnapshotGen(ctx context.Context, key string) uint64
+	SnapshotGens(ctx context.Context, keys []string) map[string]uint64
 }
 
 // Options tune the behavior of the generic CAS cache.

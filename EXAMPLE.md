@@ -54,7 +54,7 @@ func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
 		return u, nil
 	}
 	// 1: snapshot generation BEFORE DB read
-	obs := r.Cache.SnapshotGen(id)
+	obs := r.Cache.SnapshotGen(ctx, id)
 	// 2: read DB
 	u, err := r.DB.Get(id)
 	if err != nil { return User{}, err }
@@ -127,7 +127,7 @@ After update: Tommy Lee Jones
 // Inside main(), after creating repo:
 vals, missing, _ := repo.Cache.GetBulk(ctx, []string{"42", "99"})
 if len(missing) > 0 {
-	obs := repo.Cache.SnapshotGens(missing)
+	obs := repo.Cache.SnapshotGens(ctx, missing)
 	items := map[string]User{}
 	for _, id := range missing {
 		u, _ := repo.DB.Get(id)
@@ -141,4 +141,3 @@ _ = vals
 ```
 
 > If any member is stale at read time, the bulk is rejected and you fall back to safe singles.
-
