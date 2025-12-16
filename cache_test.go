@@ -202,12 +202,12 @@ func TestLocalGenStoreCloseIdempotent(t *testing.T) {
 	defer s.Close(context.Background())
 
 	// Do some bumps to exercise the map while cleanup may run
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		_, _ = s.Bump(context.Background(), fmt.Sprintf("k%d", i))
 	}
 
 	// Close many times
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		_ = s.Close(context.Background())
 	}
 }
@@ -682,7 +682,7 @@ func TestSnapshotGensBehavior(t *testing.T) {
 	t.Run("mixed", func(t *testing.T) {
 		// m1 -> 1, m3 -> 3, m2 -> 0
 		_, _ = impl.bumpGen(ctx, impl.singleKey("m1"))
-		for i := 0; i < 3; i++ {
+		for range 3 {
 			_, _ = impl.bumpGen(ctx, impl.singleKey("m3"))
 		}
 		keys := []string{"m1", "m2", "m3", "m1"} // include duplicate

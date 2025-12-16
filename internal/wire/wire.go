@@ -195,13 +195,10 @@ func DecodeBulk(b []byte) ([]BulkItem, error) {
 		maxPlausible = rem / minItem
 	}
 
-	capHint := n
-	if capHint > maxPlausible {
-		capHint = maxPlausible
-	}
+	capHint := min(n, maxPlausible)
 	items := make([]BulkItem, 0, capHint)
 
-	for i := 0; i < n; i++ {
+	for range n {
 		// keyLen
 		if off+2 > len(b) {
 			return nil, ErrCorrupt

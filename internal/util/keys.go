@@ -40,7 +40,7 @@ func hex16(b []byte) string {
 	const hexdigits = "0123456789abcdef"
 	// first 8 bytes -> 16 hex chars
 	out := make([]byte, 16)
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		v := b[i]
 		out[i*2] = hexdigits[v>>4]
 		out[i*2+1] = hexdigits[v&0x0f]

@@ -223,12 +223,10 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 			byKey := make(map[string]V, len(items))
 			genByKey := make(map[string]uint64, len(items))
 			for _, it := range items {
-				v, err := c.codec.Decode(it.Payload)
-				if err != nil {
-					continue
+				if v, derr := c.codec.Decode(it.Payload); derr == nil {
+					byKey[it.Key] = v
+					genByKey[it.Key] = it.Gen
 				}
-				byKey[it.Key] = v
-				genByKey[it.Key] = it.Gen
 			}
 			for _, k := range keys {
 				if v, ok := byKey[k]; ok {

@@ -54,7 +54,7 @@ func New(inner cascache.Hooks, workers, qlen int) *Hooks {
 
 	h := &Hooks{inner: inner, q: make(chan func(), qlen)}
 	h.wg.Add(workers)
-	for i := 0; i < workers; i++ {
+	for range workers {
 		go func() {
 			defer h.wg.Done()
 			for f := range h.q {
