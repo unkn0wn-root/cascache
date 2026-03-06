@@ -55,7 +55,7 @@ It does this with **generation-guarded writes** (CAS) and **read-side validation
   If the generation store is slow or unavailable, single-key reads **self-heal** by treating results as misses, and CAS writes **skip**. The cache never serves stale data; the system simply performs extra work.
 
 - **Validated bulk caching:**
-  Bulk entries are checked **member by member** during reads. If any entry is stale, the bulk payload is discarded and CasCache falls back to single-key fetches. Extras in the bulk are ignored; missing members render it invalid.
+  Bulk entries are checked **member by member** during reads. If any entry is stale, the bulk payload is discarded and CasCache falls back to single-key fetches. Extras in the bulk are ignored during validation and decode; missing members render it invalid.
 
 - **Pluggable components:**
   Works with **Ristretto/BigCache/Redis** for storage and **JSON/CBOR/Msgpack/Proto** for payloads. Wire decoding stays tight and zero-copy for payloads.
@@ -82,7 +82,7 @@ It does this with **generation-guarded writes** (CAS) and **read-side validation
 
 ```text
 DB write succeeds  →  Cache.Invalidate(k)       // bump gen; clear single
-Read slow path     →  snap := SnapshotGen(ctx, k) → load DB → SetWithGen(k, v, snap)
+Read slow path     →  snap, err := TrySnapshotGen(ctx, k) → load DB → SetWithGen(k, v, snap) if err == nil
 Read fast path     →  Get(k) validates stored gen == current; else self-heals
 Bulk read          →  every member’s gen must match; else drop bulk → singles
 Multi-replica      →  use RedisGenStore so all nodes see the same gen
@@ -127,6 +127,7 @@ func newUserCache() (cascache.CAS[User], error) {
 
 #### 2) Safe single read (never stale)
 > **Rule:** Snapshot the generation **before** touching the DB. If you read first, a concurrent invalidation can bump the generation and your later `SetWithGen` may reinsert stale data.
+> Use `TrySnapshotGen` when you want explicit visibility into generation-store failures. `SnapshotGen` is the convenience form and returns `0` on snapshot failure.
 
 ```go
 type UserRepo struct {
@@ -140,13 +141,15 @@ func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
 	}
 
 	// CAS snapshot BEFORE reading DB
-	obs := r.Cache.SnapshotGen(ctx, id)
+	obs, snapErr := r.Cache.TrySnapshotGen(ctx, id)
 
 	u, err := r.dbSelectUser(ctx, id) // your DB load
 	if err != nil { return User{}, err }
 
-	// Conditionally cache only if generation didn't move
-	_ = r.Cache.SetWithGen(ctx, id, u, obs, 0)
+	// If snapshot failed, serve from the DB and skip the cache write.
+	if snapErr == nil {
+		_ = r.Cache.SetWithGen(ctx, id, u, obs, 0)
+	}
 	return u, nil
 }
 ```
@@ -164,16 +167,20 @@ func (r *UserRepo) UpdateName(ctx context.Context, id, name string) error {
 
 #### 4) Optional bulk (safe set caching)
 > If any member is stale, the bulk is dropped and you fall back to singles. In multi-replica apps, use a shared GenStore (below) or disable bulk.
+> Use `TrySnapshotGens` when you want explicit visibility into generation-store failures. `SnapshotGens` is the convenience form and returns `0` for any failed snapshot.
 
 ```go
 func (r *UserRepo) GetMany(ctx context.Context, ids []string) (map[string]User, error) {
-	values, missing, _ := r.Cache.GetBulk(ctx, ids)
+	values, missing, cacheErr := r.Cache.GetBulk(ctx, ids)
+	if cacheErr != nil {
+		// Optional: record metrics/logs and continue with DB fallback.
+	}
 	if len(missing) == 0 {
 		return values, nil
 	}
 
 	// Snapshot *before* DB read
-	obs := r.Cache.SnapshotGens(ctx, missing)
+	obs, snapErr := r.Cache.TrySnapshotGens(ctx, missing)
 
 	// Load missing from DB in one shot
 	loaded, err := r.dbSelectUsers(ctx, missing)
@@ -183,8 +190,10 @@ func (r *UserRepo) GetMany(ctx context.Context, ids []string) (map[string]User, 
 	items := make(map[string]User, len(loaded))
 	for _, u := range loaded { items[u.ID] = u }
 
-	// Conditionally write bulk (or it will seed singles if any gen moved)
-	_ = r.Cache.SetBulkWithGens(ctx, items, obs, 0)
+	// If snapshots succeeded, conditionally write bulk (or seed singles if any gen moved).
+	if snapErr == nil {
+		_ = r.Cache.SetBulkWithGens(ctx, items, obs, 0)
+	}
 
 	// Merge and return
 	for k, v := range items { values[k] = v }
@@ -245,6 +254,19 @@ permCache, _ := cascache.New[permission](cascache.Options[permission]{
     GenStore:  gen.NewRedisGenStoreWithTTL(rdb, "app:prod:perm", 24*time.Hour),
 })
 ```
+
+`RedisGenStore` leaves shared clients open by default. If the genstore owns the
+client and should close it, use:
+
+```go
+gs, err := gen.NewRedisGenStoreWithOptions(gen.RedisGenStoreOptions{
+    Client:      rdb,
+    Namespace:   "app:prod:user",
+    TTL:         24 * time.Hour,
+    CloseClient: true,
+})
+if err != nil { /* handle */ }
+```
 ---
 
 > **Alternative type name:** You can use `cascache.Cache[V]` instead of `cascache.CAS[V]`. See [Cache Type alias](#cache-type-alias).
@@ -271,9 +293,11 @@ permCache, _ := cascache.New[permission](cascache.Options[permission]{
 ### Write path (single, CAS)
 
 ```
-obs := SnapshotGen(ctx, k)   // BEFORE DB read
-v   := DB.Read(k)
-SetWithGen(k, v, obs)        // write iff currentGen(k) == obs
+obs, err := TrySnapshotGen(ctx, k) // BEFORE DB read
+v        := DB.Read(k)
+if err == nil {
+    SetWithGen(k, v, obs)          // write iff currentGen(k) == obs
+}
 ```
 
 ### Bulk read validation
@@ -281,8 +305,8 @@ SetWithGen(k, v, obs)        // write iff currentGen(k) == obs
 ```
 GetBulk(keys)   -> provider.Get("bulk:<ns>:hash(sorted(keys))")
 Decode -> [(key,gen,payload)]*n
-for each item: gen == currentGen("single:<ns>:"+key) ?
-if all valid -> decode all, return
+for each requested key: gen == currentGen("single:<ns>:"+key) ?
+if all valid -> decode requested members, return
 else         -> drop bulk, fall back to singles
 ```
 
@@ -383,7 +407,11 @@ type CAS[V any] interface {
     GetBulk(ctx context.Context, keys []string) (map[string]V, []string, error)
     SetBulkWithGens(ctx context.Context, items map[string]V, observedGens map[string]uint64, ttl time.Duration) error
 
-    // Generations
+    // Error-aware generation snapshots
+    TrySnapshotGen(ctx context.Context, key string) (uint64, error)
+    TrySnapshotGens(ctx context.Context, keys []string) (map[string]uint64, error)
+
+    // Best-effort generation snapshots
     SnapshotGen(ctx context.Context, key string) uint64
     SnapshotGens(ctx context.Context, keys []string) map[string]uint64
 }

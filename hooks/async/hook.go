@@ -36,15 +36,20 @@ import (
 )
 
 type Hooks struct {
-	inner cascache.Hooks
-	q     chan func()
-	wg    sync.WaitGroup
-	once  sync.Once
+	inner  cascache.Hooks
+	q      chan func()
+	wg     sync.WaitGroup
+	once   sync.Once
+	mu     sync.RWMutex
+	closed bool
 }
 
 var _ cascache.Hooks = (*Hooks)(nil)
 
 func New(inner cascache.Hooks, workers, qlen int) *Hooks {
+	if inner == nil {
+		inner = cascache.NopHooks{}
+	}
 	if workers <= 0 {
 		workers = 1
 	}
@@ -67,22 +72,33 @@ func New(inner cascache.Hooks, workers, qlen int) *Hooks {
 
 func (h *Hooks) Close() {
 	h.once.Do(func() {
+		h.mu.Lock()
+		h.closed = true
 		close(h.q)
+		h.mu.Unlock()
 		h.wg.Wait()
 	})
 }
 
 func (h *Hooks) try(f func()) {
+	h.mu.RLock()
+	if h.closed {
+		h.mu.RUnlock()
+		return
+	}
 	select {
 	case h.q <- f:
 	default: // drop
 	}
+	h.mu.RUnlock()
 }
 
-func (h *Hooks) SelfHealSingle(k, r string)       { h.try(func() { h.inner.SelfHealSingle(k, r) }) }
+func (h *Hooks) SelfHealSingle(k string, r cascache.SelfHealReason) {
+	h.try(func() { h.inner.SelfHealSingle(k, r) })
+}
 func (h *Hooks) GenBumpError(k string, err error) { h.try(func() { h.inner.GenBumpError(k, err) }) }
 func (h *Hooks) LocalGenWithBulk()                { h.try(func() { h.inner.LocalGenWithBulk() }) }
-func (h *Hooks) BulkRejected(ns string, n int, r string) {
+func (h *Hooks) BulkRejected(ns string, n int, r cascache.BulkRejectReason) {
 	h.try(func() { h.inner.BulkRejected(ns, n, r) })
 }
 func (h *Hooks) ProviderSetRejected(k string, b bool) {

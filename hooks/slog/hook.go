@@ -53,23 +53,23 @@ func sample(n uint64, ctr *atomic.Uint64) bool {
 	return ctr.Add(1)%n == 0
 }
 
-func (h *Hooks) SelfHealSingle(storageKey, reason string) {
+func (h *Hooks) SelfHealSingle(storageKey string, reason cascache.SelfHealReason) {
 	if h.l == nil || !sample(h.opts.SelfHealEvery, &h.selfHealCtr) {
 		return
 	}
 	h.l.Debug("cascache.self_heal_single",
 		"key", h.redact(storageKey),
-		"reason", reason)
+		"reason", string(reason))
 }
 
-func (h *Hooks) BulkRejected(ns string, requested int, reason string) {
+func (h *Hooks) BulkRejected(ns string, requested int, reason cascache.BulkRejectReason) {
 	if h.l == nil || !sample(h.opts.BulkRejectEvery, &h.bulkRejectCtr) {
 		return
 	}
 	h.l.Info("cascache.bulk_rejected",
 		"ns", ns,
 		"requested", requested,
-		"reason", reason)
+		"reason", string(reason))
 }
 
 func (h *Hooks) ProviderSetRejected(storageKey string, isBulk bool) {

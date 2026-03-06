@@ -1,6 +1,10 @@
 package codec
 
-import "google.golang.org/protobuf/proto"
+import (
+	"reflect"
+
+	"google.golang.org/protobuf/proto"
+)
 
 // Protobuf is a Codec for protocol buffer messages. Requires a constructor
 // for the concrete message type T so Decode can allocate a new instance.
@@ -26,7 +30,27 @@ func (c Protobuf[T]) Encode(v T) ([]byte, error) {
 	return proto.Marshal(v)
 }
 func (c Protobuf[T]) Decode(b []byte) (T, error) {
+	var zero T
+	if c.new == nil {
+		return zero, ErrUninitializedProtobuf
+	}
 	m := c.new()
+	if isNilProtoMessage(m) {
+		return zero, ErrUninitializedProtobuf
+	}
 	err := proto.Unmarshal(b, m)
 	return m, err
+}
+
+func isNilProtoMessage[T proto.Message](m T) bool {
+	v := reflect.ValueOf(m)
+	if !v.IsValid() {
+		return true
+	}
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
 }

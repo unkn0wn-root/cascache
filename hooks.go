@@ -4,8 +4,8 @@ package cascache
 // Implementations MUST be cheap and non-blocking; do not perform I/O.
 // If work may block, buffer it and drop on backpressure (best effort).
 type Hooks interface {
-	SelfHealSingle(storageKey, reason string)
-	BulkRejected(namespace string, requested int, reason string)
+	SelfHealSingle(storageKey string, reason SelfHealReason)
+	BulkRejected(namespace string, requested int, reason BulkRejectReason)
 	ProviderSetRejected(storageKey string, isBulk bool)
 	GenSnapshotError(count int, err error)
 	GenBumpError(storageKey string, err error)
@@ -16,13 +16,13 @@ type Hooks interface {
 // NopHooks is a default no-op.
 type NopHooks struct{}
 
-func (NopHooks) SelfHealSingle(string, string)         {}
-func (NopHooks) BulkRejected(string, int, string)      {}
-func (NopHooks) ProviderSetRejected(string, bool)      {}
-func (NopHooks) GenSnapshotError(int, error)           {}
-func (NopHooks) GenBumpError(string, error)            {}
-func (NopHooks) InvalidateOutage(string, error, error) {}
-func (NopHooks) LocalGenWithBulk()                     {}
+func (NopHooks) SelfHealSingle(string, SelfHealReason)      {}
+func (NopHooks) BulkRejected(string, int, BulkRejectReason) {}
+func (NopHooks) ProviderSetRejected(string, bool)           {}
+func (NopHooks) GenSnapshotError(int, error)                {}
+func (NopHooks) GenBumpError(string, error)                 {}
+func (NopHooks) InvalidateOutage(string, error, error)      {}
+func (NopHooks) LocalGenWithBulk()                          {}
 
 // Multi returns a Hooks that fan-outs to all provided hooks, in order.
 // Nil entries are ignored.
@@ -59,12 +59,12 @@ func Multi(hs ...Hooks) Hooks {
 
 type multiHooks []Hooks
 
-func (m multiHooks) SelfHealSingle(k, r string) {
+func (m multiHooks) SelfHealSingle(k string, r SelfHealReason) {
 	for _, h := range m {
 		h.SelfHealSingle(k, r)
 	}
 }
-func (m multiHooks) BulkRejected(ns string, n int, r string) {
+func (m multiHooks) BulkRejected(ns string, n int, r BulkRejectReason) {
 	for _, h := range m {
 		h.BulkRejected(ns, n, r)
 	}

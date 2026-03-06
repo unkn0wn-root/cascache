@@ -29,7 +29,6 @@ type localGenEntry struct {
 type LocalGenStore struct {
 	mu        sync.RWMutex
 	gens      map[string]localGenEntry
-	ticker    *time.Ticker
 	stopCh    chan struct{}
 	wg        sync.WaitGroup
 	closeOnce sync.Once

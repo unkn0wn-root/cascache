@@ -28,7 +28,13 @@ type CAS[V any] interface {
 	GetBulk(ctx context.Context, keys []string) (values map[string]V, missing []string, err error)
 	SetBulkWithGens(ctx context.Context, items map[string]V, observedGens map[string]uint64, ttl time.Duration) error
 
-	// Generation snapshots (for CAS)
+	// Error aware generation snapshots (for CAS).
+	// TrySnapshotGens returns a generation for every unique logical key or an error.
+	TrySnapshotGen(ctx context.Context, key string) (uint64, error)
+	TrySnapshotGens(ctx context.Context, keys []string) (map[string]uint64, error)
+
+	// Best effort generation snapshots.
+	// Snapshot* report failures to Hooks and collapse failed snapshots to zero.
 	SnapshotGen(ctx context.Context, key string) uint64
 	SnapshotGens(ctx context.Context, keys []string) map[string]uint64
 }
