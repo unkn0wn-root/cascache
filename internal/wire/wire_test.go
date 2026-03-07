@@ -17,6 +17,15 @@ func mustDecodeSingle(t *testing.T, b []byte) (uint64, []byte) {
 	return gen, p
 }
 
+func mustEncodeSingle(t *testing.T, gen uint64, payload []byte) []byte {
+	t.Helper()
+	b, err := EncodeSingle(gen, payload)
+	if err != nil {
+		t.Fatalf("EncodeSingle error: %v", err)
+	}
+	return b
+}
+
 func mustDecodeBulk(t *testing.T, b []byte) []BulkItem {
 	t.Helper()
 	it, err := DecodeBulk(b)
@@ -36,7 +45,7 @@ func TestSingleRTEmptyAndNonEmpty(t *testing.T) {
 		{math.MaxUint64, []byte{0, 1, 2, 3, 4}},
 	}
 	for _, tc := range cases {
-		enc := EncodeSingle(tc.gen, tc.payload)
+		enc := mustEncodeSingle(t, tc.gen, tc.payload)
 		gen, p := mustDecodeSingle(t, enc)
 		if gen != tc.gen {
 			t.Fatalf("gen mismatch: got %d want %d", gen, tc.gen)
@@ -48,7 +57,7 @@ func TestSingleRTEmptyAndNonEmpty(t *testing.T) {
 }
 
 func TestSingleRejectsTrailingBytes(t *testing.T) {
-	enc := EncodeSingle(7, []byte("x"))
+	enc := mustEncodeSingle(t, 7, []byte("x"))
 	enc = append(enc, 0xDE, 0xAD) // add junk
 	if _, _, err := DecodeSingle(enc); err == nil {
 		t.Fatalf("expected error on trailing bytes")
@@ -56,7 +65,7 @@ func TestSingleRejectsTrailingBytes(t *testing.T) {
 }
 
 func TestSingleCorruptHeadersAndLengths(t *testing.T) {
-	enc := EncodeSingle(1, []byte("abc"))
+	enc := mustEncodeSingle(t, 1, []byte("abc"))
 
 	// bad magic
 	badMagic := append([]byte(nil), enc...)
@@ -95,7 +104,7 @@ func TestSingleCorruptHeadersAndLengths(t *testing.T) {
 }
 
 func TestSingleZeroCopyPayload(t *testing.T) {
-	enc := EncodeSingle(1, []byte("Z"))
+	enc := mustEncodeSingle(t, 1, []byte("Z"))
 	_, p := mustDecodeSingle(t, enc)
 	if len(p) != 1 {
 		t.Fatalf("unexpected payload len")
@@ -105,6 +114,29 @@ func TestSingleZeroCopyPayload(t *testing.T) {
 	_, p2 := mustDecodeSingle(t, enc)
 	if p2[0] != 'Q' {
 		t.Fatalf("expected zero-copy slice into enc buffer")
+	}
+}
+
+func TestSingleRejectsHighBitVlen(t *testing.T) {
+	enc := mustEncodeSingle(t, 1, []byte("abc"))
+	badVlen := append([]byte(nil), enc...)
+	binary.BigEndian.PutUint32(badVlen[14:18], ^uint32(0))
+	if _, _, err := DecodeSingle(badVlen); err == nil {
+		t.Fatalf("expected error on high-bit vlen")
+	}
+}
+
+func TestCheckedUint32(t *testing.T) {
+	got, err := checkedUint32(maxUint32Wire, "payload length")
+	if err != nil {
+		t.Fatalf("checkedUint32 boundary error: %v", err)
+	}
+	if got != ^uint32(0) {
+		t.Fatalf("checkedUint32 boundary mismatch: got %d want %d", got, ^uint32(0))
+	}
+
+	if _, err := checkedUint32(maxUint32Wire+1, "payload length"); err == nil {
+		t.Fatalf("checkedUint32 should reject values above uint32")
 	}
 }
 
@@ -238,6 +270,23 @@ func TestBulkCorruptHeadersAndLengths(t *testing.T) {
 	binary.BigEndian.PutUint16(badKlen[10:12], uint16(5))
 	if _, err := DecodeBulk(badKlen); err == nil {
 		t.Fatalf("expected error on klen beyond buffer")
+	}
+}
+
+func TestBulkRejectsHighBitVlen(t *testing.T) {
+	enc, err := EncodeBulk([]BulkItem{
+		{Key: "k", Gen: 9, Payload: []byte("xyz")},
+	})
+	if err != nil {
+		t.Fatalf("EncodeBulk: %v", err)
+	}
+
+	klen := 1
+	offset := 10 + 2 + klen + 8
+	badVlen := append([]byte(nil), enc...)
+	binary.BigEndian.PutUint32(badVlen[offset:offset+4], ^uint32(0))
+	if _, err := DecodeBulk(badVlen); err == nil {
+		t.Fatalf("expected error on high-bit vlen")
 	}
 }
 

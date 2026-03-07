@@ -54,12 +54,14 @@ func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
 		return u, nil
 	}
 	// 1: snapshot generation BEFORE DB read
-	obs := r.Cache.SnapshotGen(ctx, id)
+	obs, snapErr := r.Cache.TrySnapshotGen(ctx, id)
 	// 2: read DB
 	u, err := r.DB.Get(id)
 	if err != nil { return User{}, err }
 	// 3: conditionally cache only if generation didn't move
-	_ = r.Cache.SetWithGen(ctx, id, u, obs, 0)
+	if snapErr == nil {
+		_ = r.Cache.SetWithGen(ctx, id, u, obs, 0)
+	}
 	return u, nil
 }
 
@@ -125,16 +127,21 @@ After update: Tommy Lee Jones
 
 ```go
 // Inside main(), after creating repo:
-vals, missing, _ := repo.Cache.GetBulk(ctx, []string{"42", "99"})
+vals, missing, cacheErr := repo.Cache.GetBulk(ctx, []string{"42", "99"})
+if cacheErr != nil {
+	// Optional: record metrics/logs and continue with DB fallback.
+}
 if len(missing) > 0 {
-	obs := repo.Cache.SnapshotGens(ctx, missing)
+	obs, snapErr := repo.Cache.TrySnapshotGens(ctx, missing)
 	items := map[string]User{}
 	for _, id := range missing {
 		u, _ := repo.DB.Get(id)
 		items[id] = u
 	}
 	// conditionally write bulk (or it will seed singles if any gen moved)
-	_ = repo.Cache.SetBulkWithGens(ctx, items, obs, 0)
+	if snapErr == nil {
+		_ = repo.Cache.SetBulkWithGens(ctx, items, obs, 0)
+	}
 	// merge for the caller if you need: for k, v := range items { vals[k] = v }
 }
 _ = vals

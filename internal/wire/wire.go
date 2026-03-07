@@ -32,9 +32,10 @@ import (
 
 const (
 	// version is the wire-format version. Bump only on incompatible layout changes.
-	version    byte = 1
-	kindSingle      = 1
-	kindBulk        = 2
+	version       byte = 1
+	kindSingle         = 1
+	kindBulk           = 2
+	maxUint32Wire      = uint64(^uint32(0))
 )
 
 var (
@@ -58,8 +59,13 @@ func hasMagic(b []byte) bool {
 //	magic(4) | ver(1) | kind(1=single) | gen(u64) | vlen(u32) | payload(vlen)
 //
 // The payload is the codec-encoded value. gen is the per-key generation used for
-// read-side validation (CAS). Payload length is limited to <= 4 GiB (uint32).
-func EncodeSingle(gen uint64, payload []byte) []byte {
+// read-side validation (CAS). Payload length is limited to <= 2^32-1 bytes.
+func EncodeSingle(gen uint64, payload []byte) ([]byte, error) {
+	vlen, err := checkedUint32(uint64(len(payload)), "payload length")
+	if err != nil {
+		return nil, err
+	}
+
 	var buf bytes.Buffer
 	buf.Grow(4 + 1 + 1 + 8 + 4 + len(payload))
 
@@ -75,11 +81,11 @@ func EncodeSingle(gen uint64, payload []byte) []byte {
 	binary.BigEndian.PutUint64(u8[:], gen)
 	buf.Write(u8[:])
 
-	binary.BigEndian.PutUint32(u4[:], uint32(len(payload)))
+	binary.BigEndian.PutUint32(u4[:], vlen)
 	buf.Write(u4[:])
 
 	buf.Write(payload)
-	return buf.Bytes()
+	return buf.Bytes(), nil
 }
 
 // DecodeSingle parses a single entry and returns (gen, payload).
@@ -124,13 +130,22 @@ type BulkItem struct {
 //	repeated n times:
 //	  keyLen(u16) | key(keyLen) | gen(u64) | vlen(u32) | payload(vlen)
 //
-// Returns an error if any key length is 0 or > 65535 (u16).
+// Returns an error if item count or payload lengths exceed uint32, or if any
+// key length is 0 or > 65535 (u16).
 func EncodeBulk(items []BulkItem) ([]byte, error) {
+	n, err := checkedUint32(uint64(len(items)), "bulk item count")
+	if err != nil {
+		return nil, err
+	}
+
 	total := 4 + 1 + 1 + 4
 	for _, it := range items {
 		l := len(it.Key)
 		if l == 0 || l > 0xFFFF {
 			return nil, fmt.Errorf("cascache: invalid key length %d", l)
+		}
+		if _, err := checkedUint32(uint64(len(it.Payload)), "payload length"); err != nil {
+			return nil, err
 		}
 		total += 2 + l + 8 + 4 + len(it.Payload)
 	}
@@ -147,7 +162,7 @@ func EncodeBulk(items []BulkItem) ([]byte, error) {
 	var u4 [4]byte
 	var u2 [2]byte
 
-	binary.BigEndian.PutUint32(u4[:], uint32(len(items)))
+	binary.BigEndian.PutUint32(u4[:], n)
 	buf.Write(u4[:])
 
 	for _, it := range items {
@@ -158,7 +173,11 @@ func EncodeBulk(items []BulkItem) ([]byte, error) {
 		binary.BigEndian.PutUint64(u8[:], it.Gen)
 		buf.Write(u8[:])
 
-		binary.BigEndian.PutUint32(u4[:], uint32(len(it.Payload)))
+		vlen, err := checkedUint32(uint64(len(it.Payload)), "payload length")
+		if err != nil {
+			return nil, err
+		}
+		binary.BigEndian.PutUint32(u4[:], vlen)
 		buf.Write(u4[:])
 		buf.Write(it.Payload)
 	}
@@ -249,4 +268,11 @@ func DecodeBulk(b []byte) ([]BulkItem, error) {
 	}
 
 	return items, nil
+}
+
+func checkedUint32(n uint64, field string) (uint32, error) {
+	if n > maxUint32Wire {
+		return 0, fmt.Errorf("cascache: %s %d exceeds uint32 wire limit", field, n)
+	}
+	return uint32(n), nil
 }

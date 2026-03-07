@@ -1,10 +1,28 @@
-package util
+package keys
 
 import (
 	"crypto/sha256"
 	"encoding/binary"
 	"sort"
 )
+
+const (
+	SinglePrefix = "single:"
+	BulkPrefix   = "bulk:"
+	GenPrefix    = "gen:"
+)
+
+func SingleStorageKey(namespace, userKey string) string {
+	return SinglePrefix + namespace + ":" + userKey
+}
+
+func BulkStoragePrefix(namespace string) string {
+	return BulkPrefix + namespace
+}
+
+func GenStorageKey(namespace, storageKey string) string {
+	return GenPrefix + namespace + ":" + storageKey
+}
 
 // sorts a copy before calling BulkKeySorted
 func BulkKey(prefix string, keys []string) string {

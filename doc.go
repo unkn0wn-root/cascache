@@ -15,7 +15,9 @@
 //
 // CAS pattern:
 //
-//	obs := cache.SnapshotGen(ctx, k) // before DB read
-//	v   := readFromDB(k)
-//	_   = cache.SetWithGen(ctx, k, v, obs, 0) // write iff current gen == obs
+//	obs, err := cache.TrySnapshotGen(ctx, k) // before DB read
+//	v        := readFromDB(k)
+//	if err == nil {
+//		_ = cache.SetWithGen(ctx, k, v, obs, 0) // write iff current gen == obs
+//	}
 package cascache

@@ -38,7 +38,7 @@ func New(cfg Config) (*BigCache, error) {
 	if cfg.HardMaxCacheSizeMB > 0 {
 		conf.HardMaxCacheSize = cfg.HardMaxCacheSizeMB
 	}
-	c, err := bc.NewBigCache(conf)
+	c, err := bc.New(context.Background(), conf)
 	if err != nil {
 		return nil, err
 	}

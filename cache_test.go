@@ -54,6 +54,42 @@ func (p *memProvider) Set(_ context.Context, key string, value []byte, _ int64, 
 func (p *memProvider) Del(_ context.Context, key string) error { delete(p.m, key); return nil }
 func (p *memProvider) Close(_ context.Context) error           { return nil }
 
+type getErrProvider struct {
+	*memProvider
+	err error
+}
+
+var _ pr.Provider = (*getErrProvider)(nil)
+
+func (p *getErrProvider) Get(_ context.Context, key string) ([]byte, bool, error) {
+	return nil, false, p.err
+}
+
+type setErrProvider struct {
+	*memProvider
+	err error
+}
+
+var _ pr.Provider = (*setErrProvider)(nil)
+
+func (p *setErrProvider) Set(_ context.Context, key string, value []byte, _ int64, ttl time.Duration) (bool, error) {
+	return false, p.err
+}
+
+type bulkRejectSingleErrProvider struct {
+	*memProvider
+	err error
+}
+
+var _ pr.Provider = (*bulkRejectSingleErrProvider)(nil)
+
+func (p *bulkRejectSingleErrProvider) Set(_ context.Context, key string, value []byte, _ int64, ttl time.Duration) (bool, error) {
+	if strings.HasPrefix(key, "bulk:") {
+		return false, nil
+	}
+	return false, p.err
+}
+
 type user struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -76,6 +112,13 @@ func newTestCache(t *testing.T, ns string, mp pr.Provider, optsOpt func(*Options
 	return cc
 }
 
+func closeTest(t *testing.T, ctx context.Context, c interface{ Close(context.Context) error }) {
+	t.Helper()
+	if err := c.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
 func mustImpl[V any](t *testing.T, c CAS[V]) *cache[V] {
 	t.Helper()
 	impl, ok := c.(*cache[V])
@@ -94,7 +137,7 @@ func TestSingleCASFlow(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, nil)
-	defer cc.Close(ctx)
+	defer closeTest(t, ctx, cc)
 
 	k := "u:1"
 	v := user{ID: "1", Name: "Ada"}
@@ -146,6 +189,115 @@ func TestSingleCASFlow(t *testing.T) {
 	}
 }
 
+func TestSetWithGenSnapshotErrorSkipsWrite(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.GenStore = &failingGenStore{snapshotErr: errors.New("snapshot failed")}
+	})
+	defer closeTest(t, ctx, cc)
+
+	if err := cc.SetWithGen(ctx, "u:1", user{ID: "1", Name: "Ada"}, 0, time.Minute); err != nil {
+		t.Fatalf("SetWithGen: %v", err)
+	}
+
+	impl := mustImpl(t, cc)
+	if _, ok, _ := mp.Get(ctx, impl.singleKey("u:1")); ok {
+		t.Fatalf("SetWithGen should skip writes when snapshot fails")
+	}
+}
+
+func TestGetSnapshotErrorTreatsGenZeroEntryAsMiss(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.GenStore = &failingGenStore{snapshotErr: errors.New("snapshot failed")}
+	})
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	k := "u:1"
+	payload, err := c.JSON[user]{}.Encode(user{ID: "1", Name: "Ada"})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	wireEntry, err := wire.EncodeSingle(0, payload)
+	if err != nil {
+		t.Fatalf("EncodeSingle: %v", err)
+	}
+	if ok, err := impl.provider.Set(ctx, impl.singleKey(k), wireEntry, 1, time.Minute); err != nil || !ok {
+		t.Fatalf("inject single: ok=%v err=%v", ok, err)
+	}
+
+	if _, ok, err := cc.Get(ctx, k); err != nil || ok {
+		t.Fatalf("Get should miss when snapshot fails, ok=%v err=%v", ok, err)
+	}
+}
+
+func TestTrySnapshotGenReturnsError(t *testing.T) {
+	ctx := context.Background()
+	cc := newTestCache(t, "user", newMemProvider(), func(o *Options[user]) {
+		o.GenStore = &failingGenStore{snapshotErr: errors.New("snapshot failed")}
+	})
+	defer closeTest(t, ctx, cc)
+
+	got, err := cc.TrySnapshotGen(ctx, "u:1")
+	if err == nil {
+		t.Fatalf("TrySnapshotGen should return an error")
+	}
+	if got != 0 {
+		t.Fatalf("TrySnapshotGen got=%d want=0", got)
+	}
+	if got := cc.SnapshotGen(ctx, "u:1"); got != 0 {
+		t.Fatalf("SnapshotGen got=%d want=0", got)
+	}
+}
+
+func TestTrySnapshotGensFallbackAndStrictBehavior(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("fallback_to_single_snapshots", func(t *testing.T) {
+		cc := newTestCache(t, "user", newMemProvider(), func(o *Options[user]) {
+			o.GenStore = &failingGenStore{snapshotManyErr: errors.New("snapshot many failed")}
+		})
+		defer closeTest(t, ctx, cc)
+
+		got, err := cc.TrySnapshotGens(ctx, []string{"b", "a", "a"})
+		if err != nil {
+			t.Fatalf("TrySnapshotGens: %v", err)
+		}
+		want := map[string]uint64{"a": 0, "b": 0}
+		if !equalU64(got, want) {
+			t.Fatalf("TrySnapshotGens got=%v want=%v", got, want)
+		}
+	})
+
+	t.Run("returns_error_when_single_snapshot_fails", func(t *testing.T) {
+		cc := newTestCache(t, "user", newMemProvider(), func(o *Options[user]) {
+			o.GenStore = &failingGenStore{
+				snapshotManyErr: errors.New("snapshot many failed"),
+				snapshotErr:     errors.New("snapshot failed"),
+			}
+		})
+		defer closeTest(t, ctx, cc)
+
+		got, err := cc.TrySnapshotGens(ctx, []string{"a", "b"})
+		if err == nil {
+			t.Fatalf("TrySnapshotGens should return an error")
+		}
+		if got != nil {
+			t.Fatalf("TrySnapshotGens should not return partial results on error, got=%v", got)
+		}
+
+		want := map[string]uint64{"a": 0, "b": 0}
+		if got := cc.SnapshotGens(ctx, []string{"a", "b"}); !equalU64(got, want) {
+			t.Fatalf("SnapshotGens got=%v want=%v", got, want)
+		}
+	})
+}
+
 // ==============================
 // Self-heal tests (corruption/gen mismatch)
 // ==============================
@@ -156,7 +308,7 @@ func TestSelfHealOnCorrupt(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, nil)
-	defer cc.Close(ctx)
+	defer closeTest(t, ctx, cc)
 
 	impl := mustImpl(t, cc)
 
@@ -183,7 +335,10 @@ func TestSelfHealOnCorrupt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	wireEntry := wire.EncodeSingle(0, payload)
+	wireEntry, err := wire.EncodeSingle(0, payload)
+	if err != nil {
+		t.Fatalf("EncodeSingle: %v", err)
+	}
 	if ok, err := impl.provider.Set(ctx, storageKey, wireEntry, 1, time.Minute); err != nil || !ok {
 		t.Fatalf("inject valid stale: ok=%v err=%v", ok, err)
 	}
@@ -199,7 +354,7 @@ func TestSelfHealOnCorrupt(t *testing.T) {
 
 func TestLocalGenStoreCloseIdempotent(t *testing.T) {
 	s := genstore.NewLocalGenStore(50*time.Millisecond, time.Second)
-	defer s.Close(context.Background())
+	defer closeTest(t, context.Background(), s)
 
 	// Do some bumps to exercise the map while cleanup may run
 	for i := range 100 {
@@ -233,7 +388,7 @@ func TestBulkHappyAndStale(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, nil)
-	defer cc.Close(ctx)
+	defer closeTest(t, ctx, cc)
 
 	keys := []string{"a", "b", "c"}
 	items := map[string]user{
@@ -295,7 +450,7 @@ func TestBulkDisabled(t *testing.T) {
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
 		o.DisableBulk = true
 	})
-	defer cc.Close(ctx)
+	defer closeTest(t, ctx, cc)
 
 	keys := []string{"x", "y"}
 	items := map[string]user{
@@ -326,12 +481,210 @@ func TestBulkDisabled(t *testing.T) {
 	}
 }
 
+func TestGetBulkPropagatesSingleErrors(t *testing.T) {
+	ctx := context.Background()
+	sentinel := errors.New("get failed")
+	mp := &getErrProvider{memProvider: newMemProvider(), err: sentinel}
+
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.DisableBulk = true
+	})
+	defer closeTest(t, ctx, cc)
+
+	got, missing, err := cc.GetBulk(ctx, []string{"a", "b"})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("GetBulk error mismatch: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("GetBulk should not return values on provider error, got %v", got)
+	}
+	if len(missing) != 2 || missing[0] != "a" || missing[1] != "b" {
+		t.Fatalf("GetBulk missing mismatch: %v", missing)
+	}
+}
+
+func TestBulkValueDecodeFallsBackToSinglesAndDeletesBulk(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	cc := newTestCache(t, "user", mp, nil)
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	items := map[string]user{
+		"a": {ID: "a", Name: "A"},
+	}
+	snap := cc.SnapshotGens(ctx, []string{"a"})
+	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
+		t.Fatalf("SetBulkWithGens: %v", err)
+	}
+
+	bulkKey := impl.bulkKeySorted(uniqSorted([]string{"a"}))
+	entry, ok := mp.m[bulkKey]
+	if !ok {
+		t.Fatalf("expected bulk entry %q", bulkKey)
+	}
+	corrupt := append([]byte(nil), entry.v...)
+	corrupt[len(corrupt)-1] = 0xFF
+	entry.v = corrupt
+	mp.m[bulkKey] = entry
+
+	got, missing, err := cc.GetBulk(ctx, []string{"a"})
+	if err != nil {
+		t.Fatalf("GetBulk: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("GetBulk should fall back to singles, missing=%v", missing)
+	}
+	if got["a"] != items["a"] {
+		t.Fatalf("GetBulk fallback mismatch: got=%v want=%v", got["a"], items["a"])
+	}
+	if _, ok, _ := mp.Get(ctx, bulkKey); ok {
+		t.Fatalf("undecodable bulk should be deleted")
+	}
+}
+
+func TestBulkSnapshotManyFallbackPreservesBulkPath(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.GenStore = &failingGenStore{snapshotManyErr: errors.New("snapshot many failed")}
+	})
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	items := map[string]user{
+		"a": {ID: "a", Name: "A"},
+		"b": {ID: "b", Name: "B"},
+	}
+	observed := cc.SnapshotGens(ctx, []string{"a", "b"})
+	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBulkWithGens: %v", err)
+	}
+
+	bulkKey := impl.bulkKeySorted([]string{"a", "b"})
+	if _, ok, _ := mp.Get(ctx, bulkKey); !ok {
+		t.Fatalf("expected bulk entry %q", bulkKey)
+	}
+
+	for k := range items {
+		_ = impl.provider.Del(ctx, impl.singleKey(k))
+	}
+
+	got, missing, err := cc.GetBulk(ctx, []string{"b", "a"})
+	if err != nil {
+		t.Fatalf("GetBulk: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("expected no missing, got %v", missing)
+	}
+	if got["a"] != items["a"] || got["b"] != items["b"] {
+		t.Fatalf("GetBulk mismatch: got=%v want=%v", got, items)
+	}
+	if _, ok, _ := mp.Get(ctx, bulkKey); !ok {
+		t.Fatalf("expected bulk entry to remain after fallback validation")
+	}
+}
+
+func TestBulkIgnoresUndecodableExtras(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	cc := newTestCache(t, "user", mp, nil)
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	payload, err := c.JSON[user]{}.Encode(user{ID: "a", Name: "A"})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	wireEntry, err := wire.EncodeBulk([]wire.BulkItem{
+		{Key: "a", Gen: 0, Payload: payload},
+		{Key: "z", Gen: 0, Payload: []byte{0xFF}},
+	})
+	if err != nil {
+		t.Fatalf("EncodeBulk: %v", err)
+	}
+
+	bulkKey := impl.bulkKeySorted([]string{"a"})
+	if ok, err := impl.provider.Set(ctx, bulkKey, wireEntry, 1, time.Minute); err != nil || !ok {
+		t.Fatalf("inject bulk: ok=%v err=%v", ok, err)
+	}
+
+	got, missing, err := cc.GetBulk(ctx, []string{"a"})
+	if err != nil {
+		t.Fatalf("GetBulk: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("expected no missing, got %v", missing)
+	}
+	if got["a"] != (user{ID: "a", Name: "A"}) {
+		t.Fatalf("GetBulk mismatch: got=%v", got["a"])
+	}
+	if _, ok, _ := mp.Get(ctx, bulkKey); !ok {
+		t.Fatalf("expected bulk entry to remain when only extras are undecodable")
+	}
+}
+
+func TestSetBulkWithGensMissingObservedGensReturnsError(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+
+	cc := newTestCache(t, "user", mp, nil)
+	defer closeTest(t, ctx, cc)
+
+	items := map[string]user{
+		"a": {ID: "a", Name: "A"},
+		"b": {ID: "b", Name: "B"},
+	}
+	observed := map[string]uint64{
+		"a": 0,
+	}
+
+	err := cc.SetBulkWithGens(ctx, items, observed, time.Minute)
+	if !errors.Is(err, ErrMissingObservedGens) {
+		t.Fatalf("SetBulkWithGens error mismatch: %v", err)
+	}
+
+	var moe *MissingObservedGensError
+	if !errors.As(err, &moe) {
+		t.Fatalf("expected MissingObservedGensError, got %T", err)
+	}
+	if len(moe.Missing) != 1 || moe.Missing[0] != "b" {
+		t.Fatalf("unexpected missing keys: %v", moe.Missing)
+	}
+	if len(mp.m) != 0 {
+		t.Fatalf("SetBulkWithGens should not write anything on caller error, provider=%v", mp.m)
+	}
+}
+
+func TestSetBulkWithGensFallbackPropagatesSingleErrors(t *testing.T) {
+	ctx := context.Background()
+	sentinel := errors.New("set failed")
+	mp := &bulkRejectSingleErrProvider{memProvider: newMemProvider(), err: sentinel}
+
+	cc := newTestCache(t, "user", mp, nil)
+	defer closeTest(t, ctx, cc)
+
+	items := map[string]user{
+		"a": {ID: "a", Name: "A"},
+		"b": {ID: "b", Name: "B"},
+	}
+	observed := map[string]uint64{
+		"a": 0,
+		"b": 0,
+	}
+
+	err := cc.SetBulkWithGens(ctx, items, observed, time.Minute)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("SetBulkWithGens error mismatch: %v", err)
+	}
+}
+
 // TestBulkOrderInsensitiveHit: Same set, different order → same bulk key, bulk hit.
 func TestBulkOrderInsensitiveHit(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, nil)
-	defer cc.Close(ctx)
+	defer closeTest(t, ctx, cc)
 
 	impl := mustImpl(t, cc)
 
@@ -381,7 +734,7 @@ func TestBulkDuplicateRequestHit(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, nil)
-	defer cc.Close(ctx)
+	defer closeTest(t, ctx, cc)
 
 	impl := mustImpl(t, cc)
 
@@ -420,7 +773,7 @@ func TestBulkKeyCanonicalization(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, nil)
-	defer cc.Close(ctx)
+	defer closeTest(t, ctx, cc)
 
 	impl := mustImpl(t, cc)
 
@@ -437,7 +790,10 @@ func TestBulkKeyCanonicalization(t *testing.T) {
 
 // DecodeSingle must reject trailing bytes (strict framing).
 func TestWireDecodeSingleRejectsTrailing(t *testing.T) {
-	b := wire.EncodeSingle(7, []byte("x"))
+	b, err := wire.EncodeSingle(7, []byte("x"))
+	if err != nil {
+		t.Fatalf("EncodeSingle: %v", err)
+	}
 	b = append(b, 0xDE, 0xAD) // trailing junk
 	if _, _, err := wire.DecodeSingle(b); err == nil {
 		t.Fatalf("DecodeSingle should reject trailing bytes")
@@ -514,7 +870,7 @@ func TestSelfHealOnGenMismatchSingle(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, nil)
-	defer cc.Close(ctx)
+	defer closeTest(t, ctx, cc)
 
 	impl := mustImpl(t, cc)
 	k := "gen-mismatch"
@@ -528,7 +884,10 @@ func TestSelfHealOnGenMismatchSingle(t *testing.T) {
 	}
 
 	// Write a valid frame with gen=1 (mismatches snapshot=0).
-	b := wire.EncodeSingle(1, payload)
+	b, err := wire.EncodeSingle(1, payload)
+	if err != nil {
+		t.Fatalf("EncodeSingle: %v", err)
+	}
 	if ok, err := impl.provider.Set(ctx, storageKey, b, 1, time.Minute); err != nil || !ok {
 		t.Fatalf("inject single: ok=%v err=%v", ok, err)
 	}
@@ -698,10 +1057,22 @@ func TestSnapshotGensBehavior(t *testing.T) {
 // Invalidate edge-case behavior (cluster down etc.)
 // ==============================
 
-type failingGenStore struct{ bumpErr error }
+type failingGenStore struct {
+	snapshotErr     error
+	snapshotManyErr error
+	bumpErr         error
+}
 
-func (s *failingGenStore) Snapshot(context.Context, string) (uint64, error) { return 0, nil }
+func (s *failingGenStore) Snapshot(context.Context, string) (uint64, error) {
+	if s.snapshotErr != nil {
+		return 0, s.snapshotErr
+	}
+	return 0, nil
+}
 func (s *failingGenStore) SnapshotMany(context.Context, []string) (map[string]uint64, error) {
+	if s.snapshotManyErr != nil {
+		return nil, s.snapshotManyErr
+	}
 	return map[string]uint64{}, nil
 }
 func (s *failingGenStore) Bump(context.Context, string) (uint64, error) { return 0, s.bumpErr }
@@ -726,7 +1097,7 @@ func TestInvalidateBothFailReturnsError(t *testing.T) {
 	cc := newTestCache(t, "user", &delErrProvider{memProvider: mp, err: sentinelDelErr}, func(o *Options[user]) {
 		o.GenStore = &failingGenStore{bumpErr: bumpFail}
 	})
-	defer cc.Close(ctx)
+	defer closeTest(t, ctx, cc)
 
 	err := cc.Invalidate(ctx, "k1")
 	if err == nil {
@@ -749,7 +1120,7 @@ func TestInvalidateBumpFailDeleteOKNoError(t *testing.T) {
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
 		o.GenStore = &failingGenStore{bumpErr: errors.New("bump failed")}
 	})
-	defer cc.Close(ctx)
+	defer closeTest(t, ctx, cc)
 
 	if err := cc.Invalidate(ctx, "k2"); err != nil {
 		t.Fatalf("expected no error when bump fails but delete succeeds; got %v", err)
@@ -763,7 +1134,7 @@ func TestInvalidateBumpOKDeleteFailNoError(t *testing.T) {
 	mp := &delErrProvider{memProvider: newMemProvider(), err: sentinelDelErr}
 
 	cc := newTestCache(t, "user", mp, nil)
-	defer cc.Close(ctx)
+	defer closeTest(t, ctx, cc)
 
 	// Warm a gen so bump definitely succeeds.
 	impl := mustImpl(t, cc)

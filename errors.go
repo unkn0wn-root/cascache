@@ -1,7 +1,10 @@
 package cascache
 
 import (
+	"errors"
 	"fmt"
+	"sort"
+	"strings"
 )
 
 type InvalidateError struct {
@@ -33,4 +36,30 @@ func (e *InvalidateError) Unwrap() []error {
 		errs = append(errs, e.DelErr)
 	}
 	return errs
+}
+
+// ErrMissingObservedGens identifies a SetBulkWithGens caller error where at least
+// one item key has no corresponding observed generation.
+var ErrMissingObservedGens = errors.New("cascache: missing observed generations")
+
+// MissingObservedGensError reports which logical keys were missing observed generations.
+type MissingObservedGensError struct {
+	Missing []string
+}
+
+func (e *MissingObservedGensError) Error() string {
+	if len(e.Missing) == 0 {
+		return ErrMissingObservedGens.Error()
+	}
+	return fmt.Sprintf("%s for keys [%s]", ErrMissingObservedGens, strings.Join(e.Missing, ", "))
+}
+
+func (e *MissingObservedGensError) Is(target error) bool {
+	return target == ErrMissingObservedGens
+}
+
+func newMissingObservedGensError(missing []string) *MissingObservedGensError {
+	cp := append([]string(nil), missing...)
+	sort.Strings(cp)
+	return &MissingObservedGensError{Missing: cp}
 }

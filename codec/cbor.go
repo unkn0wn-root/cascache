@@ -55,12 +55,18 @@ func MustCBOR[V any](deterministic bool) CBOR[V] {
 
 // Encode encodes v as CBOR using the configured EncMode.
 func (c CBOR[V]) Encode(v V) ([]byte, error) {
+	if c.enc == nil {
+		return nil, ErrUninitializedCBOR
+	}
 	return c.enc.Marshal(v)
 }
 
 // Decode decodes b into a V using the configured DecMode.
 func (c CBOR[V]) Decode(b []byte) (V, error) {
 	var v V
+	if c.dec == nil {
+		return v, ErrUninitializedCBOR
+	}
 	err := c.dec.Unmarshal(b, &v)
 	return v, err
 }
