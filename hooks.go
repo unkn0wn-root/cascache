@@ -24,23 +24,23 @@ func (NopHooks) GenBumpError(string, error)                 {}
 func (NopHooks) InvalidateOutage(string, error, error)      {}
 func (NopHooks) LocalGenWithBulk()                          {}
 
-// Multi returns a Hooks that fan-outs to all provided hooks, in order.
-// Nil entries are ignored.
-// Panics from a hook will propagate to the caller.
+// Multi returns a Hooks implementation that fans out to all provided hooks
+// in order. Nil entries are silently skipped. Panics from any hook propagate
+// to the caller.
 //
-// example usage:
+// Example usage:
 //
 // logH   := sloghook.New(slog.Default(), sloghook.Options{SelfHealEvery: 10})
-// metH   := promhook.New(...)            // some kind og metrics adapter
+// metH   := promhook.New(...)            // some kind of metrics adapter
 // auditH := myAuditHook{...}             // audit adapter
 //
-// // fan-out
+// fan-out
 // mh := cascache.MultiHooks{logH, metH, auditH}
 //
-// // Either: single async queue for the whole fan-out
+// Either: single async queue for the whole fan-out
 // hooks := asynchook.New(mh, 1, 1000)
 //
-// // Or: give each hook its own queue (isolate backpressure)
+// Or: give each hook its own queue (isolate backpressure)
 //
 //	hooks := cascache.MultiHooks{
 //	    asynchook.New(logH,   1, 1000),
@@ -64,31 +64,37 @@ func (m multiHooks) SelfHealSingle(k string, r SelfHealReason) {
 		h.SelfHealSingle(k, r)
 	}
 }
+
 func (m multiHooks) BulkRejected(ns string, n int, r BulkRejectReason) {
 	for _, h := range m {
 		h.BulkRejected(ns, n, r)
 	}
 }
+
 func (m multiHooks) ProviderSetRejected(k string, b bool) {
 	for _, h := range m {
 		h.ProviderSetRejected(k, b)
 	}
 }
+
 func (m multiHooks) GenSnapshotError(n int, err error) {
 	for _, h := range m {
 		h.GenSnapshotError(n, err)
 	}
 }
+
 func (m multiHooks) GenBumpError(k string, err error) {
 	for _, h := range m {
 		h.GenBumpError(k, err)
 	}
 }
+
 func (m multiHooks) InvalidateOutage(k string, be, de error) {
 	for _, h := range m {
 		h.InvalidateOutage(k, be, de)
 	}
 }
+
 func (m multiHooks) LocalGenWithBulk() {
 	for _, h := range m {
 		h.LocalGenWithBulk()

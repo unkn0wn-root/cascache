@@ -33,7 +33,6 @@ type cache[V any] struct {
 	// Provider stores raw wire-encoded bytes with a TTL.
 	provider pr.Provider
 
-	// Codec serializes V to bytes on writes and deserializes on reads.
 	codec c.Codec[V]
 
 	// Hooks receives operational notifications such as self-heals and
@@ -51,11 +50,9 @@ type cache[V any] struct {
 	// computeSetCost lets callers influence admission in cost-aware providers.
 	computeSetCost SetCostFunc
 
-	// gen stores the current per-key generation.
 	gen gen.GenStore
 
-	// bulkEnabled controls whether bulks are written or reads fall back to
-	// singles only.
+	// When false, reads fall back to per-key lookups and bulk writes are skipped.
 	bulkEnabled bool
 }
 
@@ -77,7 +74,6 @@ func newCache[V any](opts Options[V]) (*cache[V], error) {
 		enabled:  !opts.Disabled,
 	}
 
-	// defaults
 	c.hooks = coalesce[Hooks](opts.Hooks, NopHooks{})
 	c.defaultTTL = coalesce(opts.DefaultTTL, 10*time.Minute)
 	c.bulkTTL = coalesce(opts.BulkTTL, 10*time.Minute)
@@ -153,7 +149,6 @@ func (c *cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
 		return zero, false, nil
 	}
 
-	// validate generation
 	currentGen, err := c.loadGen(ctx, k)
 	if err != nil {
 		return zero, false, nil
@@ -303,7 +298,6 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 		return out, nil, nil
 	}
 
-	// Bulk disabled -> singles with memoization
 	if !c.bulkEnabled {
 		m, err := c.memoizedSingles(ctx, keys, out)
 		return out, m, err
@@ -343,7 +337,7 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 		}
 	}
 
-	// Fallback: singles with memoization
+	// Fallback to per-key reads.
 	missing, err := c.memoizedSingles(ctx, keys, out)
 	return out, missing, err
 }
@@ -401,7 +395,6 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 		return c.seedSingles(ctx, items, observedGens, c.defaultTTL)
 	}
 
-	// verify all observed gens still current
 	for _, k := range keys {
 		if currentGens[k] != observedGens[k] {
 			c.hooks.BulkRejected(c.ns, len(items), BulkRejectReasonGenMismatch)
@@ -518,9 +511,8 @@ func (c *cache[V]) loadGens(ctx context.Context, storageKeys []string) (map[stri
 	return gens, nil
 }
 
-// snapshotGens deduplicates the caller's keys and delegates to
-// snapshotSortedUniqueGens. This is the shared entry point for both the
-// best-effort SnapshotGens and the error-aware TrySnapshotGens.
+// snapshotGens deduplicates the caller's keys before reading generations.
+// It is the shared entry point for both SnapshotGens and TrySnapshotGens.
 func (c *cache[V]) snapshotGens(ctx context.Context, keys []string) (map[string]uint64, error) {
 	us := uniqSorted(keys)
 	return c.snapshotSortedUniqueGens(ctx, us)
@@ -629,7 +621,7 @@ func (c *cache[V]) memoizedSingles(ctx context.Context, keys []string, out map[s
 		err error
 	}
 
-	us := uniqSorted(keys) // unique set for memoization
+	us := uniqSorted(keys)
 	tmp := make(map[string]res, len(us))
 	for _, k := range us {
 		v, ok, err := c.Get(ctx, k)

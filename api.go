@@ -11,10 +11,12 @@ import (
 
 type SetCostFunc func(key string, raw []byte, isBulk bool, bulkCount int) int64
 
-type Cache[V any] = CAS[V] // just and alias -> cascache.Cache[User] or cascache.CAS[User]
+// Cache is an alias for CAS so callers can write cascache.Cache[V] if preferred.
+type Cache[V any] = CAS[V]
 
-// CAS is the high-level, provider-agnostic cache API with CAS safety via per-key generations.
-// V is the caller's value type. Serialization is handled by a pluggable Codec[V].
+// CAS is the provider-agnostic cache interface with compare-and-swap safety
+// via per-key generations. V is the caller's value type
+// serialization is handled by the configured Codec[V].
 type CAS[V any] interface {
 	Enabled() bool
 	Close(context.Context) error
@@ -28,19 +30,19 @@ type CAS[V any] interface {
 	GetBulk(ctx context.Context, keys []string) (values map[string]V, missing []string, err error)
 	SetBulkWithGens(ctx context.Context, items map[string]V, observedGens map[string]uint64, ttl time.Duration) error
 
-	// Error aware generation snapshots (for CAS).
-	// TrySnapshotGens returns a generation for every unique logical key or an error.
+	// Error-aware generation snapshots for CAS writes.
+	// These return an error so the caller can decide whether to proceed.
 	TrySnapshotGen(ctx context.Context, key string) (uint64, error)
 	TrySnapshotGens(ctx context.Context, keys []string) (map[string]uint64, error)
 
-	// Best effort generation snapshots.
-	// Snapshot* report failures to Hooks and collapse failed snapshots to zero.
+	// Best-effort generation snapshots.
+	// Failures are reported through Hooks and the generation falls back to zero.
 	SnapshotGen(ctx context.Context, key string) uint64
 	SnapshotGens(ctx context.Context, keys []string) map[string]uint64
 }
 
-// Options tune the behavior of the generic CAS cache.
-// Only Namespace and Provider are required; others have sensible defaults.
+// Options configures the CAS cache.
+// Namespace, Provider, and Codec are required.
 type Options[V any] struct {
 	// Required
 	Namespace string // logical namespace to avoid collisions. e.g. "user", "profile", "order"
