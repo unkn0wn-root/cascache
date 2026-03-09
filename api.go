@@ -11,6 +11,27 @@ import (
 
 type SetCostFunc func(key string, raw []byte, isBulk bool, bulkCount int) int64
 
+// BulkSeedMode controls whether a successful bulk read validated
+// members as individual single-key entries.
+// The zero/default value is BulkSeedOff so bulk hits stay read-only unless
+// the caller explicitly opts into warming singles.
+type BulkSeedMode uint8
+
+const (
+	// BulkSeedOff returns the bulk hit "as-is" and does not write singles.
+	BulkSeedOff BulkSeedMode = iota
+
+	// BulkSeedAll seeds singles after the bulk has already passed
+	// generation validation. No additional per-key generation lookup is done.
+	BulkSeedAll
+
+	// BulkSeedIfMissing seeds singles only when the provider supports
+	// conditional add/set-if-absent with native backend support or
+	// provider-level atomic coordination. Cache construction fails if the
+	// provider does not implement Adder.
+	BulkSeedIfMissing
+)
+
 // Cache is an alias for CAS so callers can write cascache.Cache[V] if preferred.
 type Cache[V any] = CAS[V]
 
@@ -56,7 +77,12 @@ type Options[V any] struct {
 	ComputeSetCost  SetCostFunc   // default 1
 	GenStore        gen.GenStore  // nil => LocalGenStore (in-process)
 	DisableBulk     bool          // default false => bulk enabled
-	Hooks           Hooks         // high-signal events for metrics/telemetry/logging
+	// BulkSeed controls single-entry warming after successful GetBulk hits
+	// only. It does not affect SetBulkWithGens, which still seeds singles after
+	// a successful bulk write. BulkSeedIfMissing requires a provider with
+	// native or provider-level atomic add-if-missing support.
+	BulkSeed BulkSeedMode
+	Hooks    Hooks
 }
 
 func New[V any](opts Options[V]) (CAS[V], error) {

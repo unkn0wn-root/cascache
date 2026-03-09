@@ -27,10 +27,11 @@ const (
 )
 
 type cache[V any] struct {
-	ns       string           // Namespace is reported to hooks and docs.
-	space    keyutil.Keyspace // Key builder for the versioned provider/genstore keyspace.
-	provider pr.Provider      // Provider stores raw wire-encoded bytes with a TTL.
+	ns       string
+	space    keyutil.Keyspace
+	provider pr.Provider
 	codec    c.Codec[V]
+
 	// Hooks receives operational notifications such as self-heals and
 	// generation-store errors.
 	hooks   Hooks
@@ -41,20 +42,23 @@ type cache[V any] struct {
 	sweepInterval time.Duration
 	genRetention  time.Duration
 
-	computeSetCost SetCostFunc // computeSetCost influence admission in cost-aware providers.
+	computeSetCost SetCostFunc
 	gen            gen.GenStore
-	bulkEnabled    bool // When false, reads fall back to per-key lookups and bulk writes are skipped.
+
+	// When false, reads fall back to per-key lookups and bulk writes are skipped.
+	bulkEnabled bool
+	bulkSeed    BulkSeedMode
 }
 
 func newCache[V any](opts Options[V]) (*cache[V], error) {
 	if opts.Provider == nil {
-		return nil, fmt.Errorf("cascache: provider is required")
+		return nil, fmt.Errorf("provider is required")
 	}
 	if opts.Codec == nil {
-		return nil, fmt.Errorf("cascache: codec is required")
+		return nil, fmt.Errorf("codec is required")
 	}
 	if opts.Namespace == "" {
-		return nil, fmt.Errorf("cascache: namespace is required")
+		return nil, fmt.Errorf("namespace is required")
 	}
 
 	c := &cache[V]{
@@ -84,6 +88,12 @@ func newCache[V any](opts Options[V]) (*cache[V], error) {
 	}
 
 	c.bulkEnabled = !opts.DisableBulk
+	if c.bulkEnabled && opts.BulkSeed == BulkSeedIfMissing {
+		if _, ok := opts.Provider.(pr.Adder); !ok {
+			return nil, ErrBulkSeedNeedsAdder
+		}
+	}
+	c.bulkSeed = opts.BulkSeed
 	if c.bulkEnabled && isLocalGenStore(c.gen) {
 		c.hooks.LocalGenWithBulk()
 	}
@@ -258,9 +268,11 @@ func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 //  1. Look up the combined bulk entry whose storage key is derived from the
 //     sorted, deduplicated set of requested keys. If it exists, is valid on
 //     the wire level, and every member passes the generation check, decode
-//     only the requested items and return them. Each member is also seeded
-//     as an individual single entry (best-effort) so that future single-key
-//     Gets do not need the bulk.
+//     only the requested items and return them.
+//
+//     Successful bulk hits may also materialize the validated members as
+//     individual single entries depending on BulkSeed. This warming is
+//     optional and best-effort.
 //
 //  2. If the bulk entry is missing, corrupt, stale, or contains items that
 //     fail to decode, delete it from the provider to free memory and prevent
@@ -311,10 +323,11 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 						missing = append(missing, k)
 					}
 				}
-				for _, k := range us { // warm once per unique
-					if item, ok := decodedByKey[k]; ok {
-						_ = c.SetWithGen(ctx, k, item.value, item.gen, c.defaultTTL)
-					}
+				switch c.bulkSeed {
+				case BulkSeedAll:
+					_ = c.seedBulk(ctx, us, items, c.defaultTTL)
+				case BulkSeedIfMissing:
+					_ = c.seedBulkIfMissing(ctx, us, items, c.defaultTTL)
 				}
 				return out, missing, nil
 			}
@@ -348,9 +361,9 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 //  2. Every observed generation must still match the current generation in
 //     the gen store. If any key was invalidated between the caller’s
 //     snapshot and this call, the bulk write is abandoned because a single
-//     stale member would poison the entire entry. We still seed each key
-//     as an individual single through seedSingles, which runs its own
-//     per-key generation check and therefore never writes stale data.
+//     stale member would poison the entire entry. In that fallback path we
+//     still seed each key individually through seedSingles, which performs
+//     its own per-key generation check and skips stale writes.
 //
 // When the gen store is unreachable for the batch snapshot, the bulk is
 // skipped and we fall back to seeding singles for the same reason.
@@ -426,7 +439,7 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 		return c.seedSingles(ctx, items, observedGens, c.defaultTTL)
 	}
 
-	_ = c.seedSingles(ctx, items, observedGens, c.defaultTTL)
+	_ = c.seedBulk(ctx, keys, wireItems, c.defaultTTL)
 	return nil
 }
 
@@ -698,18 +711,12 @@ func (c *cache[V]) missingObservedGenKeys(items map[string]V, observedGens map[s
 	return missing
 }
 
-// decodedBulkItem pairs a decoded value with the generation it was stored
-// under. Both are needed because after reading a bulk entry we seed each
-// member as an individual single via SetWithGen, which requires the
-// generation for its CAS check.
 type decodedBulkItem[V any] struct {
 	value V
-	gen   uint64
 }
 
 // decodeRequestedBulkItems decodes only the bulk items that the caller
 // requested. Unrequested extras are ignored by design.
-//
 // If any requested item fails to decode the method returns an error and no
 // partial results. A decode failure on a requested item means the bulk
 // entry is not trustworthy and the caller should delete it and fall back
@@ -729,17 +736,107 @@ func (c *cache[V]) decodeRequestedBulkItems(requested []string, items []wire.Bul
 		if err != nil {
 			return nil, fmt.Errorf("decode bulk item %q: %w", it.Key, err)
 		}
-		decodedByKey[it.Key] = decodedBulkItem[V]{value: v, gen: it.Gen}
+		decodedByKey[it.Key] = decodedBulkItem[V]{value: v}
 	}
 	return decodedByKey, nil
 }
 
+func bulkMap(items []wire.BulkItem) map[string]wire.BulkItem {
+	byKey := make(map[string]wire.BulkItem, len(items))
+	for _, it := range items {
+		byKey[it.Key] = it // duplicates in stored items: last wins
+	}
+	return byKey
+}
+
+// seedBulk materializes validated bulk members as single key entries.
+// It assumes the caller already established that each member generation is
+// safe to serve, so it does not re-check the gen store.
+func (c *cache[V]) seedBulk(ctx context.Context, requested []string, items []wire.BulkItem, ttl time.Duration) error {
+	if len(requested) == 0 || len(items) == 0 {
+		return nil
+	}
+	if ttl == 0 {
+		ttl = c.defaultTTL
+	}
+
+	itemByKey := bulkMap(items)
+	var errs []error
+	for _, k := range requested {
+		it, ok := itemByKey[k]
+		if !ok {
+			continue
+		}
+		if err := c.writeSingle(ctx, k, it.Gen, it.Payload, ttl); err != nil {
+			errs = append(errs, fmt.Errorf("set %q: %w", k, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// seedBulkIfMissing is the conditional variant of seedBulk. It only inserts a
+// single when the provider reports that the key is currently absent.
+func (c *cache[V]) seedBulkIfMissing(ctx context.Context, requested []string, items []wire.BulkItem, ttl time.Duration) error {
+	if len(requested) == 0 || len(items) == 0 {
+		return nil
+	}
+	if ttl == 0 {
+		ttl = c.defaultTTL
+	}
+
+	p, ok := c.provider.(pr.Adder)
+	if !ok {
+		return nil
+	}
+
+	itemByKey := bulkMap(items)
+	var errs []error
+	for _, k := range requested {
+		it, ok := itemByKey[k]
+		if !ok {
+			continue
+		}
+		if err := c.addSingle(ctx, p, k, it.Gen, it.Payload, ttl); err != nil {
+			errs = append(errs, fmt.Errorf("add %q: %w", k, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// writeSingle encodes one single entry frame from an already validated bulk
+// member and stores it through the normal provider Set path.
+func (c *cache[V]) writeSingle(ctx context.Context, key string, gen uint64, payload []byte, ttl time.Duration) error {
+	sk := c.singleKeys(key)
+	wireb, err := wire.EncodeSingle(gen, payload)
+	if err != nil {
+		return err
+	}
+	ok, err := c.provider.Set(ctx, sk.Value.String(), wireb, c.computeSetCost(sk.Value.String(), wireb, false, 1), ttl)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		c.hooks.ProviderSetRejected(sk.Value.String(), false)
+	}
+	return nil
+}
+
+// addSingle encodes one single-entry frame from an already validated bulk
+// member and inserts it only if the provider reports the key as missing.
+func (c *cache[V]) addSingle(ctx context.Context, p pr.Adder, key string, gen uint64, payload []byte, ttl time.Duration) error {
+	sk := c.singleKeys(key)
+	wireb, err := wire.EncodeSingle(gen, payload)
+	if err != nil {
+		return err
+	}
+	_, err = p.Add(ctx, sk.Value.String(), wireb, c.computeSetCost(sk.Value.String(), wireb, false, 1), ttl)
+	return err
+}
+
 // seedSingles writes each item as an individual single entry via SetWithGen.
-// It serves two purposes:
 //
-//   - After a successful bulk write, it warms individual keys so that future
-//     single-key Gets hit the provider directly without needing the bulk.
-//   - As a fallback when the bulk write is skipped (gen mismatch, provider
+//   - When bulk mode is disabled, singles are the only cache shape available.
+//   - As a fallback when a bulk write is skipped (gen mismatch, provider
 //     rejection, gen store error), it ensures that non-stale keys can still
 //     be cached individually.
 //

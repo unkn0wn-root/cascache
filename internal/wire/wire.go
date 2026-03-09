@@ -41,7 +41,7 @@ const (
 var (
 	// ErrCorrupt is returned when a byte slice doesn't conform to the expected
 	// structure (bad magic/version/kind/lengths).
-	ErrCorrupt = errors.New("cascache: corrupt entry")
+	ErrCorrupt = errors.New("corrupt entry")
 
 	// magic4 is the fixed 4-byte magic header ("CASC").
 	magic4 = [...]byte{'C', 'A', 'S', 'C'}
@@ -142,7 +142,7 @@ func EncodeBulk(items []BulkItem) ([]byte, error) {
 	for _, it := range items {
 		l := len(it.Key)
 		if l == 0 || l > 0xFFFF {
-			return nil, fmt.Errorf("cascache: invalid key length %d", l)
+			return nil, fmt.Errorf("invalid key length %d", l)
 		}
 		if _, err := checkedUint32(uint64(len(it.Payload)), "payload length"); err != nil {
 			return nil, err
@@ -272,7 +272,7 @@ func DecodeBulk(b []byte) ([]BulkItem, error) {
 
 func checkedUint32(n uint64, field string) (uint32, error) {
 	if n > maxUint32Wire {
-		return 0, fmt.Errorf("cascache: %s %d exceeds uint32 wire limit", field, n)
+		return 0, fmt.Errorf("%s %d exceeds uint32 wire limit", field, n)
 	}
 	return uint32(n), nil
 }

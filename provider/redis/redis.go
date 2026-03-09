@@ -18,6 +18,7 @@ type Redis struct {
 }
 
 var _ pr.Provider = (*Redis)(nil)
+var _ pr.Adder = (*Redis)(nil)
 
 type Config struct {
 	Client      goredis.UniversalClient
@@ -52,6 +53,18 @@ func (p *Redis) Set(ctx context.Context, key string, value []byte, _ int64, ttl 
 		return false, err
 	}
 	return true, nil
+}
+
+func (p *Redis) Add(ctx context.Context, key string, value []byte, _ int64, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		ttl = 0
+	}
+
+	ok, err := p.rdb.SetNX(ctx, key, value, ttl).Result()
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
 }
 
 func (p *Redis) Del(ctx context.Context, key string) error {
