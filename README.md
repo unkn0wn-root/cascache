@@ -33,7 +33,7 @@ and an opt‑in distributed mode for multi-replica deployments.
 ## Why CasCache
 
 #### TL;DR
-Apps that rely on “delete-then-set” patterns can still surface stale data, especially when multiple replicas race one another. **cascache** offers a clear guarantee:
+Apps that rely on "delete-then-set" patterns can still surface stale data, especially when multiple replicas race one another. **cascache** offers a clear guarantee:
 
 > **After you invalidate a key, the cache will never serve the previous value.**
 > No additional delete cycles, manual timing coordination, or best-effort TTL tuning.
