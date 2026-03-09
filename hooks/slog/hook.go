@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/unkn0wn-root/cascache"
+	"github.com/unkn0wn-root/cascache/genstore"
 )
 
 // Options configures the slog-based Hooks.
@@ -90,12 +91,12 @@ func (h *Hooks) GenSnapshotError(count int, err error) {
 		"err", err)
 }
 
-func (h *Hooks) GenBumpError(storageKey string, err error) {
+func (h *Hooks) GenBumpError(cacheKey genstore.CacheKey, err error) {
 	if h.l == nil {
 		return
 	}
 	h.l.Warn("cascache.gen_bump_error",
-		"key", h.redact(storageKey),
+		"key", h.redact(cacheKey.String()),
 		"err", err)
 }
 

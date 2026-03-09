@@ -24,7 +24,7 @@
 //	    Namespace: "app:prod:user",
 //	    Provider:  provider,
 //	    Codec:     codec.JSON[User]{},
-//	    GenStore:  genstore.NewRedisGenStoreWithTTL(rdb, "app:prod:user", 24*time.Hour),
+//	    GenStore:  genstore.NewRedisGenStoreWithTTL(rdb, 24*time.Hour),
 //	    Hooks:     hooks, // or `raw` if you don’t want async
 //	})
 package asynchook
@@ -33,6 +33,7 @@ import (
 	"sync"
 
 	"github.com/unkn0wn-root/cascache"
+	"github.com/unkn0wn-root/cascache/genstore"
 )
 
 type Hooks struct {
@@ -96,8 +97,10 @@ func (h *Hooks) try(f func()) {
 func (h *Hooks) SelfHealSingle(k string, r cascache.SelfHealReason) {
 	h.try(func() { h.inner.SelfHealSingle(k, r) })
 }
-func (h *Hooks) GenBumpError(k string, err error) { h.try(func() { h.inner.GenBumpError(k, err) }) }
-func (h *Hooks) LocalGenWithBulk()                { h.try(func() { h.inner.LocalGenWithBulk() }) }
+func (h *Hooks) GenBumpError(k genstore.CacheKey, err error) {
+	h.try(func() { h.inner.GenBumpError(k, err) })
+}
+func (h *Hooks) LocalGenWithBulk() { h.try(func() { h.inner.LocalGenWithBulk() }) }
 func (h *Hooks) BulkRejected(ns string, n int, r cascache.BulkRejectReason) {
 	h.try(func() { h.inner.BulkRejected(ns, n, r) })
 }

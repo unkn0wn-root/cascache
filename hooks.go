@@ -1,14 +1,20 @@
 package cascache
 
+import "github.com/unkn0wn-root/cascache/genstore"
+
 // Hooks are lightweight callbacks for high-signal events.
 // Implementations MUST be cheap and non-blocking; do not perform I/O.
 // If work may block, buffer it and drop on backpressure (best effort).
+//
+// Key-bearing callbacks intentionally expose different key kinds:
+//   - SelfHealSingle / ProviderSetRejected: provider storage keys.
+//   - GenBumpError: canonical genstore.CacheKey identity.
 type Hooks interface {
 	SelfHealSingle(storageKey string, reason SelfHealReason)
 	BulkRejected(namespace string, requested int, reason BulkRejectReason)
 	ProviderSetRejected(storageKey string, isBulk bool)
 	GenSnapshotError(count int, err error)
-	GenBumpError(storageKey string, err error)
+	GenBumpError(cacheKey genstore.CacheKey, err error)
 	InvalidateOutage(key string, bumpErr, delErr error)
 	LocalGenWithBulk()
 }
@@ -20,7 +26,7 @@ func (NopHooks) SelfHealSingle(string, SelfHealReason)      {}
 func (NopHooks) BulkRejected(string, int, BulkRejectReason) {}
 func (NopHooks) ProviderSetRejected(string, bool)           {}
 func (NopHooks) GenSnapshotError(int, error)                {}
-func (NopHooks) GenBumpError(string, error)                 {}
+func (NopHooks) GenBumpError(genstore.CacheKey, error)      {}
 func (NopHooks) InvalidateOutage(string, error, error)      {}
 func (NopHooks) LocalGenWithBulk()                          {}
 
@@ -83,7 +89,7 @@ func (m multiHooks) GenSnapshotError(n int, err error) {
 	}
 }
 
-func (m multiHooks) GenBumpError(k string, err error) {
+func (m multiHooks) GenBumpError(k genstore.CacheKey, err error) {
 	for _, h := range m {
 		h.GenBumpError(k, err)
 	}

@@ -76,9 +76,10 @@ func NewLocalGenStore(cleanupInterval, retention time.Duration) *LocalGenStore {
 // Returns 0 if the key has never been bumped (i.e., missing in the map).
 // This is safe for CAS semantics: a 0 snapshot simply causes stale writes to
 // be skipped and stale reads to self-heal in the higher-level cache.
-func (s *LocalGenStore) Snapshot(_ context.Context, k string) (uint64, error) {
+func (s *LocalGenStore) Snapshot(_ context.Context, k CacheKey) (uint64, error) {
+	raw := k.String()
 	s.mu.RLock()
-	e, ok := s.gens[k]
+	e, ok := s.gens[raw]
 	s.mu.RUnlock()
 	if !ok {
 		return 0, nil
@@ -90,11 +91,11 @@ func (s *LocalGenStore) Snapshot(_ context.Context, k string) (uint64, error) {
 //
 // acquires the read lock once for the entire batch to avoid per-key
 // lock/unlock overhead. Missing keys map to 0 (zero value).
-func (s *LocalGenStore) SnapshotMany(_ context.Context, ks []string) (map[string]uint64, error) {
-	out := make(map[string]uint64, len(ks))
+func (s *LocalGenStore) SnapshotMany(_ context.Context, ks []CacheKey) (map[CacheKey]uint64, error) {
+	out := make(map[CacheKey]uint64, len(ks))
 	s.mu.RLock()
 	for _, k := range ks {
-		out[k] = s.gens[k].Gen // zero value (0) if missing
+		out[k] = s.gens[k.String()].Gen // zero value (0) if missing
 	}
 	s.mu.RUnlock()
 	return out, nil
@@ -104,13 +105,14 @@ func (s *LocalGenStore) SnapshotMany(_ context.Context, ks []string) (map[string
 // If the key does not exist, it is created with Gen=1.
 //
 // Returns the new generation value.
-func (s *LocalGenStore) Bump(_ context.Context, k string) (uint64, error) {
+func (s *LocalGenStore) Bump(_ context.Context, k CacheKey) (uint64, error) {
 	now := time.Now()
+	raw := k.String()
 	s.mu.Lock()
-	e := s.gens[k] // zero value if missing
+	e := s.gens[raw] // zero value if missing
 	e.Gen++
 	e.UpdatedAt = now
-	s.gens[k] = e
+	s.gens[raw] = e
 	s.mu.Unlock()
 	return e.Gen, nil
 }
