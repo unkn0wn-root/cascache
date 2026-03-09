@@ -44,12 +44,10 @@ type CAS[V any] interface {
 // Options configures the CAS cache.
 // Namespace, Provider, and Codec are required.
 type Options[V any] struct {
-	// Required
 	Namespace string // logical namespace to avoid collisions. e.g. "user", "profile", "order"
 	Provider  pr.Provider
 	Codec     c.Codec[V]
 
-	// Optional
 	DefaultTTL      time.Duration // singles; 0 => 10m
 	BulkTTL         time.Duration // bulks; 0 => 10m
 	CleanupInterval time.Duration // 0 => 1h

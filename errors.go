@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -48,14 +49,18 @@ type MissingObservedGensError struct {
 }
 
 func (e *MissingObservedGensError) Error() string {
-	if len(e.Missing) == 0 {
+	if e == nil || len(e.Missing) == 0 {
 		return ErrMissingObservedGens.Error()
 	}
-	return fmt.Sprintf("%s for keys [%s]", ErrMissingObservedGens, strings.Join(e.Missing, ", "))
+	quoted := make([]string, len(e.Missing))
+	for i, key := range e.Missing {
+		quoted[i] = strconv.Quote(key)
+	}
+	return fmt.Sprintf("%s for keys [%s]", ErrMissingObservedGens, strings.Join(quoted, ", "))
 }
 
-func (e *MissingObservedGensError) Is(target error) bool {
-	return target == ErrMissingObservedGens
+func (e *MissingObservedGensError) Unwrap() error {
+	return ErrMissingObservedGens
 }
 
 func newMissingObservedGensError(missing []string) *MissingObservedGensError {

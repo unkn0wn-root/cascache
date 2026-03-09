@@ -27,33 +27,22 @@ const (
 )
 
 type cache[V any] struct {
-	// Namespace is baked into every storage key.
-	ns string
-
-	// Provider stores raw wire-encoded bytes with a TTL.
-	provider pr.Provider
-
-	codec c.Codec[V]
-
+	ns       string      // Namespace is baked into every storage key.
+	provider pr.Provider // Provider stores raw wire-encoded bytes with a TTL.
+	codec    c.Codec[V]
 	// Hooks receives operational notifications such as self-heals and
 	// generation-store errors.
-	hooks Hooks
-
-	// When false, reads miss and writes are dropped.
-	enabled bool
+	hooks   Hooks
+	enabled bool // When false, reads miss and writes are dropped.
 
 	defaultTTL    time.Duration
 	bulkTTL       time.Duration
 	sweepInterval time.Duration
 	genRetention  time.Duration
 
-	// computeSetCost lets callers influence admission in cost-aware providers.
-	computeSetCost SetCostFunc
-
-	gen gen.GenStore
-
-	// When false, reads fall back to per-key lookups and bulk writes are skipped.
-	bulkEnabled bool
+	computeSetCost SetCostFunc // computeSetCost influence admission in cost-aware providers.
+	gen            gen.GenStore
+	bulkEnabled    bool // When false, reads fall back to per-key lookups and bulk writes are skipped.
 }
 
 func newCache[V any](opts Options[V]) (*cache[V], error) {
@@ -89,7 +78,6 @@ func newCache[V any](opts Options[V]) (*cache[V], error) {
 	if opts.GenStore != nil {
 		c.gen = opts.GenStore
 	} else {
-		// default to local (in-process) gen store
 		c.gen = gen.NewLocalGenStore(c.sweepInterval, c.genRetention)
 	}
 
@@ -337,7 +325,7 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 		}
 	}
 
-	// Fallback to per-key reads.
+	// fallback to per-key reads.
 	missing, err := c.memoizedSingles(ctx, keys, out)
 	return out, missing, err
 }
@@ -528,8 +516,7 @@ func (c *cache[V]) snapshotGens(ctx context.Context, keys []string) (map[string]
 // individual calls still succeed.
 //
 // The returned map always has an entry for every input key. Keys that
-// could not be read even after the per-key fallback are mapped to zero,
-// and their errors are returned via errors.Join.
+// could not be read even after the per-key fallback are mapped to zero.
 func (c *cache[V]) snapshotSortedUniqueGens(ctx context.Context, keys []string) (map[string]uint64, error) {
 	if len(keys) == 0 {
 		return map[string]uint64{}, nil
@@ -611,9 +598,8 @@ func (c *cache[V]) bulkValid(ctx context.Context, sortedRequested []string, item
 //
 // Hits are written into out. Keys that were not found (including entries
 // that were self-healed during Get) appear in the returned missing slice,
-// preserving the caller's original order and duplicates. Provider-level
-// errors from Get are collected and returned via errors.Join; self-heal
-// events inside Get produce misses, not errors.
+// preserving the caller's original order and duplicates.
+// self-heal events inside Get produce misses, not errors.
 func (c *cache[V]) memoizedSingles(ctx context.Context, keys []string, out map[string]V) ([]string, error) {
 	type res struct {
 		v   V
@@ -629,7 +615,7 @@ func (c *cache[V]) memoizedSingles(ctx context.Context, keys []string, out map[s
 	}
 
 	missing := make([]string, 0, len(keys))
-	for _, k := range keys { // preserve caller order & duplicates
+	for _, k := range keys { // preserve caller order and duplicates
 		r := tmp[k]
 		if r.ok {
 			out[k] = r.v
@@ -739,8 +725,7 @@ func (c *cache[V]) decodeRequestedBulkItems(requested []string, items []wire.Bul
 //     be cached individually.
 //
 // Each call to SetWithGen performs its own generation check, so a stale
-// item in the map is simply skipped without writing bad data. Errors from
-// individual writes are collected and returned via errors.Join.
+// item in the map is simply skipped without writing bad data.
 func (c *cache[V]) seedSingles(ctx context.Context, items map[string]V, observedGens map[string]uint64, ttl time.Duration) error {
 	errs := make([]error, 0, len(items))
 	for k, v := range items {
