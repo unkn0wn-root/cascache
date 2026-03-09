@@ -23,7 +23,7 @@ func TestRedisGenStoreCloseSharedClientNoop(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeUniversalClient{}
-	store := NewRedisGenStore(client, "user")
+	store := NewRedisGenStore(client)
 
 	if err := store.Close(context.Background()); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -39,7 +39,6 @@ func TestRedisGenStoreCloseOwnedClientOnce(t *testing.T) {
 	client := &fakeUniversalClient{}
 	store, err := NewRedisGenStoreWithOptions(RedisGenStoreOptions{
 		Client:      client,
-		Namespace:   "user",
 		CloseClient: true,
 	})
 	if err != nil {
@@ -60,15 +59,16 @@ func TestRedisGenStoreCloseOwnedClientOnce(t *testing.T) {
 func TestRedisGenStoreNilClientReturnsError(t *testing.T) {
 	t.Parallel()
 
-	store := NewRedisGenStore(nil, "user")
+	store := NewRedisGenStore(nil)
 
-	if _, err := store.Snapshot(context.Background(), "k"); !errors.Is(err, ErrNilRedisClient) {
+	k := NewCacheKey("k")
+	if _, err := store.Snapshot(context.Background(), k); !errors.Is(err, ErrNilRedisClient) {
 		t.Fatalf("Snapshot error mismatch: %v", err)
 	}
-	if _, err := store.SnapshotMany(context.Background(), []string{"k"}); !errors.Is(err, ErrNilRedisClient) {
+	if _, err := store.SnapshotMany(context.Background(), []CacheKey{k}); !errors.Is(err, ErrNilRedisClient) {
 		t.Fatalf("SnapshotMany error mismatch: %v", err)
 	}
-	if _, err := store.Bump(context.Background(), "k"); !errors.Is(err, ErrNilRedisClient) {
+	if _, err := store.Bump(context.Background(), k); !errors.Is(err, ErrNilRedisClient) {
 		t.Fatalf("Bump error mismatch: %v", err)
 	}
 }
@@ -76,7 +76,7 @@ func TestRedisGenStoreNilClientReturnsError(t *testing.T) {
 func TestRedisGenStoreWithOptionsRejectsNilClient(t *testing.T) {
 	t.Parallel()
 
-	_, err := NewRedisGenStoreWithOptions(RedisGenStoreOptions{Namespace: "user"})
+	_, err := NewRedisGenStoreWithOptions(RedisGenStoreOptions{})
 	if !errors.Is(err, ErrNilRedisClient) {
 		t.Fatalf("NewRedisGenStoreWithOptions error mismatch: %v", err)
 	}

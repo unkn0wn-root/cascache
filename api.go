@@ -26,7 +26,7 @@ type CAS[V any] interface {
 	SetWithGen(ctx context.Context, key string, value V, observedGen uint64, ttl time.Duration) error
 	Invalidate(ctx context.Context, key string) error
 
-	// Bulk (order-agnostic return; use your own ordering by keys slice)
+	// Bulk (order-agnostic return. Use your own ordering by keys slice)
 	GetBulk(ctx context.Context, keys []string) (values map[string]V, missing []string, err error)
 	SetBulkWithGens(ctx context.Context, items map[string]V, observedGens map[string]uint64, ttl time.Duration) error
 
@@ -44,7 +44,7 @@ type CAS[V any] interface {
 // Options configures the CAS cache.
 // Namespace, Provider, and Codec are required.
 type Options[V any] struct {
-	Namespace string // logical namespace to avoid collisions. e.g. "user", "profile", "order"
+	Namespace string // logical namespace to isolate the keyspace
 	Provider  pr.Provider
 	Codec     c.Codec[V]
 
@@ -60,5 +60,5 @@ type Options[V any] struct {
 }
 
 func New[V any](opts Options[V]) (CAS[V], error) {
-	return newCache[V](opts)
+	return newCache(opts)
 }

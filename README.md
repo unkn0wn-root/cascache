@@ -4,6 +4,16 @@ Provider-agnostic CAS like (**C**ompare-**A**nd-**S**et or generation-guarded co
 Safe single-key reads (no stale values), optional bulk caching with read-side validation,
 and an opt‑in distributed mode for multi-replica deployments.
 
+> [!WARNING]
+> **Breaking changes in v1.0** - If you are upgrading from v0.x, please read this section before updating.
+>
+> **Storage keys have changed.** The on-disk and Redis key format has been replaced with a versioned, length-framed layout (`cas:v1:val:…`, `cas:v1:gen:…`). This fixes a class of namespace boundary collisions present in earlier releases, but it means that existing cached data will not be read by the new version. Old entries will remain in your backend under their previous keys until they expire or are evicted. They will not conflict with new entries but they will not be reused either. If you run a shared backend such as Redis, deploy all nodes at the same time and expect a cold cache on the first run.
+>
+> **`RedisGenStore` no longer accepts a namespace.** The `namespace` parameter has been removed from `NewRedisGenStore`, `NewRedisGenStoreWithTTL`, and `RedisGenStoreOptions`. The cache now constructs canonical keys internally and passes them to the gen store as opaque values. Update your constructor calls accordingly (see [Distributed generations](#distributed-generations-multi-replica) for updated examples).
+>
+> **`GenStore` interface uses typed keys.** `Snapshot`, `SnapshotMany`, and `Bump` now receive and return `genstore.CacheKey` instead of plain strings. If you have a custom `GenStore` implementation, update the method signatures to match. `CacheKey` values are opaque - store and compare them "as-is" without parsing.
+>
+> **`Hooks` interface update.** `GenBumpError` now receives a `genstore.CacheKey` instead of a `string`. If you implement `Hooks` directly, update this method signature. The `asynchook` and `sloghook` adapters in this module are already updated.
 ---
 
 ## Contents
@@ -23,7 +33,7 @@ and an opt‑in distributed mode for multi-replica deployments.
 ## Why CasCache
 
 #### TL;DR
-Apps that rely on “delete-then-set” patterns can still surface stale data, especially when multiple replicas race one another. **cascache** offers a clear guarantee:
+Apps that rely on "delete-then-set" patterns can still surface stale data, especially when multiple replicas race one another. **cascache** offers a clear guarantee:
 
 > **After you invalidate a key, the cache will never serve the previous value.**
 > No additional delete cycles, manual timing coordination, or best-effort TTL tuning.
@@ -216,7 +226,7 @@ import "github.com/redis/go-redis/v9"
 func newUserCacheDistributed() (cascache.CAS[User], error) {
 	rist, _ := rp.New(rp.Config{NumCounters:1_000_000, MaxCost:64<<20, BufferItems:64})
 	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})
-	gs  := cascache.NewRedisGenStoreWithTTL(rdb, "user", 90*24*time.Hour)
+	gs  := gen.NewRedisGenStoreWithTTL(rdb, 90*24*time.Hour)
 
 	return cascache.New[User](cascache.Options[User]{
 		Namespace: "user",
@@ -237,21 +247,21 @@ userCache, _ := cascache.New[user](cascache.Options[user]{
     Namespace: "app:prod:user",
     Provider:  myRedisProvider{Client: rdb},               // same client
     Codec:     c.JSON[user]{},
-    GenStore:  gen.NewRedisGenStoreWithTTL(rdb, "app:prod:user", 24*time.Hour),
+    GenStore:  gen.NewRedisGenStoreWithTTL(rdb, 24*time.Hour),
 })
 
 pageCache, _ := cascache.New[page](cascache.Options[page]{
     Namespace: "app:prod:page",
     Provider:  myRedisProvider{Client: rdb},               // same client
     Codec:     c.JSON[page]{},
-    GenStore:  gen.NewRedisGenStoreWithTTL(rdb, "app:prod:page", 24*time.Hour),
+    GenStore:  gen.NewRedisGenStoreWithTTL(rdb, 24*time.Hour),
 })
 
 permCache, _ := cascache.New[permission](cascache.Options[permission]{
     Namespace: "app:prod:perm",
     Provider:  myRedisProvider{Client: rdb},               // same client
     Codec:     c.JSON[permission]{},
-    GenStore:  gen.NewRedisGenStoreWithTTL(rdb, "app:prod:perm", 24*time.Hour),
+    GenStore:  gen.NewRedisGenStoreWithTTL(rdb, 24*time.Hour),
 })
 ```
 
@@ -261,16 +271,16 @@ client and should close it, use:
 ```go
 gs, err := gen.NewRedisGenStoreWithOptions(gen.RedisGenStoreOptions{
     Client:      rdb,
-    Namespace:   "app:prod:user",
     TTL:         24 * time.Hour,
     CloseClient: true,
 })
 if err != nil { /* handle */ }
 ```
+
+If you implement a custom `GenStore`, note that all methods now use `genstore.CacheKey` instead of plain strings. Treat these values as opaque byte identities — store and compare them as-is without attempting to parse or reconstruct them from logical user keys.
+
 ---
-
 > **Alternative type name:** You can use `cascache.Cache[V]` instead of `cascache.CAS[V]`. See [Cache Type alias](#cache-type-alias).
-
 ---
 
 ## Design
@@ -280,9 +290,9 @@ if err != nil { /* handle */ }
 ```
       Get(k)
         │
-  provider.Get("single:<ns>:"+k) ───► [wire.DecodeSingle]
+  provider.Get("cas:v1:val:s:<nsLen>:<ns>:"+k) ───► [wire.DecodeSingle]
         │
-   gen == currentGen("single:<ns>:"+k) ?
+   gen == currentGen("s:<nsLen>:<ns>:"+k) ?
         │ yes                                 no
         ▼                                    ┌───────────────┐
   codec.Decode(payload)                      │ Del(entry)    │
@@ -303,9 +313,9 @@ if err == nil {
 ### Bulk read validation
 
 ```
-GetBulk(keys)   -> provider.Get("bulk:<ns>:hash(sorted(keys))")
+GetBulk(keys)   -> provider.Get("cas:v1:val:b:<nsLen>:<ns>:sha256-128(sorted(keys))")
 Decode -> [(key,gen,payload)]*n
-for each requested key: gen == currentGen("single:<ns>:"+key) ?
+for each requested key: gen == currentGen("s:<nsLen>:<ns>:"+key) ?
 if all valid -> decode requested members, return
 else         -> drop bulk, fall back to singles
 ```
@@ -316,8 +326,9 @@ else         -> drop bulk, fall back to singles
 - **GenStore** - per-key generation counter (Local by default; Redis available).
 
 ### Keys
-- Single entry: `single:<ns>:<key>`
-- Bulk entry:   `bulk:<ns>:<first16(sha256(sorted(keys))>>`
+- Single value: `cas:v1:val:s:<nsLen>:<ns>:<key>`
+- Bulk value:   `cas:v1:val:b:<nsLen>:<ns>:<sha256-128(sorted(keys))>`
+- Gen key:      `cas:v1:gen:s:<nsLen>:<ns>:<key>`
 
 ### CAS model
 - Per-key generation is **monotonic**.

@@ -19,7 +19,6 @@ var ErrNilRedisClient = errors.New("redis genstore: nil client")
 // If a generation key expires, readers observe gen=0 and cache entries self-heal.
 type RedisGenStore struct {
 	rdb         redis.UniversalClient
-	ns          string        // logical namespace; should match Options.Namespace
 	ttl         time.Duration // optional TTL for generation keys; 0 disables expiry
 	closeClient bool
 	closeOnce   sync.Once
@@ -30,20 +29,19 @@ var _ GenStore = (*RedisGenStore)(nil)
 
 type RedisGenStoreOptions struct {
 	Client      redis.UniversalClient
-	Namespace   string
 	TTL         time.Duration
 	CloseClient bool
 }
 
 // NewRedisGenStore creates a Redis-backed generation store without TTL.
-func NewRedisGenStore(client redis.UniversalClient, namespace string) *RedisGenStore {
-	return &RedisGenStore{rdb: client, ns: namespace}
+func NewRedisGenStore(client redis.UniversalClient) *RedisGenStore {
+	return &RedisGenStore{rdb: client}
 }
 
 // NewRedisGenStoreWithTTL creates a Redis-backed generation store with TTL.
 // If ttl <= 0, keys do not expire.
-func NewRedisGenStoreWithTTL(client redis.UniversalClient, namespace string, ttl time.Duration) *RedisGenStore {
-	return &RedisGenStore{rdb: client, ns: namespace, ttl: ttl}
+func NewRedisGenStoreWithTTL(client redis.UniversalClient, ttl time.Duration) *RedisGenStore {
+	return &RedisGenStore{rdb: client, ttl: ttl}
 }
 
 // NewRedisGenStoreWithOptions creates a Redis-backed generation store with
@@ -55,7 +53,6 @@ func NewRedisGenStoreWithOptions(opts RedisGenStoreOptions) (*RedisGenStore, err
 	}
 	return &RedisGenStore{
 		rdb:         opts.Client,
-		ns:          opts.Namespace,
 		ttl:         opts.TTL,
 		closeClient: opts.CloseClient,
 	}, nil
@@ -68,17 +65,19 @@ func (s *RedisGenStore) client() (redis.UniversalClient, error) {
 	return s.rdb, nil
 }
 
-func (s *RedisGenStore) key(k string) string { return keyutil.GenStorageKey(s.ns, k) }
+func (s *RedisGenStore) key(cacheKey CacheKey) string {
+	return keyutil.GenStorageKey(cacheKey.String())
+}
 
 // Snapshot returns the current generation.
 // Missing keys are treated as generation 0.
-func (s *RedisGenStore) Snapshot(ctx context.Context, storageKey string) (uint64, error) {
+func (s *RedisGenStore) Snapshot(ctx context.Context, cacheKey CacheKey) (uint64, error) {
 	rdb, err := s.client()
 	if err != nil {
 		return 0, err
 	}
 
-	res, err := rdb.Get(ctx, s.key(storageKey)).Result()
+	res, err := rdb.Get(ctx, s.key(cacheKey)).Result()
 	if err == redis.Nil {
 		return 0, nil
 	}
@@ -94,9 +93,9 @@ func (s *RedisGenStore) Snapshot(ctx context.Context, storageKey string) (uint64
 
 // SnapshotMany returns generations for multiple keys.
 // Missing keys map to 0.
-func (s *RedisGenStore) SnapshotMany(ctx context.Context, storageKeys []string) (map[string]uint64, error) {
-	if len(storageKeys) == 0 {
-		return map[string]uint64{}, nil
+func (s *RedisGenStore) SnapshotMany(ctx context.Context, cacheKeys []CacheKey) (map[CacheKey]uint64, error) {
+	if len(cacheKeys) == 0 {
+		return map[CacheKey]uint64{}, nil
 	}
 
 	rdb, err := s.client()
@@ -104,8 +103,8 @@ func (s *RedisGenStore) SnapshotMany(ctx context.Context, storageKeys []string) 
 		return nil, err
 	}
 
-	keys := make([]string, len(storageKeys))
-	for i, k := range storageKeys {
+	keys := make([]string, len(cacheKeys))
+	for i, k := range cacheKeys {
 		keys[i] = s.key(k)
 	}
 	vals, err := rdb.MGet(ctx, keys...).Result()
@@ -113,30 +112,30 @@ func (s *RedisGenStore) SnapshotMany(ctx context.Context, storageKeys []string) 
 		return nil, err
 	}
 
-	out := make(map[string]uint64, len(storageKeys))
+	out := make(map[CacheKey]uint64, len(cacheKeys))
 	for i, v := range vals {
 		switch vv := v.(type) {
 		case nil:
-			out[storageKeys[i]] = 0
+			out[cacheKeys[i]] = 0
 		case string:
 			u, err := strconv.ParseUint(vv, 10, 64)
 			if err != nil {
-				return nil, fmt.Errorf("redis gen parse at %s: %w", storageKeys[i], err)
+				return nil, fmt.Errorf("redis gen parse at %s: %w", cacheKeys[i], err)
 			}
-			out[storageKeys[i]] = u
+			out[cacheKeys[i]] = u
 		case []byte:
 			u, err := strconv.ParseUint(string(vv), 10, 64)
 			if err != nil {
-				return nil, fmt.Errorf("redis gen parse at %s: %w", storageKeys[i], err)
+				return nil, fmt.Errorf("redis gen parse at %s: %w", cacheKeys[i], err)
 			}
-			out[storageKeys[i]] = u
+			out[cacheKeys[i]] = u
 		default:
 			str := fmt.Sprint(vv)
 			u, err := strconv.ParseUint(str, 10, 64)
 			if err != nil {
-				return nil, fmt.Errorf("redis gen parse at %s: %w", storageKeys[i], err)
+				return nil, fmt.Errorf("redis gen parse at %s: %w", cacheKeys[i], err)
 			}
-			out[storageKeys[i]] = u
+			out[cacheKeys[i]] = u
 		}
 	}
 	return out, nil
@@ -145,13 +144,13 @@ func (s *RedisGenStore) SnapshotMany(ctx context.Context, storageKeys []string) 
 // Bump atomically increments the generation and (optionally) refreshes TTL.
 // When ttl > 0, INCR + EXPIRE are pipelined in a single round-trip and the
 // INCR result is captured from the pipeline (no extra INCR).
-func (s *RedisGenStore) Bump(ctx context.Context, storageKey string) (uint64, error) {
+func (s *RedisGenStore) Bump(ctx context.Context, cacheKey CacheKey) (uint64, error) {
 	rdb, err := s.client()
 	if err != nil {
 		return 0, err
 	}
 
-	k := s.key(storageKey)
+	k := s.key(cacheKey)
 
 	if s.ttl <= 0 {
 		v, err := rdb.Incr(ctx, k).Result()

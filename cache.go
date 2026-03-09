@@ -27,8 +27,9 @@ const (
 )
 
 type cache[V any] struct {
-	ns       string      // Namespace is baked into every storage key.
-	provider pr.Provider // Provider stores raw wire-encoded bytes with a TTL.
+	ns       string           // Namespace is reported to hooks and docs.
+	space    keyutil.Keyspace // Key builder for the versioned provider/genstore keyspace.
+	provider pr.Provider      // Provider stores raw wire-encoded bytes with a TTL.
 	codec    c.Codec[V]
 	// Hooks receives operational notifications such as self-heals and
 	// generation-store errors.
@@ -58,6 +59,7 @@ func newCache[V any](opts Options[V]) (*cache[V], error) {
 
 	c := &cache[V]{
 		ns:       opts.Namespace,
+		space:    keyutil.NewKeyspace(opts.Namespace),
 		provider: opts.Provider,
 		codec:    opts.Codec,
 		enabled:  !opts.Disabled,
@@ -124,33 +126,33 @@ func (c *cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
 		return zero, false, nil
 	}
 
-	k := c.singleKey(key)
-	raw, ok, err := c.provider.Get(ctx, k)
+	sk := c.singleKeys(key)
+	raw, ok, err := c.provider.Get(ctx, sk.Value.String())
 	if err != nil || !ok {
 		return zero, false, err
 	}
 
 	dgen, payload, err := wire.DecodeSingle(raw)
 	if err != nil {
-		_ = c.provider.Del(ctx, k) // self-heal corrupt
-		c.hooks.SelfHealSingle(k, SelfHealReasonCorrupt)
+		_ = c.provider.Del(ctx, sk.Value.String()) // self-heal corrupt
+		c.hooks.SelfHealSingle(sk.Value.String(), SelfHealReasonCorrupt)
 		return zero, false, nil
 	}
 
-	currentGen, err := c.loadGen(ctx, k)
+	currentGen, err := c.loadGen(ctx, toGenStoreKey(sk.Cache))
 	if err != nil {
 		return zero, false, nil
 	}
 	if dgen != currentGen {
-		_ = c.provider.Del(ctx, k)
-		c.hooks.SelfHealSingle(k, SelfHealReasonGenMismatch)
+		_ = c.provider.Del(ctx, sk.Value.String())
+		c.hooks.SelfHealSingle(sk.Value.String(), SelfHealReasonGenMismatch)
 		return zero, false, nil
 	}
 
 	v, err := c.codec.Decode(payload)
 	if err != nil {
-		_ = c.provider.Del(ctx, k) // self-heal
-		c.hooks.SelfHealSingle(k, SelfHealReasonValueDecode)
+		_ = c.provider.Del(ctx, sk.Value.String()) // self-heal
+		c.hooks.SelfHealSingle(sk.Value.String(), SelfHealReasonValueDecode)
 		return zero, false, nil
 	}
 	return v, true, nil
@@ -185,8 +187,8 @@ func (c *cache[V]) SetWithGen(ctx context.Context, key string, value V, observed
 		ttl = c.defaultTTL
 	}
 
-	k := c.singleKey(key)
-	currentGen, err := c.loadGen(ctx, k)
+	sk := c.singleKeys(key)
+	currentGen, err := c.loadGen(ctx, toGenStoreKey(sk.Cache))
 	if err != nil || currentGen != observedGen {
 		return nil // generation moved; skip stale write
 	}
@@ -200,12 +202,12 @@ func (c *cache[V]) SetWithGen(ctx context.Context, key string, value V, observed
 	if err != nil {
 		return err
 	}
-	ok, err := c.provider.Set(ctx, k, wireb, c.computeSetCost(k, wireb, false, 1), ttl)
+	ok, err := c.provider.Set(ctx, sk.Value.String(), wireb, c.computeSetCost(sk.Value.String(), wireb, false, 1), ttl)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		c.hooks.ProviderSetRejected(k, false)
+		c.hooks.ProviderSetRejected(sk.Value.String(), false)
 	}
 	return nil
 }
@@ -238,9 +240,9 @@ func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 		return nil
 	}
 
-	k := c.singleKey(key)
-	_, bumpErr := c.bumpGen(ctx, k)
-	delErr := c.provider.Del(ctx, k)
+	sk := c.singleKeys(key)
+	_, bumpErr := c.bumpGen(ctx, toGenStoreKey(sk.Cache))
+	delErr := c.provider.Del(ctx, sk.Value.String())
 
 	// Only surface the coupled failure (likely full outage).
 	if bumpErr != nil && delErr != nil {
@@ -292,9 +294,12 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 	}
 
 	us := uniqSorted(keys)
-	bk := c.bulkKeySorted(us)
+	bk, err := c.bulkKeySorted(us)
+	if err != nil {
+		return out, missing, err
+	}
 
-	if raw, ok, gErr := c.provider.Get(ctx, bk); gErr == nil && ok {
+	if raw, ok, gErr := c.provider.Get(ctx, bk.String()); gErr == nil && ok {
 		items, dErr := wire.DecodeBulk(raw)
 		if dErr == nil && c.bulkValid(ctx, us, items) {
 			decodedByKey, rErr := c.decodeRequestedBulkItems(us, items)
@@ -313,10 +318,10 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 				}
 				return out, missing, nil
 			}
-			_ = c.provider.Del(ctx, bk) // self-heal undecodable bulk payloads
+			_ = c.provider.Del(ctx, bk.String()) // self-heal undecodable bulk payloads
 			c.hooks.BulkRejected(c.ns, len(us), BulkRejectReasonValueDecode)
 		} else {
-			_ = c.provider.Del(ctx, bk) // self-heal
+			_ = c.provider.Del(ctx, bk.String()) // self-heal
 			reason := BulkRejectReasonInvalidOrStale
 			if dErr != nil {
 				reason = BulkRejectReasonDecodeError
@@ -326,7 +331,7 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 	}
 
 	// fallback to per-key reads.
-	missing, err := c.memoizedSingles(ctx, keys, out)
+	missing, err = c.memoizedSingles(ctx, keys, out)
 	return out, missing, err
 }
 
@@ -408,13 +413,16 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 		return err
 	}
 
-	bk := c.bulkKeySorted(keys)
-	ok, err := c.provider.Set(ctx, bk, wireb, c.computeSetCost(bk, wireb, true, len(items)), ttl)
+	bk, err := c.bulkKeySorted(keys)
+	if err != nil {
+		return err
+	}
+	ok, err := c.provider.Set(ctx, bk.String(), wireb, c.computeSetCost(bk.String(), wireb, true, len(items)), ttl)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		c.hooks.ProviderSetRejected(bk, true)
+		c.hooks.ProviderSetRejected(bk.String(), true)
 		return c.seedSingles(ctx, items, observedGens, c.defaultTTL)
 	}
 
@@ -429,7 +437,7 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 // A generation of zero for a key that has never been bumped is a valid
 // value, not an error.
 func (c *cache[V]) TrySnapshotGen(ctx context.Context, key string) (uint64, error) {
-	return c.loadGen(ctx, c.singleKey(key))
+	return c.loadGen(ctx, toGenStoreKey(c.space.SingleCacheKey(key)))
 }
 
 // TrySnapshotGens returns the current generation for every unique logical key.
@@ -456,7 +464,7 @@ func (c *cache[V]) TrySnapshotGens(ctx context.Context, keys []string) (map[stri
 // the gen store at write time and skip the write if it is still down,
 // so no stale data can be introduced.
 func (c *cache[V]) SnapshotGen(ctx context.Context, key string) uint64 {
-	g, err := c.loadGen(ctx, c.singleKey(key))
+	g, err := c.loadGen(ctx, toGenStoreKey(c.space.SingleCacheKey(key)))
 	if err != nil {
 		return 0
 	}
@@ -475,8 +483,8 @@ func (c *cache[V]) SnapshotGens(ctx context.Context, keys []string) map[string]u
 // loadGen reads a single generation from the gen store. This is the single
 // point where per-key gen store errors are translated into hook calls, so
 // every caller gets consistent observability without duplicating that logic.
-func (c *cache[V]) loadGen(ctx context.Context, storageKey string) (uint64, error) {
-	g, err := c.gen.Snapshot(ctx, storageKey)
+func (c *cache[V]) loadGen(ctx context.Context, cacheKey gen.CacheKey) (uint64, error) {
+	g, err := c.gen.Snapshot(ctx, cacheKey)
 	if err != nil {
 		c.hooks.GenSnapshotError(1, err)
 		return 0, err
@@ -487,13 +495,13 @@ func (c *cache[V]) loadGen(ctx context.Context, storageKey string) (uint64, erro
 // loadGens reads generations for multiple keys in a single batch call
 // (SnapshotMany). This is much cheaper than N individual calls when the gen
 // store is backed by Redis (one MGET round-trip instead of N GETs).
-func (c *cache[V]) loadGens(ctx context.Context, storageKeys []string) (map[string]uint64, error) {
-	if len(storageKeys) == 0 {
-		return map[string]uint64{}, nil
+func (c *cache[V]) loadGens(ctx context.Context, cacheKeys []gen.CacheKey) (map[gen.CacheKey]uint64, error) {
+	if len(cacheKeys) == 0 {
+		return map[gen.CacheKey]uint64{}, nil
 	}
-	gens, err := c.gen.SnapshotMany(ctx, storageKeys)
+	gens, err := c.gen.SnapshotMany(ctx, cacheKeys)
 	if err != nil {
-		c.hooks.GenSnapshotError(len(storageKeys), err)
+		c.hooks.GenSnapshotError(len(cacheKeys), err)
 		return nil, err
 	}
 	return gens, nil
@@ -522,16 +530,16 @@ func (c *cache[V]) snapshotSortedUniqueGens(ctx context.Context, keys []string) 
 		return map[string]uint64{}, nil
 	}
 
-	storage := make([]string, len(keys))
+	cacheKeys := make([]gen.CacheKey, len(keys))
 	for i, k := range keys {
-		storage[i] = c.singleKey(k)
+		cacheKeys[i] = toGenStoreKey(c.space.SingleCacheKey(k))
 	}
 
-	m, err := c.loadGens(ctx, storage)
+	m, err := c.loadGens(ctx, cacheKeys)
 	if err == nil {
 		out := make(map[string]uint64, len(keys))
 		for i, k := range keys {
-			out[k] = m[storage[i]]
+			out[k] = m[cacheKeys[i]]
 		}
 		return out, nil
 	}
@@ -539,7 +547,7 @@ func (c *cache[V]) snapshotSortedUniqueGens(ctx context.Context, keys []string) 
 	out := make(map[string]uint64, len(keys))
 	errs := make([]error, 0, len(keys))
 	for i, k := range keys {
-		g, loadErr := c.loadGen(ctx, storage[i])
+		g, loadErr := c.loadGen(ctx, cacheKeys[i])
 		if loadErr != nil {
 			out[k] = 0
 			errs = append(errs, fmt.Errorf("snapshot %q: %w", k, loadErr))
@@ -550,12 +558,12 @@ func (c *cache[V]) snapshotSortedUniqueGens(ctx context.Context, keys []string) 
 	return out, errors.Join(errs...)
 }
 
-// bumpGen increments the generation for a storage key and reports any
+// bumpGen increments the generation for a canonical single-key identity and reports any
 // failure through hooks. This is the write-side counterpart of loadGen.
-func (c *cache[V]) bumpGen(ctx context.Context, storageKey string) (uint64, error) {
-	g, err := c.gen.Bump(ctx, storageKey)
+func (c *cache[V]) bumpGen(ctx context.Context, cacheKey gen.CacheKey) (uint64, error) {
+	g, err := c.gen.Bump(ctx, cacheKey)
 	if err != nil {
-		c.hooks.GenBumpError(storageKey, err)
+		c.hooks.GenBumpError(cacheKey, err)
 		return 0, err
 	}
 	return g, nil
@@ -633,19 +641,30 @@ func (c *cache[V]) memoizedSingles(ctx context.Context, keys []string, out map[s
 	return missing, errors.Join(errs...)
 }
 
-// singleKey translates a caller-facing logical key into the namespaced
-// storage key used in both the provider and the gen store.
-// Example: logical key "42" in namespace "user" becomes "single:user:42".
-func (c *cache[V]) singleKey(userKey string) string {
-	return keyutil.SingleStorageKey(c.ns, userKey)
+// singleKeys translates a caller-facing logical key into both the canonical
+// single-key identity used by the gen store and the provider value key.
+// Example: logical key "42" in namespace "user" becomes:
+//   - Cache: "s:4:user:42"
+//   - Value: "cas:v1:val:s:4:user:42"
+func (c *cache[V]) singleKeys(userKey string) keyutil.Single {
+	return c.space.Single(userKey)
+}
+
+// toGenStoreKey bridges the internal key builder and the public GenStore API.
+// The GenStore boundary is intentionally typed so custom implementations cannot
+// silently keep treating canonical identities as plain logical strings.
+func toGenStoreKey(cacheKey keyutil.CacheKey) gen.CacheKey {
+	return gen.NewCacheKey(cacheKey.String())
 }
 
 // bulkKeySorted builds the provider storage key for a bulk entry from a set
 // of sorted member keys. The key is a hash of the members, so the same set
 // always maps to the same storage key regardless of input order.
 // The sortedKeys slice must be sorted in ascending order.
-func (c *cache[V]) bulkKeySorted(sortedKeys []string) string {
-	return keyutil.BulkKeySorted(keyutil.BulkStoragePrefix(c.ns), sortedKeys)
+// An error is returned only for impossible key sizes that would make the
+// framing ambiguous or overflow platform memory limits.
+func (c *cache[V]) bulkKeySorted(sortedKeys []string) (keyutil.ValueKey, error) {
+	return c.space.BulkValueSorted(sortedKeys)
 }
 
 func uniqSorted(keys []string) []string {

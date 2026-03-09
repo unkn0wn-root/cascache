@@ -13,12 +13,12 @@
 //     writes or torn values.
 //
 // Keyspace ownership:
-//   - The keyspaces "single:<ns>:" and "bulk:<ns>:" are owned by cascache.
-//     External code MUST NOT write under these prefixes. Strict wire-format
-//     validation may treat foreign writes as corruption and delete them.
-//   - Other packages in this repository may reserve additional prefixes
-//     (e.g., "gen:<ns>:" used by the generation store); external code should
-//     avoid those as well.
+//   - The keyspace root "cas:v1:val:" is owned by cascache. External code
+//     MUST NOT write under that root. Strict wire-format validation may treat
+//     foreign writes as corruption and delete them.
+//   - Other packages in this repository may reserve additional roots
+//     (e.g., "cas:v1:gen:" used by the generation store); external code
+//     should avoid those as well.
 //
 // Back-pressure/error:
 //   - Set returns (ok=false, err=nil) if the store *intentionally* rejects the

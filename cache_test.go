@@ -22,6 +22,8 @@ type memEntry struct {
 	exp time.Time // zero => no TTL
 }
 
+const bulkValueRoot = "cas:v1:val:b:"
+
 type memProvider struct {
 	m map[string]memEntry
 }
@@ -84,7 +86,7 @@ type bulkRejectSingleErrProvider struct {
 var _ pr.Provider = (*bulkRejectSingleErrProvider)(nil)
 
 func (p *bulkRejectSingleErrProvider) Set(_ context.Context, key string, value []byte, _ int64, ttl time.Duration) (bool, error) {
-	if strings.HasPrefix(key, "bulk:") {
+	if strings.HasPrefix(key, bulkValueRoot) {
 		return false, nil
 	}
 	return false, p.err
@@ -126,6 +128,10 @@ func mustImpl[V any](t *testing.T, c CAS[V]) *cache[V] {
 		t.Fatalf("unexpected concrete type for CAS")
 	}
 	return impl
+}
+
+func bulkValuePrefix(namespace string) string {
+	return fmt.Sprintf("%s%d:%s:", bulkValueRoot, len(namespace), namespace)
 }
 
 // ==============================
@@ -189,6 +195,72 @@ func TestSingleCASFlow(t *testing.T) {
 	}
 }
 
+func TestSingleKeyNamespaceFramingAvoidsCollisions(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	gs := genstore.NewLocalGenStore(time.Hour, time.Hour)
+
+	left := newTestCache(t, "app:prod", mp, func(o *Options[user]) {
+		o.GenStore = gs
+	})
+	defer closeTest(t, ctx, left)
+
+	right := newTestCache(t, "app", mp, func(o *Options[user]) {
+		o.GenStore = gs
+	})
+	defer closeTest(t, ctx, right)
+
+	leftImpl := mustImpl(t, left)
+	rightImpl := mustImpl(t, right)
+	leftKeys := leftImpl.singleKeys("users:42")
+	rightKeys := rightImpl.singleKeys("prod:users:42")
+
+	if leftKeys.Cache == rightKeys.Cache {
+		t.Fatalf("single cache keys collided: %q", leftKeys.Cache)
+	}
+	if leftKeys.Value == rightKeys.Value {
+		t.Fatalf("single value keys collided: %q", leftKeys.Value)
+	}
+
+	leftVal := user{ID: "left", Name: "Left"}
+	rightVal := user{ID: "right", Name: "Right"}
+	if err := left.SetWithGen(ctx, "users:42", leftVal, 0, time.Minute); err != nil {
+		t.Fatalf("left SetWithGen: %v", err)
+	}
+	if err := right.SetWithGen(ctx, "prod:users:42", rightVal, 0, time.Minute); err != nil {
+		t.Fatalf("right SetWithGen: %v", err)
+	}
+
+	if len(mp.m) != 2 {
+		keys := make([]string, 0, len(mp.m))
+		for k := range mp.m {
+			keys = append(keys, k)
+		}
+		t.Fatalf("expected 2 distinct provider keys, got %d: %v", len(mp.m), keys)
+	}
+
+	gotLeft, ok, err := left.Get(ctx, "users:42")
+	if err != nil || !ok || gotLeft != leftVal {
+		t.Fatalf("left Get: got=%+v ok=%v err=%v", gotLeft, ok, err)
+	}
+	gotRight, ok, err := right.Get(ctx, "prod:users:42")
+	if err != nil || !ok || gotRight != rightVal {
+		t.Fatalf("right Get: got=%+v ok=%v err=%v", gotRight, ok, err)
+	}
+
+	if err := left.Invalidate(ctx, "users:42"); err != nil {
+		t.Fatalf("left Invalidate: %v", err)
+	}
+	if _, ok, err := left.Get(ctx, "users:42"); err != nil || ok {
+		t.Fatalf("left Get after invalidate: ok=%v err=%v", ok, err)
+	}
+
+	gotRight, ok, err = right.Get(ctx, "prod:users:42")
+	if err != nil || !ok || gotRight != rightVal {
+		t.Fatalf("right Get after left invalidate: got=%+v ok=%v err=%v", gotRight, ok, err)
+	}
+}
+
 func TestSetWithGenSnapshotErrorSkipsWrite(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
@@ -203,7 +275,7 @@ func TestSetWithGenSnapshotErrorSkipsWrite(t *testing.T) {
 	}
 
 	impl := mustImpl(t, cc)
-	if _, ok, _ := mp.Get(ctx, impl.singleKey("u:1")); ok {
+	if _, ok, _ := mp.Get(ctx, impl.singleKeys("u:1").Value.String()); ok {
 		t.Fatalf("SetWithGen should skip writes when snapshot fails")
 	}
 }
@@ -227,7 +299,7 @@ func TestGetSnapshotErrorTreatsGenZeroEntryAsMiss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeSingle: %v", err)
 	}
-	if ok, err := impl.provider.Set(ctx, impl.singleKey(k), wireEntry, 1, time.Minute); err != nil || !ok {
+	if ok, err := impl.provider.Set(ctx, impl.singleKeys(k).Value.String(), wireEntry, 1, time.Minute); err != nil || !ok {
 		t.Fatalf("inject single: ok=%v err=%v", ok, err)
 	}
 
@@ -313,10 +385,10 @@ func TestSelfHealOnCorrupt(t *testing.T) {
 	impl := mustImpl(t, cc)
 
 	k := "bad"
-	storageKey := impl.singleKey(k)
+	sk := impl.singleKeys(k)
 
 	// Inject corrupt bytes directly into provider.
-	if ok, err := impl.provider.Set(ctx, storageKey, []byte("not-wire-format"), 1, time.Minute); err != nil || !ok {
+	if ok, err := impl.provider.Set(ctx, sk.Value.String(), []byte("not-wire-format"), 1, time.Minute); err != nil || !ok {
 		t.Fatalf("inject corrupt: ok=%v err=%v", ok, err)
 	}
 
@@ -325,7 +397,7 @@ func TestSelfHealOnCorrupt(t *testing.T) {
 		t.Fatalf("Get on corrupt should miss, ok=%v err=%v", ok, err)
 	}
 	// Corrupt entry should be gone.
-	if _, ok, _ := mp.Get(ctx, storageKey); ok {
+	if _, ok, _ := mp.Get(ctx, sk.Value.String()); ok {
 		t.Fatalf("corrupt entry was not deleted by self-heal")
 	}
 
@@ -339,15 +411,15 @@ func TestSelfHealOnCorrupt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeSingle: %v", err)
 	}
-	if ok, err := impl.provider.Set(ctx, storageKey, wireEntry, 1, time.Minute); err != nil || !ok {
+	if ok, err := impl.provider.Set(ctx, sk.Value.String(), wireEntry, 1, time.Minute); err != nil || !ok {
 		t.Fatalf("inject valid stale: ok=%v err=%v", ok, err)
 	}
-	_, _ = impl.bumpGen(context.Background(), storageKey) // make it stale
+	_, _ = impl.bumpGen(context.Background(), toGenStoreKey(sk.Cache)) // make it stale
 
 	if _, ok, err := cc.Get(ctx, k); err != nil || ok {
 		t.Fatalf("Get on stale single should miss, ok=%v err=%v", ok, err)
 	}
-	if _, ok, _ := mp.Get(ctx, storageKey); ok {
+	if _, ok, _ := mp.Get(ctx, sk.Value.String()); ok {
 		t.Fatalf("stale entry was not deleted by self-heal")
 	}
 }
@@ -358,7 +430,7 @@ func TestLocalGenStoreCloseIdempotent(t *testing.T) {
 
 	// Do some bumps to exercise the map while cleanup may run
 	for i := range 100 {
-		_, _ = s.Bump(context.Background(), fmt.Sprintf("k%d", i))
+		_, _ = s.Bump(context.Background(), genstore.NewCacheKey(fmt.Sprintf("k%d", i)))
 	}
 
 	// Close many times
@@ -436,7 +508,7 @@ func TestBulkHappyAndStale(t *testing.T) {
 
 	// Ensure the stale bulk was dropped from provider.
 	for k := range mp.m {
-		if strings.HasPrefix(k, "bulk:user:") {
+		if strings.HasPrefix(k, bulkValuePrefix("user")) {
 			t.Fatalf("stale bulk should have been deleted, found %q", k)
 		}
 	}
@@ -473,9 +545,9 @@ func TestBulkDisabled(t *testing.T) {
 		t.Fatalf("GetBulk (bulk disabled) expected all present, missing=%v got=%v", missing, got)
 	}
 
-	// Assert no "bulk:user:" key exists in provider.
+	// Assert no bulk key exists in provider.
 	for k := range mp.m {
-		if strings.HasPrefix(k, "bulk:user:") {
+		if strings.HasPrefix(k, bulkValuePrefix("user")) {
 			t.Fatalf("bulk disabled but found bulk key %q written", k)
 		}
 	}
@@ -518,15 +590,18 @@ func TestBulkValueDecodeFallsBackToSinglesAndDeletesBulk(t *testing.T) {
 		t.Fatalf("SetBulkWithGens: %v", err)
 	}
 
-	bulkKey := impl.bulkKeySorted(uniqSorted([]string{"a"}))
-	entry, ok := mp.m[bulkKey]
+	bulkKey, err := impl.bulkKeySorted(uniqSorted([]string{"a"}))
+	if err != nil {
+		t.Fatalf("bulkKeySorted: %v", err)
+	}
+	entry, ok := mp.m[bulkKey.String()]
 	if !ok {
 		t.Fatalf("expected bulk entry %q", bulkKey)
 	}
 	corrupt := append([]byte(nil), entry.v...)
 	corrupt[len(corrupt)-1] = 0xFF
 	entry.v = corrupt
-	mp.m[bulkKey] = entry
+	mp.m[bulkKey.String()] = entry
 
 	got, missing, err := cc.GetBulk(ctx, []string{"a"})
 	if err != nil {
@@ -538,7 +613,7 @@ func TestBulkValueDecodeFallsBackToSinglesAndDeletesBulk(t *testing.T) {
 	if got["a"] != items["a"] {
 		t.Fatalf("GetBulk fallback mismatch: got=%v want=%v", got["a"], items["a"])
 	}
-	if _, ok, _ := mp.Get(ctx, bulkKey); ok {
+	if _, ok, _ := mp.Get(ctx, bulkKey.String()); ok {
 		t.Fatalf("undecodable bulk should be deleted")
 	}
 }
@@ -561,13 +636,16 @@ func TestBulkSnapshotManyFallbackPreservesBulkPath(t *testing.T) {
 		t.Fatalf("SetBulkWithGens: %v", err)
 	}
 
-	bulkKey := impl.bulkKeySorted([]string{"a", "b"})
-	if _, ok, _ := mp.Get(ctx, bulkKey); !ok {
+	bulkKey, err := impl.bulkKeySorted([]string{"a", "b"})
+	if err != nil {
+		t.Fatalf("bulkKeySorted: %v", err)
+	}
+	if _, ok, _ := mp.Get(ctx, bulkKey.String()); !ok {
 		t.Fatalf("expected bulk entry %q", bulkKey)
 	}
 
 	for k := range items {
-		_ = impl.provider.Del(ctx, impl.singleKey(k))
+		_ = impl.provider.Del(ctx, impl.singleKeys(k).Value.String())
 	}
 
 	got, missing, err := cc.GetBulk(ctx, []string{"b", "a"})
@@ -580,7 +658,7 @@ func TestBulkSnapshotManyFallbackPreservesBulkPath(t *testing.T) {
 	if got["a"] != items["a"] || got["b"] != items["b"] {
 		t.Fatalf("GetBulk mismatch: got=%v want=%v", got, items)
 	}
-	if _, ok, _ := mp.Get(ctx, bulkKey); !ok {
+	if _, ok, _ := mp.Get(ctx, bulkKey.String()); !ok {
 		t.Fatalf("expected bulk entry to remain after fallback validation")
 	}
 }
@@ -604,8 +682,11 @@ func TestBulkIgnoresUndecodableExtras(t *testing.T) {
 		t.Fatalf("EncodeBulk: %v", err)
 	}
 
-	bulkKey := impl.bulkKeySorted([]string{"a"})
-	if ok, err := impl.provider.Set(ctx, bulkKey, wireEntry, 1, time.Minute); err != nil || !ok {
+	bulkKey, err := impl.bulkKeySorted([]string{"a"})
+	if err != nil {
+		t.Fatalf("bulkKeySorted: %v", err)
+	}
+	if ok, err := impl.provider.Set(ctx, bulkKey.String(), wireEntry, 1, time.Minute); err != nil || !ok {
 		t.Fatalf("inject bulk: ok=%v err=%v", ok, err)
 	}
 
@@ -619,7 +700,7 @@ func TestBulkIgnoresUndecodableExtras(t *testing.T) {
 	if got["a"] != (user{ID: "a", Name: "A"}) {
 		t.Fatalf("GetBulk mismatch: got=%v", got["a"])
 	}
-	if _, ok, _ := mp.Get(ctx, bulkKey); !ok {
+	if _, ok, _ := mp.Get(ctx, bulkKey.String()); !ok {
 		t.Fatalf("expected bulk entry to remain when only extras are undecodable")
 	}
 }
@@ -701,7 +782,7 @@ func TestBulkOrderInsensitiveHit(t *testing.T) {
 
 	// Remove singles so GetBulk must rely on the bulk entry
 	for k := range items {
-		_ = impl.provider.Del(ctx, impl.singleKey(k))
+		_ = impl.provider.Del(ctx, impl.singleKeys(k).Value.String())
 	}
 
 	// Request same set, different order → should hit bulk, no missing
@@ -719,7 +800,7 @@ func TestBulkOrderInsensitiveHit(t *testing.T) {
 	// Bulk should remain (valid hit)
 	foundBulk := false
 	for k := range mp.m {
-		if strings.HasPrefix(k, "bulk:user:") {
+		if strings.HasPrefix(k, bulkValuePrefix("user")) {
 			foundBulk = true
 			break
 		}
@@ -751,7 +832,7 @@ func TestBulkDuplicateRequestHit(t *testing.T) {
 
 	// Remove singles so GetBulk must rely on the bulk entry
 	for k := range items {
-		_ = impl.provider.Del(ctx, impl.singleKey(k))
+		_ = impl.provider.Del(ctx, impl.singleKeys(k).Value.String())
 	}
 
 	// Request contains duplicates → should still hit the same bulk key
@@ -777,8 +858,14 @@ func TestBulkKeyCanonicalization(t *testing.T) {
 
 	impl := mustImpl(t, cc)
 
-	k1 := impl.bulkKeySorted(uniqSorted([]string{"u3", "u1", "u4"}))
-	k2 := impl.bulkKeySorted(uniqSorted([]string{"u1", "u3", "u3", "u4"}))
+	k1, err := impl.bulkKeySorted(uniqSorted([]string{"u3", "u1", "u4"}))
+	if err != nil {
+		t.Fatalf("bulkKeySorted k1: %v", err)
+	}
+	k2, err := impl.bulkKeySorted(uniqSorted([]string{"u1", "u3", "u3", "u4"}))
+	if err != nil {
+		t.Fatalf("bulkKeySorted k2: %v", err)
+	}
 	if k1 != k2 {
 		t.Fatalf("bulk keys differ for equivalent sets: %q vs %q", k1, k2)
 	}
@@ -874,7 +961,7 @@ func TestSelfHealOnGenMismatchSingle(t *testing.T) {
 
 	impl := mustImpl(t, cc)
 	k := "gen-mismatch"
-	storageKey := impl.singleKey(k)
+	storageKey := impl.singleKeys(k).Value
 
 	// GenStore has never been bumped for this key -> snapshot is 0.
 	val := user{ID: "u1", Name: "Mismatch"}
@@ -888,7 +975,7 @@ func TestSelfHealOnGenMismatchSingle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeSingle: %v", err)
 	}
-	if ok, err := impl.provider.Set(ctx, storageKey, b, 1, time.Minute); err != nil || !ok {
+	if ok, err := impl.provider.Set(ctx, storageKey.String(), b, 1, time.Minute); err != nil || !ok {
 		t.Fatalf("inject single: ok=%v err=%v", ok, err)
 	}
 
@@ -898,7 +985,7 @@ func TestSelfHealOnGenMismatchSingle(t *testing.T) {
 	}
 
 	// Ensure self-heal actually deleted the bad entry.
-	if _, ok, _ := mp.Get(ctx, storageKey); ok {
+	if _, ok, _ := mp.Get(ctx, storageKey.String()); ok {
 		t.Fatalf("gen-mismatch single was not deleted by self-heal")
 	}
 }
@@ -916,9 +1003,9 @@ func TestBulkValidTable(t *testing.T) {
 
 	// helper: bump to exactly 'n'
 	bumpTo := func(impl *cache[user], ukey string, n uint64) {
-		sk := impl.singleKey(ukey)
+		sk := impl.singleKeys(ukey).Cache
 		for i := uint64(0); i < n; i++ {
-			_, _ = impl.bumpGen(ctx, sk)
+			_, _ = impl.bumpGen(ctx, toGenStoreKey(sk))
 		}
 	}
 
@@ -1040,9 +1127,9 @@ func TestSnapshotGensBehavior(t *testing.T) {
 
 	t.Run("mixed", func(t *testing.T) {
 		// m1 -> 1, m3 -> 3, m2 -> 0
-		_, _ = impl.bumpGen(ctx, impl.singleKey("m1"))
+		_, _ = impl.bumpGen(ctx, toGenStoreKey(impl.singleKeys("m1").Cache))
 		for range 3 {
-			_, _ = impl.bumpGen(ctx, impl.singleKey("m3"))
+			_, _ = impl.bumpGen(ctx, toGenStoreKey(impl.singleKeys("m3").Cache))
 		}
 		keys := []string{"m1", "m2", "m3", "m1"} // include duplicate
 		got := cc.SnapshotGens(ctx, keys)
@@ -1063,21 +1150,23 @@ type failingGenStore struct {
 	bumpErr         error
 }
 
-func (s *failingGenStore) Snapshot(context.Context, string) (uint64, error) {
+func (s *failingGenStore) Snapshot(context.Context, genstore.CacheKey) (uint64, error) {
 	if s.snapshotErr != nil {
 		return 0, s.snapshotErr
 	}
 	return 0, nil
 }
-func (s *failingGenStore) SnapshotMany(context.Context, []string) (map[string]uint64, error) {
+func (s *failingGenStore) SnapshotMany(context.Context, []genstore.CacheKey) (map[genstore.CacheKey]uint64, error) {
 	if s.snapshotManyErr != nil {
 		return nil, s.snapshotManyErr
 	}
-	return map[string]uint64{}, nil
+	return map[genstore.CacheKey]uint64{}, nil
 }
-func (s *failingGenStore) Bump(context.Context, string) (uint64, error) { return 0, s.bumpErr }
-func (s *failingGenStore) Cleanup(time.Duration)                        {}
-func (s *failingGenStore) Close(context.Context) error                  { return nil }
+func (s *failingGenStore) Bump(context.Context, genstore.CacheKey) (uint64, error) {
+	return 0, s.bumpErr
+}
+func (s *failingGenStore) Cleanup(time.Duration)       {}
+func (s *failingGenStore) Close(context.Context) error { return nil }
 
 type delErrProvider struct {
 	*memProvider
@@ -1138,7 +1227,7 @@ func TestInvalidateBumpOKDeleteFailNoError(t *testing.T) {
 
 	// Warm a gen so bump definitely succeeds.
 	impl := mustImpl(t, cc)
-	_, _ = impl.bumpGen(ctx, impl.singleKey("k3"))
+	_, _ = impl.bumpGen(ctx, toGenStoreKey(impl.singleKeys("k3").Cache))
 
 	if err := cc.Invalidate(ctx, "k3"); err != nil {
 		t.Fatalf("expected no error when delete fails but bump succeeds; got %v", err)
