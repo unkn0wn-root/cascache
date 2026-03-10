@@ -208,16 +208,16 @@ func (c *cache[V]) SetWithGen(ctx context.Context, key string, value V, observed
 		return err
 	}
 
-	wireb, err := wire.EncodeSingle(observedGen, payload)
+	sw, err := c.singleWriteFor(key, observedGen, payload)
 	if err != nil {
 		return err
 	}
-	ok, err := c.provider.Set(ctx, sk.Value.String(), wireb, c.computeSetCost(sk.Value.String(), wireb, false, 1), ttl)
+	ok, err := c.provider.Set(ctx, sw.storageKey, sw.wire, sw.cost, ttl)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		c.hooks.ProviderSetRejected(sk.Value.String(), false)
+		c.hooks.ProviderSetRejected(sw.storageKey, false)
 	}
 	return nil
 }
@@ -803,20 +803,41 @@ func (c *cache[V]) seedBulkIfMissing(ctx context.Context, requested []string, it
 	return errors.Join(errs...)
 }
 
-// writeSingle encodes one single entry frame from an already validated bulk
-// member and stores it through the normal provider Set path.
-func (c *cache[V]) writeSingle(ctx context.Context, key string, gen uint64, payload []byte, ttl time.Duration) error {
+type singleWrite struct {
+	storageKey string
+	wire       []byte
+	cost       int64
+}
+
+// singleWriteFor builds the provider payload and admission metadata for a
+// single entry write from an already encoded value payload.
+func (c *cache[V]) singleWriteFor(key string, gen uint64, payload []byte) (singleWrite, error) {
 	sk := c.singleKeys(key)
 	wireb, err := wire.EncodeSingle(gen, payload)
 	if err != nil {
+		return singleWrite{}, err
+	}
+	storageKey := sk.Value.String()
+	return singleWrite{
+		storageKey: storageKey,
+		wire:       wireb,
+		cost:       c.computeSetCost(storageKey, wireb, false, 1),
+	}, nil
+}
+
+// writeSingle encodes one single entry frame from an already validated bulk
+// member and stores it through the normal provider Set path.
+func (c *cache[V]) writeSingle(ctx context.Context, key string, gen uint64, payload []byte, ttl time.Duration) error {
+	sw, err := c.singleWriteFor(key, gen, payload)
+	if err != nil {
 		return err
 	}
-	ok, err := c.provider.Set(ctx, sk.Value.String(), wireb, c.computeSetCost(sk.Value.String(), wireb, false, 1), ttl)
+	ok, err := c.provider.Set(ctx, sw.storageKey, sw.wire, sw.cost, ttl)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		c.hooks.ProviderSetRejected(sk.Value.String(), false)
+		c.hooks.ProviderSetRejected(sw.storageKey, false)
 	}
 	return nil
 }
@@ -824,12 +845,11 @@ func (c *cache[V]) writeSingle(ctx context.Context, key string, gen uint64, payl
 // addSingle encodes one single-entry frame from an already validated bulk
 // member and inserts it only if the provider reports the key as missing.
 func (c *cache[V]) addSingle(ctx context.Context, p pr.Adder, key string, gen uint64, payload []byte, ttl time.Duration) error {
-	sk := c.singleKeys(key)
-	wireb, err := wire.EncodeSingle(gen, payload)
+	sw, err := c.singleWriteFor(key, gen, payload)
 	if err != nil {
 		return err
 	}
-	_, err = p.Add(ctx, sk.Value.String(), wireb, c.computeSetCost(sk.Value.String(), wireb, false, 1), ttl)
+	_, err = p.Add(ctx, sw.storageKey, sw.wire, sw.cost, ttl)
 	return err
 }
 
