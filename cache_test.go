@@ -130,6 +130,19 @@ func (p *bulkRejectSingleErrProvider) Set(_ context.Context, key string, value [
 	return false, p.err
 }
 
+type bulkRejectProvider struct {
+	*memProvider
+}
+
+var _ pr.Provider = (*bulkRejectProvider)(nil)
+
+func (p *bulkRejectProvider) Set(ctx context.Context, key string, value []byte, cost int64, ttl time.Duration) (bool, error) {
+	if strings.HasPrefix(key, bulkValueRoot) {
+		return false, nil
+	}
+	return p.memProvider.Set(ctx, key, value, cost, ttl)
+}
+
 type countingAdderProvider struct {
 	*memProvider
 	setCalls  int
@@ -251,6 +264,16 @@ func closeTest(t *testing.T, ctx context.Context, c interface{ Close(context.Con
 	t.Helper()
 	if err := c.Close(ctx); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+func assertExpiryBefore(t *testing.T, got time.Time, before time.Time, limit time.Duration, label string) {
+	t.Helper()
+	if got.IsZero() {
+		t.Fatalf("%s should have a TTL", label)
+	}
+	if !got.Before(before.Add(limit)) {
+		t.Fatalf("%s expiry too far out: got %v, want before %v", label, got, before.Add(limit))
 	}
 }
 
@@ -1086,6 +1109,80 @@ func TestSetBulkWithGensUsesBatchGen(t *testing.T) {
 	}
 	if gs.snapshotManyCalls != 1 {
 		t.Fatalf("validated bulk write should use one SnapshotMany call, got %d", gs.snapshotManyCalls)
+	}
+}
+
+func TestSetBulkWithGensTTLOverrideAppliesToSeededSingles(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.DefaultTTL = time.Hour
+		o.BulkTTL = 2 * time.Hour
+	})
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	keys := []string{"a", "b"}
+	items := map[string]user{
+		"a": {ID: "a", Name: "A"},
+		"b": {ID: "b", Name: "B"},
+	}
+	observed := cc.SnapshotGens(ctx, keys)
+	override := 50 * time.Millisecond
+	before := time.Now()
+
+	if err := cc.SetBulkWithGens(ctx, items, observed, override); err != nil {
+		t.Fatalf("SetBulkWithGens: %v", err)
+	}
+
+	bulkKey, err := impl.bulkKeySorted(keys)
+	if err != nil {
+		t.Fatalf("bulkKeySorted: %v", err)
+	}
+	bulkEntry, ok := mp.m[bulkKey.String()]
+	if !ok {
+		t.Fatalf("expected bulk entry to be written")
+	}
+	assertExpiryBefore(t, bulkEntry.exp, before, 5*time.Second, "bulk entry")
+
+	for _, k := range keys {
+		entry, ok := mp.m[impl.singleKeys(k).Value.String()]
+		if !ok {
+			t.Fatalf("expected single entry for %q", k)
+		}
+		assertExpiryBefore(t, entry.exp, before, 5*time.Second, fmt.Sprintf("single %q", k))
+	}
+}
+
+func TestSetBulkWithGensTTLOverrideAppliesToFallbackSingles(t *testing.T) {
+	ctx := context.Background()
+	mp := &bulkRejectProvider{memProvider: newMemProvider()}
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.DefaultTTL = time.Hour
+		o.BulkTTL = 2 * time.Hour
+	})
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	keys := []string{"a", "b"}
+	items := map[string]user{
+		"a": {ID: "a", Name: "A"},
+		"b": {ID: "b", Name: "B"},
+	}
+	observed := cc.SnapshotGens(ctx, keys)
+	override := 50 * time.Millisecond
+	before := time.Now()
+
+	if err := cc.SetBulkWithGens(ctx, items, observed, override); err != nil {
+		t.Fatalf("SetBulkWithGens: %v", err)
+	}
+
+	for _, k := range keys {
+		entry, ok := mp.m[impl.singleKeys(k).Value.String()]
+		if !ok {
+			t.Fatalf("expected fallback single entry for %q", k)
+		}
+		assertExpiryBefore(t, entry.exp, before, 5*time.Second, fmt.Sprintf("fallback single %q", k))
 	}
 }
 

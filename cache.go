@@ -44,6 +44,7 @@ type cache[V any] struct {
 
 	computeSetCost SetCostFunc
 	gen            gen.GenStore
+	adder          pr.Adder
 
 	// When false, reads fall back to per-key lookups and bulk writes are skipped.
 	bulkEnabled bool
@@ -88,8 +89,11 @@ func newCache[V any](opts Options[V]) (*cache[V], error) {
 	}
 
 	c.bulkEnabled = !opts.DisableBulk
+	if adder, ok := opts.Provider.(pr.Adder); ok {
+		c.adder = adder
+	}
 	if c.bulkEnabled && opts.BulkSeed == BulkSeedIfMissing {
-		if _, ok := opts.Provider.(pr.Adder); !ok {
+		if c.adder == nil {
 			return nil, ErrBulkSeedNeedsAdder
 		}
 	}
@@ -208,7 +212,7 @@ func (c *cache[V]) SetWithGen(ctx context.Context, key string, value V, observed
 		return err
 	}
 
-	sw, err := c.singleWriteFor(key, observedGen, payload)
+	sw, err := c.singleWriteForKey(sk, observedGen, payload)
 	if err != nil {
 		return err
 	}
@@ -377,16 +381,21 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 	if !c.enabled || len(items) == 0 {
 		return nil
 	}
+	sttl := ttl
+	if sttl == 0 {
+		sttl = c.defaultTTL
+	}
 	if missing := c.missingObservedGenKeys(items, observedGens); len(missing) != 0 {
 		c.hooks.BulkRejected(c.ns, len(items), BulkRejectReasonMissingObservedGen)
 		return newMissingObservedGensError(missing)
 	}
 	if !c.bulkEnabled {
-		return c.seedSingles(ctx, items, observedGens, ttl)
+		return c.seedSingles(ctx, items, observedGens, sttl)
 	}
 
-	if ttl == 0 {
-		ttl = c.bulkTTL
+	bttl := ttl
+	if bttl == 0 {
+		bttl = c.bulkTTL
 	}
 
 	keys := make([]string, 0, len(items))
@@ -398,13 +407,13 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 	currentGens, err := c.snapshotSortedUniqueGens(ctx, keys)
 	if err != nil {
 		c.hooks.BulkRejected(c.ns, len(items), BulkRejectReasonGenSnapshotError)
-		return c.seedSingles(ctx, items, observedGens, c.defaultTTL)
+		return c.seedSingles(ctx, items, observedGens, sttl)
 	}
 
 	for _, k := range keys {
 		if currentGens[k] != observedGens[k] {
 			c.hooks.BulkRejected(c.ns, len(items), BulkRejectReasonGenMismatch)
-			return c.seedSingles(ctx, items, observedGens, c.defaultTTL)
+			return c.seedSingles(ctx, items, observedGens, sttl)
 		}
 	}
 
@@ -430,16 +439,16 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 	if err != nil {
 		return err
 	}
-	ok, err := c.provider.Set(ctx, bk.String(), wireb, c.computeSetCost(bk.String(), wireb, true, len(items)), ttl)
+	ok, err := c.provider.Set(ctx, bk.String(), wireb, c.computeSetCost(bk.String(), wireb, true, len(items)), bttl)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		c.hooks.ProviderSetRejected(bk.String(), true)
-		return c.seedSingles(ctx, items, observedGens, c.defaultTTL)
+		return c.seedSingles(ctx, items, observedGens, sttl)
 	}
 
-	_ = c.seedBulk(ctx, keys, wireItems, c.defaultTTL)
+	_ = c.seedBulk(ctx, keys, wireItems, sttl)
 	return nil
 }
 
@@ -756,9 +765,6 @@ func (c *cache[V]) seedBulk(ctx context.Context, requested []string, items []wir
 	if len(requested) == 0 || len(items) == 0 {
 		return nil
 	}
-	if ttl == 0 {
-		ttl = c.defaultTTL
-	}
 
 	itemByKey := bulkMap(items)
 	var errs []error
@@ -780,14 +786,6 @@ func (c *cache[V]) seedBulkIfMissing(ctx context.Context, requested []string, it
 	if len(requested) == 0 || len(items) == 0 {
 		return nil
 	}
-	if ttl == 0 {
-		ttl = c.defaultTTL
-	}
-
-	p, ok := c.provider.(pr.Adder)
-	if !ok {
-		return nil
-	}
 
 	itemByKey := bulkMap(items)
 	var errs []error
@@ -796,7 +794,7 @@ func (c *cache[V]) seedBulkIfMissing(ctx context.Context, requested []string, it
 		if !ok {
 			continue
 		}
-		if err := c.addSingle(ctx, p, k, it.Gen, it.Payload, ttl); err != nil {
+		if err := c.addSingle(ctx, k, it.Gen, it.Payload, ttl); err != nil {
 			errs = append(errs, fmt.Errorf("add %q: %w", k, err))
 		}
 	}
@@ -809,10 +807,9 @@ type singleWrite struct {
 	cost       int64
 }
 
-// singleWriteFor builds the provider payload and admission metadata for a
+// singleWriteForKey builds the provider payload and admission metadata for a
 // single entry write from an already encoded value payload.
-func (c *cache[V]) singleWriteFor(key string, gen uint64, payload []byte) (singleWrite, error) {
-	sk := c.singleKeys(key)
+func (c *cache[V]) singleWriteForKey(sk keyutil.Single, gen uint64, payload []byte) (singleWrite, error) {
 	wireb, err := wire.EncodeSingle(gen, payload)
 	if err != nil {
 		return singleWrite{}, err
@@ -828,7 +825,8 @@ func (c *cache[V]) singleWriteFor(key string, gen uint64, payload []byte) (singl
 // writeSingle encodes one single entry frame from an already validated bulk
 // member and stores it through the normal provider Set path.
 func (c *cache[V]) writeSingle(ctx context.Context, key string, gen uint64, payload []byte, ttl time.Duration) error {
-	sw, err := c.singleWriteFor(key, gen, payload)
+	sk := c.singleKeys(key)
+	sw, err := c.singleWriteForKey(sk, gen, payload)
 	if err != nil {
 		return err
 	}
@@ -844,12 +842,13 @@ func (c *cache[V]) writeSingle(ctx context.Context, key string, gen uint64, payl
 
 // addSingle encodes one single-entry frame from an already validated bulk
 // member and inserts it only if the provider reports the key as missing.
-func (c *cache[V]) addSingle(ctx context.Context, p pr.Adder, key string, gen uint64, payload []byte, ttl time.Duration) error {
-	sw, err := c.singleWriteFor(key, gen, payload)
+func (c *cache[V]) addSingle(ctx context.Context, key string, gen uint64, payload []byte, ttl time.Duration) error {
+	sk := c.singleKeys(key)
+	sw, err := c.singleWriteForKey(sk, gen, payload)
 	if err != nil {
 		return err
 	}
-	_, err = p.Add(ctx, sw.storageKey, sw.wire, sw.cost, ttl)
+	_, err = c.adder.Add(ctx, sw.storageKey, sw.wire, sw.cost, ttl)
 	return err
 }
 
