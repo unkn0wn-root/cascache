@@ -7,7 +7,6 @@
 // fully reversed so the bytes returned by Get are identical to what Set
 // received.
 //
-// Concurrency & atomicity:
 //   - Implementations MUST be safe for concurrent use.
 //   - Set must be atomic at the key level: readers must not observe partial
 //     writes or torn values.
@@ -51,4 +50,15 @@ type Provider interface {
 	Set(ctx context.Context, key string, value []byte, cost int64, ttl time.Duration) (ok bool, err error)
 	Del(ctx context.Context, key string) error
 	Close(ctx context.Context) error
+}
+
+// Adder is an optional capability for providers that can insert a value only
+// when the key is currently missing.
+// stored=false, err=nil means the value was not inserted because the key
+// already existed. Implementations MUST NOT use false/nil for admission
+// refusals or any other reason. Return a non-nil error for those cases so
+// callers can distinguish misconfiguration or backend pressure from a normal
+// "already present" no-op.
+type Adder interface {
+	Add(ctx context.Context, key string, value []byte, cost int64, ttl time.Duration) (stored bool, err error)
 }

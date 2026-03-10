@@ -33,7 +33,7 @@ and an opt‑in distributed mode for multi-replica deployments.
 ## Why CasCache
 
 #### TL;DR
-Apps that rely on "delete-then-set" patterns can still surface stale data, especially when multiple replicas race one another. **cascache** offers a clear guarantee:
+Apps that rely on "delete-then-set" patterns can still surface stale data, especially when multiple replicas race one another. **cascache** gives you this:
 
 > **After you invalidate a key, the cache will never serve the previous value.**
 > No additional delete cycles, manual timing coordination, or best-effort TTL tuning.
@@ -52,24 +52,20 @@ It does this with **generation-guarded writes** (CAS) and **read-side validation
 | **Version in value**| Store `{version, payload}`             | Readers still need **current version**; coordinating that is the same hard problem.   |
 
 ---
-
-### What CasCache guarantees
-
 - **Post-invalidation freshness:**
-  Each key carries a **generation**. Mutations call `Invalidate(key)` to bump the generation. Reads accept a cached value **only if** its stored generation matches the current one; otherwise the entry is **deleted** and treated as a miss.
+  Each key carries a **generation**. Mutations call `Invalidate(key)` to bump the generation. Reads accept a cached value **only if** its stored generation matches the current one, otherwise the entry is **deleted** and treated as a miss.
 
 - **Safe conditional writes (CAS):**
   Writers snapshot the generation **before** reading from the backing store. `SetWithGen(k, v, obs)` commits only if the generation is unchanged. If another writer updated the key, the write is **skipped**, preventing stale data from being reintroduced.
 
 - **Graceful failure modes:**
-  If the generation store is slow or unavailable, single-key reads **self-heal** by treating results as misses, and CAS writes **skip**. The cache never serves stale data; the system simply performs extra work.
+  If the generation store is slow or unavailable, single-key reads **self-heal** by treating results as misses, and CAS writes **skip**. The cache never serves stale data.
 
 - **Validated bulk caching:**
   Bulk entries are checked **member by member** during reads. If any entry is stale, the bulk payload is discarded and CasCache falls back to single-key fetches. Extras in the bulk are ignored during validation and decode; missing members render it invalid.
 
-- **Pluggable components:**
+- **Pluggable providers/genstores:**
   Works with **Ristretto/BigCache/Redis** for storage and **JSON/CBOR/Msgpack/Proto** for payloads. Wire decoding stays tight and zero-copy for payloads.
-
 ---
 
 ### When to use it
@@ -178,6 +174,9 @@ func (r *UserRepo) UpdateName(ctx context.Context, id, name string) error {
 #### 4) Optional bulk (safe set caching)
 > If any member is stale, the bulk is dropped and you fall back to singles. In multi-replica apps, use a shared GenStore (below) or disable bulk.
 > Use `TrySnapshotGens` when you want explicit visibility into generation-store failures. `SnapshotGens` is the convenience form and returns `0` for any failed snapshot.
+> Successful bulk hits are read-only by default. If you want them to warm single-key entries, set `BulkSeed` to `BulkSeedAll` or `BulkSeedIfMissing`.
+> `BulkSeed` affects `GetBulk` hits only. `SetBulkWithGens` still seeds singles after a successful bulk write.
+> `BulkSeedIfMissing` requires a provider that can do insert-if-missing with native backend support or provider-level atomic coordination via `Adder`.
 
 ```go
 func (r *UserRepo) GetMany(ctx context.Context, ids []string) (map[string]User, error) {
@@ -277,7 +276,7 @@ gs, err := gen.NewRedisGenStoreWithOptions(gen.RedisGenStoreOptions{
 if err != nil { /* handle */ }
 ```
 
-If you implement a custom `GenStore`, note that all methods now use `genstore.CacheKey` instead of plain strings. Treat these values as opaque byte identities — store and compare them as-is without attempting to parse or reconstruct them from logical user keys.
+If you implement a custom `GenStore`, note that all methods now use `genstore.CacheKey` instead of plain strings. Treat these values as opaque byte identities - store and compare them as-is without attempting to parse or reconstruct them from logical user keys.
 
 ---
 > **Alternative type name:** You can use `cascache.Cache[V]` instead of `cascache.CAS[V]`. See [Cache Type alias](#cache-type-alias).
@@ -333,13 +332,11 @@ else         -> drop bulk, fall back to singles
 ### CAS model
 - Per-key generation is **monotonic**.
 - Reads validate only; no write amplification.
-- Mutations call `Invalidate(key)` → bump generation and delete the single entry.
+- Mutations call `Invalidate(key)` -> bump generation and delete the single entry.
 
 ---
 
 ## Wire format
-
-Small binary envelope before the codec payload. Big-endian integers. Magic `"CASC"`.
 
 **Single**
 
@@ -361,8 +358,6 @@ repeated n times:
 | keyLen (u16)   | key (keyLen)    | gen (u64)      | vlen (u32)        | payload (vlen)   |
 +----------------+-----------------+----------------+-------------------+------------------+
 ```
-
-Decoders are zero-copy for payloads and keys (one `string` alloc per bulk item).
 
 ---
 
@@ -455,6 +450,7 @@ In examples we often use `CAS` to emphasize the CAS semantics, but `Cache` is eq
 
 - **Time:** O(1) singles; O(n) bulk for n members.
 - **Allocations:** zero-copy wire decode; one `string` alloc per bulk item.
+- **Bulk-hit warming:** disabled by default so valid bulk hits do not fan out into single-entry writes unless you opt in with `BulkSeed`.
 ```go
 ComputeSetCost: func(key string, raw []byte, isBulk bool, n int) int64 {
     if isBulk { return int64(n) }

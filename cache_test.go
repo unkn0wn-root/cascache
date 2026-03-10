@@ -28,7 +28,10 @@ type memProvider struct {
 	m map[string]memEntry
 }
 
-var _ pr.Provider = (*memProvider)(nil)
+var (
+	_ pr.Provider = (*memProvider)(nil)
+	_ pr.Adder    = (*memProvider)(nil)
+)
 
 func newMemProvider() *memProvider { return &memProvider{m: make(map[string]memEntry)} }
 
@@ -45,6 +48,19 @@ func (p *memProvider) Get(_ context.Context, key string) ([]byte, bool, error) {
 }
 
 func (p *memProvider) Set(_ context.Context, key string, value []byte, _ int64, ttl time.Duration) (bool, error) {
+	var exp time.Time
+	if ttl > 0 {
+		exp = time.Now().Add(ttl)
+	}
+	p.m[key] = memEntry{v: value, exp: exp}
+	return true, nil
+}
+
+func (p *memProvider) Add(_ context.Context, key string, value []byte, _ int64, ttl time.Duration) (bool, error) {
+	if _, ok := p.m[key]; ok {
+		return false, nil
+	}
+
 	var exp time.Time
 	if ttl > 0 {
 		exp = time.Now().Add(ttl)
@@ -78,6 +94,28 @@ func (p *setErrProvider) Set(_ context.Context, key string, value []byte, _ int6
 	return false, p.err
 }
 
+type plainProvider struct {
+	inner *memProvider
+}
+
+var _ pr.Provider = (*plainProvider)(nil)
+
+func (p *plainProvider) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	return p.inner.Get(ctx, key)
+}
+
+func (p *plainProvider) Set(ctx context.Context, key string, value []byte, cost int64, ttl time.Duration) (bool, error) {
+	return p.inner.Set(ctx, key, value, cost, ttl)
+}
+
+func (p *plainProvider) Del(ctx context.Context, key string) error {
+	return p.inner.Del(ctx, key)
+}
+
+func (p *plainProvider) Close(ctx context.Context) error {
+	return p.inner.Close(ctx)
+}
+
 type bulkRejectSingleErrProvider struct {
 	*memProvider
 	err error
@@ -90,6 +128,101 @@ func (p *bulkRejectSingleErrProvider) Set(_ context.Context, key string, value [
 		return false, nil
 	}
 	return false, p.err
+}
+
+type countingAdderProvider struct {
+	*memProvider
+	setCalls  int
+	addCalls  int
+	addStored int
+}
+
+var (
+	_ pr.Provider = (*countingAdderProvider)(nil)
+	_ pr.Adder    = (*countingAdderProvider)(nil)
+)
+
+func (p *countingAdderProvider) Set(ctx context.Context, key string, value []byte, cost int64, ttl time.Duration) (bool, error) {
+	p.setCalls++
+	return p.memProvider.Set(ctx, key, value, cost, ttl)
+}
+
+func (p *countingAdderProvider) Add(ctx context.Context, key string, value []byte, cost int64, ttl time.Duration) (bool, error) {
+	p.addCalls++
+	stored, err := p.memProvider.Add(ctx, key, value, cost, ttl)
+	if stored {
+		p.addStored++
+	}
+	return stored, err
+}
+
+type countingGenStore struct {
+	inner             genstore.GenStore
+	snapshotCalls     int
+	snapshotManyCalls int
+}
+
+var _ genstore.GenStore = (*countingGenStore)(nil)
+
+func (s *countingGenStore) Snapshot(ctx context.Context, k genstore.CacheKey) (uint64, error) {
+	s.snapshotCalls++
+	return s.inner.Snapshot(ctx, k)
+}
+
+func (s *countingGenStore) SnapshotMany(ctx context.Context, ks []genstore.CacheKey) (map[genstore.CacheKey]uint64, error) {
+	s.snapshotManyCalls++
+	return s.inner.SnapshotMany(ctx, ks)
+}
+
+func (s *countingGenStore) Bump(ctx context.Context, k genstore.CacheKey) (uint64, error) {
+	return s.inner.Bump(ctx, k)
+}
+
+func (s *countingGenStore) Cleanup(retention time.Duration) {
+	s.inner.Cleanup(retention)
+}
+
+func (s *countingGenStore) Close(ctx context.Context) error {
+	return s.inner.Close(ctx)
+}
+
+type bumpAfterSnapshotManyGenStore struct {
+	inner            genstore.GenStore
+	bumpKey          genstore.CacheKey
+	bumpOnCall       int
+	snapshotManyCall int
+	bumped           bool
+}
+
+var _ genstore.GenStore = (*bumpAfterSnapshotManyGenStore)(nil)
+
+func (s *bumpAfterSnapshotManyGenStore) Snapshot(ctx context.Context, k genstore.CacheKey) (uint64, error) {
+	return s.inner.Snapshot(ctx, k)
+}
+
+func (s *bumpAfterSnapshotManyGenStore) SnapshotMany(ctx context.Context, ks []genstore.CacheKey) (map[genstore.CacheKey]uint64, error) {
+	got, err := s.inner.SnapshotMany(ctx, ks)
+	s.snapshotManyCall++
+	if err != nil || s.bumped || s.bumpKey == (genstore.CacheKey{}) || s.snapshotManyCall != s.bumpOnCall {
+		return got, err
+	}
+	s.bumped = true
+	if _, bumpErr := s.inner.Bump(ctx, s.bumpKey); bumpErr != nil {
+		return nil, bumpErr
+	}
+	return got, nil
+}
+
+func (s *bumpAfterSnapshotManyGenStore) Bump(ctx context.Context, k genstore.CacheKey) (uint64, error) {
+	return s.inner.Bump(ctx, k)
+}
+
+func (s *bumpAfterSnapshotManyGenStore) Cleanup(retention time.Duration) {
+	s.inner.Cleanup(retention)
+}
+
+func (s *bumpAfterSnapshotManyGenStore) Close(ctx context.Context) error {
+	return s.inner.Close(ctx)
 }
 
 type user struct {
@@ -553,6 +686,173 @@ func TestBulkDisabled(t *testing.T) {
 	}
 }
 
+func TestBulkDefaultNoSeed(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	cc := newTestCache(t, "user", mp, nil)
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	keys := []string{"a", "b"}
+	items := map[string]user{
+		"a": {ID: "a", Name: "A"},
+		"b": {ID: "b", Name: "B"},
+	}
+	snap := cc.SnapshotGens(ctx, keys)
+	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
+		t.Fatalf("SetBulkWithGens: %v", err)
+	}
+
+	for _, k := range keys {
+		_ = impl.provider.Del(ctx, impl.singleKeys(k).Value.String())
+	}
+
+	got, missing, err := cc.GetBulk(ctx, keys)
+	if err != nil {
+		t.Fatalf("GetBulk: %v", err)
+	}
+	if len(missing) != 0 || len(got) != len(items) {
+		t.Fatalf("GetBulk expected all hit, missing=%v got=%v", missing, got)
+	}
+
+	for _, k := range keys {
+		if _, ok, _ := mp.Get(ctx, impl.singleKeys(k).Value.String()); ok {
+			t.Fatalf("default bulk hit should not seed single %q", k)
+		}
+	}
+}
+
+func TestNewBulkSeedIfMissingNeedsSupport(t *testing.T) {
+	_, err := New[user](Options[user]{
+		Namespace: "user",
+		Provider:  &plainProvider{inner: newMemProvider()},
+		Codec:     c.JSON[user]{},
+		BulkSeed:  BulkSeedIfMissing,
+	})
+	if !errors.Is(err, ErrBulkSeedNeedsAdder) {
+		t.Fatalf("New error mismatch: %v", err)
+	}
+}
+
+func TestBulkSeedAllUsesBatchGen(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	gs := &countingGenStore{inner: genstore.NewLocalGenStore(time.Hour, time.Hour)}
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.GenStore = gs
+		o.BulkSeed = BulkSeedAll
+	})
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	keys := []string{"a", "b", "c"}
+	items := map[string]user{
+		"a": {ID: "a", Name: "A"},
+		"b": {ID: "b", Name: "B"},
+		"c": {ID: "c", Name: "C"},
+	}
+	snap := cc.SnapshotGens(ctx, keys)
+	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
+		t.Fatalf("SetBulkWithGens: %v", err)
+	}
+
+	for _, k := range keys {
+		_ = impl.provider.Del(ctx, impl.singleKeys(k).Value.String())
+	}
+	gs.snapshotCalls = 0
+	gs.snapshotManyCalls = 0
+
+	got, missing, err := cc.GetBulk(ctx, keys)
+	if err != nil {
+		t.Fatalf("GetBulk: %v", err)
+	}
+	if len(missing) != 0 || len(got) != len(items) {
+		t.Fatalf("GetBulk expected all hit, missing=%v got=%v", missing, got)
+	}
+	if gs.snapshotCalls != 0 {
+		t.Fatalf("bulk-hit warming should not do per-key Snapshot calls, got %d", gs.snapshotCalls)
+	}
+	if gs.snapshotManyCalls != 1 {
+		t.Fatalf("bulk-hit validation should use one SnapshotMany call, got %d", gs.snapshotManyCalls)
+	}
+
+	for _, k := range keys {
+		if _, ok, _ := mp.Get(ctx, impl.singleKeys(k).Value.String()); !ok {
+			t.Fatalf("checked bulk-hit warming should seed single %q", k)
+		}
+	}
+}
+
+func TestSetBulkWithGensSeedsSinglesWhenBulkSeedOff(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.BulkSeed = BulkSeedOff
+	})
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	items := map[string]user{
+		"a": {ID: "a", Name: "A"},
+		"b": {ID: "b", Name: "B"},
+	}
+	keys := []string{"a", "b"}
+	observed := cc.SnapshotGens(ctx, keys)
+
+	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBulkWithGens: %v", err)
+	}
+	for _, k := range keys {
+		if _, ok, _ := mp.Get(ctx, impl.singleKeys(k).Value.String()); !ok {
+			t.Fatalf("bulk write should seed single %q even when BulkSeedOff", k)
+		}
+	}
+}
+
+func TestBulkSeedIfMissing(t *testing.T) {
+	ctx := context.Background()
+	mp := &countingAdderProvider{memProvider: newMemProvider()}
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.BulkSeed = BulkSeedIfMissing
+	})
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	keys := []string{"a", "b"}
+	items := map[string]user{
+		"a": {ID: "a", Name: "A"},
+		"b": {ID: "b", Name: "B"},
+	}
+	snap := cc.SnapshotGens(ctx, keys)
+	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
+		t.Fatalf("SetBulkWithGens: %v", err)
+	}
+
+	for _, k := range keys {
+		_ = impl.provider.Del(ctx, impl.singleKeys(k).Value.String())
+	}
+	mp.setCalls = 0
+	mp.addCalls = 0
+	mp.addStored = 0
+
+	got, missing, err := cc.GetBulk(ctx, keys)
+	if err != nil {
+		t.Fatalf("GetBulk: %v", err)
+	}
+	if len(missing) != 0 || len(got) != len(items) {
+		t.Fatalf("GetBulk expected all hit, missing=%v got=%v", missing, got)
+	}
+	if mp.setCalls != 0 {
+		t.Fatalf("if-absent warming should not call Set, got %d calls", mp.setCalls)
+	}
+	if mp.addCalls != len(keys) {
+		t.Fatalf("if-missing warming should call Add once per key, got %d", mp.addCalls)
+	}
+	if mp.addStored != len(keys) {
+		t.Fatalf("if-missing warming should insert all missing singles, stored=%d", mp.addStored)
+	}
+}
+
 func TestGetBulkPropagatesSingleErrors(t *testing.T) {
 	ctx := context.Background()
 	sentinel := errors.New("get failed")
@@ -757,6 +1057,80 @@ func TestSetBulkWithGensFallbackPropagatesSingleErrors(t *testing.T) {
 	err := cc.SetBulkWithGens(ctx, items, observed, time.Minute)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("SetBulkWithGens error mismatch: %v", err)
+	}
+}
+
+func TestSetBulkWithGensUsesBatchGen(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	gs := &countingGenStore{inner: genstore.NewLocalGenStore(time.Hour, time.Hour)}
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.GenStore = gs
+	})
+	defer closeTest(t, ctx, cc)
+
+	keys := []string{"a", "b"}
+	items := map[string]user{
+		"a": {ID: "a", Name: "A"},
+		"b": {ID: "b", Name: "B"},
+	}
+	observed := cc.SnapshotGens(ctx, keys)
+	gs.snapshotCalls = 0
+	gs.snapshotManyCalls = 0
+
+	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBulkWithGens: %v", err)
+	}
+	if gs.snapshotCalls != 0 {
+		t.Fatalf("validated bulk write should not do per-key Snapshot calls, got %d", gs.snapshotCalls)
+	}
+	if gs.snapshotManyCalls != 1 {
+		t.Fatalf("validated bulk write should use one SnapshotMany call, got %d", gs.snapshotManyCalls)
+	}
+}
+
+func TestSetBulkWithGensStaleSingleSelfHealsAfterBatchValidationRace(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	gs := &bumpAfterSnapshotManyGenStore{
+		inner:      genstore.NewLocalGenStore(time.Hour, time.Hour),
+		bumpOnCall: 2,
+	}
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.GenStore = gs
+	})
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	key := "a"
+	gs.bumpKey = toGenStoreKey(impl.singleKeys(key).Cache)
+
+	items := map[string]user{
+		key: {ID: key, Name: "A"},
+	}
+	observed := cc.SnapshotGens(ctx, []string{key})
+
+	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBulkWithGens: %v", err)
+	}
+
+	raw, ok, err := mp.Get(ctx, impl.singleKeys(key).Value.String())
+	if err != nil || !ok {
+		t.Fatalf("expected stale single to land, ok=%v err=%v", ok, err)
+	}
+	gotGen, _, err := wire.DecodeSingle(raw)
+	if err != nil {
+		t.Fatalf("DecodeSingle: %v", err)
+	}
+	if gotGen != observed[key] {
+		t.Fatalf("stale single gen=%d want observed=%d", gotGen, observed[key])
+	}
+
+	if _, ok, err := cc.Get(ctx, key); err != nil || ok {
+		t.Fatalf("Get should reject stale single, ok=%v err=%v", ok, err)
+	}
+	if _, ok, _ := mp.Get(ctx, impl.singleKeys(key).Value.String()); ok {
+		t.Fatalf("stale single should be deleted by self-heal")
 	}
 }
 
@@ -1004,7 +1378,7 @@ func TestBulkValidTable(t *testing.T) {
 	// helper: bump to exactly 'n'
 	bumpTo := func(impl *cache[user], ukey string, n uint64) {
 		sk := impl.singleKeys(ukey).Cache
-		for i := uint64(0); i < n; i++ {
+		for range n {
 			_, _ = impl.bumpGen(ctx, toGenStoreKey(sk))
 		}
 	}
@@ -1156,12 +1530,14 @@ func (s *failingGenStore) Snapshot(context.Context, genstore.CacheKey) (uint64, 
 	}
 	return 0, nil
 }
+
 func (s *failingGenStore) SnapshotMany(context.Context, []genstore.CacheKey) (map[genstore.CacheKey]uint64, error) {
 	if s.snapshotManyErr != nil {
 		return nil, s.snapshotManyErr
 	}
 	return map[genstore.CacheKey]uint64{}, nil
 }
+
 func (s *failingGenStore) Bump(context.Context, genstore.CacheKey) (uint64, error) {
 	return 0, s.bumpErr
 }

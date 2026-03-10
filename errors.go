@@ -41,7 +41,12 @@ func (e *InvalidateError) Unwrap() []error {
 
 // ErrMissingObservedGens identifies a SetBulkWithGens caller error where at least
 // one item key has no corresponding observed generation.
-var ErrMissingObservedGens = errors.New("cascache: missing observed generations")
+var ErrMissingObservedGens = errors.New("missing observed generations")
+
+// ErrBulkSeedNeedsAdder identifies an invalid configuration where
+// BulkSeedIfMissing is requested with a provider that does not implement
+// Adder.
+var ErrBulkSeedNeedsAdder = errors.New("BulkSeedIfMissing requires Adder")
 
 // MissingObservedGensError reports which logical keys were missing observed generations.
 type MissingObservedGensError struct {
