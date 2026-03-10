@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [1.1.0](https://github.com/unkn0wn-root/cascache/compare/v1.0.0...v1.1.0) (2026-03-10)
+
+
+### Features
+
+* add BulkSeed option to control single-key warming on bulk read hits ([45196cf](https://github.com/unkn0wn-root/cascache/commit/45196cf3d585d6e8948decf698551b873e570924))
+* **cache:** add small helper ([d08cdea](https://github.com/unkn0wn-root/cascache/commit/d08cdea397db38d1b38fb03ce0e496141b88c74d))
+
 ## [1.0.0](https://github.com/unkn0wn-root/cascache/compare/v0.3.2...v1.0.0) (2026-03-09)
 
 
