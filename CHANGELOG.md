@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [1.1.1](https://github.com/unkn0wn-root/cascache/compare/v1.1.0...v1.1.1) (2026-03-10)
+
+
+### Bug Fixes
+
+* **bulk:** respect caller TTL for seeded singles ([37d7490](https://github.com/unkn0wn-root/cascache/commit/37d7490c8786262044b5303c88545b13cb19d6eb))
+
 ## [1.1.0](https://github.com/unkn0wn-root/cascache/compare/v1.0.0...v1.1.0) (2026-03-10)
 
 
