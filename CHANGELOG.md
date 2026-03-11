@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [1.2.0](https://github.com/unkn0wn-root/cascache/compare/v1.1.1...v1.2.0) (2026-03-11)
+
+
+### Features
+
+* add OpError ([58763c7](https://github.com/unkn0wn-root/cascache/commit/58763c7e6bca2e585c8d78ea6cdd5e840a25d49b))
+
 ### [1.1.1](https://github.com/unkn0wn-root/cascache/compare/v1.1.0...v1.1.1) (2026-03-10)
 
 
