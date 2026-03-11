@@ -83,6 +83,22 @@ func (p *getErrProvider) Get(_ context.Context, key string) ([]byte, bool, error
 	return nil, false, p.err
 }
 
+type bulkGetErrProvider struct {
+	*memProvider
+	err            error
+	singleGetCalls int
+}
+
+var _ pr.Provider = (*bulkGetErrProvider)(nil)
+
+func (p *bulkGetErrProvider) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	if strings.HasPrefix(key, bulkValueRoot) {
+		return nil, false, p.err
+	}
+	p.singleGetCalls++
+	return p.memProvider.Get(ctx, key)
+}
+
 type setErrProvider struct {
 	*memProvider
 	err error
@@ -464,10 +480,64 @@ func TestGetSnapshotErrorTreatsGenZeroEntryAsMiss(t *testing.T) {
 	}
 }
 
+func TestGetProviderErrorReturnsOpError(t *testing.T) {
+	ctx := context.Background()
+	sentinel := errors.New("get failed")
+	cc := newTestCache(t, "user", &getErrProvider{memProvider: newMemProvider(), err: sentinel}, nil)
+	defer closeTest(t, ctx, cc)
+
+	_, ok, err := cc.Get(ctx, "u:1")
+	if err == nil {
+		t.Fatalf("Get should return an error")
+	}
+	if ok {
+		t.Fatalf("Get should not return a hit when provider get fails")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Get error mismatch: %v", err)
+	}
+	var oe *OpError
+	if !errors.As(err, &oe) {
+		t.Fatalf("Get error should be *OpError, got %T", err)
+	}
+	if oe.Op != OpGet {
+		t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpGet)
+	}
+	if oe.Key != "u:1" {
+		t.Fatalf("OpError.Key = %q, want %q", oe.Key, "u:1")
+	}
+}
+
+func TestSetWithGenProviderErrorReturnsOpError(t *testing.T) {
+	ctx := context.Background()
+	sentinel := errors.New("set failed")
+	cc := newTestCache(t, "user", &setErrProvider{memProvider: newMemProvider(), err: sentinel}, nil)
+	defer closeTest(t, ctx, cc)
+
+	err := cc.SetWithGen(ctx, "u:1", user{ID: "1", Name: "Ada"}, 0, time.Minute)
+	if err == nil {
+		t.Fatalf("SetWithGen should return an error")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("SetWithGen error mismatch: %v", err)
+	}
+	var oe *OpError
+	if !errors.As(err, &oe) {
+		t.Fatalf("SetWithGen error should be *OpError, got %T", err)
+	}
+	if oe.Op != OpSet {
+		t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpSet)
+	}
+	if oe.Key != "u:1" {
+		t.Fatalf("OpError.Key = %q, want %q", oe.Key, "u:1")
+	}
+}
+
 func TestTrySnapshotGenReturnsError(t *testing.T) {
 	ctx := context.Background()
+	snapshotSentinel := errors.New("snapshot failed")
 	cc := newTestCache(t, "user", newMemProvider(), func(o *Options[user]) {
-		o.GenStore = &failingGenStore{snapshotErr: errors.New("snapshot failed")}
+		o.GenStore = &failingGenStore{snapshotErr: snapshotSentinel}
 	})
 	defer closeTest(t, ctx, cc)
 
@@ -478,9 +548,49 @@ func TestTrySnapshotGenReturnsError(t *testing.T) {
 	if got != 0 {
 		t.Fatalf("TrySnapshotGen got=%d want=0", got)
 	}
+	if !errors.Is(err, snapshotSentinel) {
+		t.Fatalf("TrySnapshotGen error mismatch: %v", err)
+	}
+	var oe *OpError
+	if !errors.As(err, &oe) {
+		t.Fatalf("TrySnapshotGen error should be *OpError, got %T", err)
+	}
+	if oe.Op != OpSnapshot {
+		t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpSnapshot)
+	}
+	if oe.Key != "u:1" {
+		t.Fatalf("OpError.Key = %q, want %q", oe.Key, "u:1")
+	}
 	if got := cc.SnapshotGen(ctx, "u:1"); got != 0 {
 		t.Fatalf("SnapshotGen got=%d want=0", got)
 	}
+}
+
+func TestOpErrorErrorHandlesZeroValue(t *testing.T) {
+	t.Run("nil_receiver", func(t *testing.T) {
+		var oe *OpError
+		if got := oe.Error(); got != "<nil>" {
+			t.Fatalf("OpError(nil).Error() = %q, want %q", got, "<nil>")
+		}
+	})
+
+	t.Run("zero_value", func(t *testing.T) {
+		if got := (&OpError{}).Error(); got != "missing underlying error" {
+			t.Fatalf("OpError{}.Error() = %q, want %q", got, "missing underlying error")
+		}
+	})
+
+	t.Run("partial_values", func(t *testing.T) {
+		if got := (&OpError{Op: OpGet}).Error(); got != "get: missing underlying error" {
+			t.Fatalf("OpError{Op}.Error() = %q, want %q", got, "get: missing underlying error")
+		}
+		if got := (&OpError{Key: "k"}).Error(); got != `"k": missing underlying error` {
+			t.Fatalf("OpError{Key}.Error() = %q, want %q", got, `"k": missing underlying error`)
+		}
+		if got := (&OpError{Op: OpGet, Key: "k"}).Error(); got != `get "k": missing underlying error` {
+			t.Fatalf("OpError{Op,Key}.Error() = %q, want %q", got, `get "k": missing underlying error`)
+		}
+	})
 }
 
 func TestTrySnapshotGensFallbackAndStrictBehavior(t *testing.T) {
@@ -503,10 +613,11 @@ func TestTrySnapshotGensFallbackAndStrictBehavior(t *testing.T) {
 	})
 
 	t.Run("returns_error_when_single_snapshot_fails", func(t *testing.T) {
+		snapshotSentinel := errors.New("snapshot failed")
 		cc := newTestCache(t, "user", newMemProvider(), func(o *Options[user]) {
 			o.GenStore = &failingGenStore{
 				snapshotManyErr: errors.New("snapshot many failed"),
-				snapshotErr:     errors.New("snapshot failed"),
+				snapshotErr:     snapshotSentinel,
 			}
 		})
 		defer closeTest(t, ctx, cc)
@@ -517,6 +628,16 @@ func TestTrySnapshotGensFallbackAndStrictBehavior(t *testing.T) {
 		}
 		if got != nil {
 			t.Fatalf("TrySnapshotGens should not return partial results on error, got=%v", got)
+		}
+		var oe *OpError
+		if !errors.As(err, &oe) {
+			t.Fatalf("TrySnapshotGens error should be *OpError, got %T", err)
+		}
+		if oe.Op != OpSnapshot {
+			t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpSnapshot)
+		}
+		if !errors.Is(err, snapshotSentinel) {
+			t.Fatalf("OpError should wrap snapshot sentinel")
 		}
 
 		want := map[string]uint64{"a": 0, "b": 0}
@@ -890,11 +1011,65 @@ func TestGetBulkPropagatesSingleErrors(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("GetBulk error mismatch: %v", err)
 	}
+	var oe *OpError
+	if !errors.As(err, &oe) {
+		t.Fatalf("GetBulk error should be *OpError, got %T", err)
+	}
+	if oe.Op != OpGet {
+		t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpGet)
+	}
+	if oe.Key != "a" && oe.Key != "b" {
+		t.Fatalf("OpError.Key = %q, want %q or %q", oe.Key, "a", "b")
+	}
 	if len(got) != 0 {
 		t.Fatalf("GetBulk should not return values on provider error, got %v", got)
 	}
 	if len(missing) != 2 || missing[0] != "a" || missing[1] != "b" {
 		t.Fatalf("GetBulk missing mismatch: %v", missing)
+	}
+}
+
+func TestGetBulkBulkReadErrorReturnsOpError(t *testing.T) {
+	ctx := context.Background()
+	sentinel := errors.New("bulk get failed")
+	mp := &bulkGetErrProvider{memProvider: newMemProvider(), err: sentinel}
+	cc := newTestCache(t, "user", mp, nil)
+	defer closeTest(t, ctx, cc)
+
+	items := map[string]user{
+		"a": {ID: "a", Name: "A"},
+		"b": {ID: "b", Name: "B"},
+	}
+	observed := cc.SnapshotGens(ctx, []string{"a", "b"})
+	if err := cc.SetBulkWithGens(ctx, items, observed, time.Minute); err != nil {
+		t.Fatalf("SetBulkWithGens: %v", err)
+	}
+
+	got, missing, err := cc.GetBulk(ctx, []string{"a", "b"})
+	if err == nil {
+		t.Fatalf("GetBulk should return an error on bulk provider read failure")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("GetBulk error mismatch: %v", err)
+	}
+	var oe *OpError
+	if !errors.As(err, &oe) {
+		t.Fatalf("GetBulk error should be *OpError, got %T", err)
+	}
+	if oe.Op != OpGetBulk {
+		t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpGetBulk)
+	}
+	if oe.Key != "" {
+		t.Fatalf("OpError.Key = %q, want empty", oe.Key)
+	}
+	if len(got) != 0 {
+		t.Fatalf("GetBulk should not return values when bulk read fails, got %v", got)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("GetBulk missing should stay empty on bulk read failure, got %v", missing)
+	}
+	if mp.singleGetCalls != 0 {
+		t.Fatalf("GetBulk should not fall back to singles on bulk read failure, got %d single reads", mp.singleGetCalls)
 	}
 }
 
@@ -1080,6 +1255,44 @@ func TestSetBulkWithGensFallbackPropagatesSingleErrors(t *testing.T) {
 	err := cc.SetBulkWithGens(ctx, items, observed, time.Minute)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("SetBulkWithGens error mismatch: %v", err)
+	}
+	var oe *OpError
+	if !errors.As(err, &oe) {
+		t.Fatalf("SetBulkWithGens error should be *OpError, got %T", err)
+	}
+	if oe.Op != OpSet {
+		t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpSet)
+	}
+}
+
+func TestSetBulkWithGensBulkWriteErrorReturnsOpError(t *testing.T) {
+	ctx := context.Background()
+	sentinel := errors.New("bulk set failed")
+	cc := newTestCache(t, "user", &setErrProvider{memProvider: newMemProvider(), err: sentinel}, nil)
+	defer closeTest(t, ctx, cc)
+
+	err := cc.SetBulkWithGens(ctx, map[string]user{
+		"a": {ID: "a", Name: "A"},
+		"b": {ID: "b", Name: "B"},
+	}, map[string]uint64{
+		"a": 0,
+		"b": 0,
+	}, time.Minute)
+	if err == nil {
+		t.Fatalf("SetBulkWithGens should return an error")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("SetBulkWithGens error mismatch: %v", err)
+	}
+	var oe *OpError
+	if !errors.As(err, &oe) {
+		t.Fatalf("SetBulkWithGens error should be *OpError, got %T", err)
+	}
+	if oe.Op != OpSetBulk {
+		t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpSetBulk)
+	}
+	if oe.Key != "" {
+		t.Fatalf("OpError.Key = %q, want empty", oe.Key)
 	}
 }
 
@@ -1669,9 +1882,26 @@ func TestInvalidateBothFailReturnsError(t *testing.T) {
 	if !errors.As(err, &ie) {
 		t.Fatalf("expected InvalidateError, got %T: %v", err, err)
 	}
+	var bumpOpErr *OpError
+	if !errors.As(ie.BumpErr, &bumpOpErr) {
+		t.Fatalf("expected bump error to be *OpError, got %T", ie.BumpErr)
+	}
+	if bumpOpErr.Op != OpInvalidate || bumpOpErr.Key != "k1" {
+		t.Fatalf("unexpected bump OpError: %+v", bumpOpErr)
+	}
+	var delOpErr *OpError
+	if !errors.As(ie.DelErr, &delOpErr) {
+		t.Fatalf("expected delete error to be *OpError, got %T", ie.DelErr)
+	}
+	if delOpErr.Op != OpInvalidate || delOpErr.Key != "k1" {
+		t.Fatalf("unexpected delete OpError: %+v", delOpErr)
+	}
 	// Unwrap should expose underlying delete error.
 	if !errors.Is(err, sentinelDelErr) {
 		t.Fatalf("expected errors.Is(err, delErr) to be true")
+	}
+	if !errors.Is(err, bumpFail) {
+		t.Fatalf("expected errors.Is(err, bumpErr) to be true")
 	}
 }
 

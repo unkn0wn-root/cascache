@@ -8,6 +8,8 @@ import (
 	"strings"
 )
 
+const missingUnderlyingErr = "missing underlying error"
+
 type InvalidateError struct {
 	Key     string
 	BumpErr error
@@ -72,4 +74,68 @@ func newMissingObservedGensError(missing []string) *MissingObservedGensError {
 	cp := append([]string(nil), missing...)
 	sort.Strings(cp)
 	return &MissingObservedGensError{Missing: cp}
+}
+
+// Op identifies the logical cache operation that failed.
+type Op string
+
+const (
+	OpGet        Op = "get"
+	OpSet        Op = "set"
+	OpAdd        Op = "add"
+	OpSnapshot   Op = "snapshot"
+	OpInvalidate Op = "invalidate"
+	OpGetBulk    Op = "get_bulk"
+	OpSetBulk    Op = "set_bulk"
+)
+
+// OpError reports an operation failure and, when applicable, the logical key
+// that triggered it.
+type OpError struct {
+	Op  Op
+	Key string
+	Err error
+}
+
+func (e *OpError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	if e.Err == nil {
+		switch {
+		case e.Op != "" && e.Key != "":
+			return fmt.Sprintf("%s %q: %s", e.Op, e.Key, missingUnderlyingErr)
+		case e.Op != "":
+			return fmt.Sprintf("%s: %s", e.Op, missingUnderlyingErr)
+		case e.Key != "":
+			return fmt.Sprintf("%q: %s", e.Key, missingUnderlyingErr)
+		default:
+			return missingUnderlyingErr
+		}
+	}
+
+	switch {
+	case e.Op != "" && e.Key != "":
+		return fmt.Sprintf("%s %q: %v", e.Op, e.Key, e.Err)
+	case e.Op != "":
+		return fmt.Sprintf("%s: %v", e.Op, e.Err)
+	case e.Key != "":
+		return fmt.Sprintf("%q: %v", e.Key, e.Err)
+	default:
+		return e.Err.Error()
+	}
+}
+
+func (e *OpError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func opError(op Op, key string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &OpError{Op: op, Key: key, Err: err}
 }
