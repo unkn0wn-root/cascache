@@ -1,11 +1,11 @@
 # CasCache
 
-Provider-agnostic CAS like (**C**ompare-**A**nd-**S**et or generation-guarded conditional set) cache with pluggable codecs and a pluggable generation store.
+Provider agnostic CAS like (**C**ompare-**A**nd-**S**et or generation-guarded conditional set) cache with pluggable codecs and a pluggable generation store.
 Safe single-key reads (no stale values), optional bulk caching with read-side validation,
 and an opt‑in distributed mode for multi-replica deployments.
 
 > [!WARNING]
-> **Breaking changes in v1.0** - If you are upgrading from v0.x, please read this section before updating.
+> **Breaking changes in v1.0** - If you are upgrading from v0.x, please read.
 >
 > **Storage keys have changed.** The on-disk and Redis key format has been replaced with a versioned, length-framed layout (`cas:v1:val:…`, `cas:v1:gen:…`). This fixes a class of namespace boundary collisions present in earlier releases, but it means that existing cached data will not be read by the new version. Old entries will remain in your backend under their previous keys until they expire or are evicted. They will not conflict with new entries but they will not be reused either. If you run a shared backend such as Redis, deploy all nodes at the same time and expect a cold cache on the first run.
 >
@@ -25,8 +25,7 @@ and an opt‑in distributed mode for multi-replica deployments.
 - [Codecs](#codecs)
 - [Distributed generations (multi-replica)](#distributed-generations-multi-replica)
 - [API](#api)
-- [Cache Type alias](#cache-type-alias)
-- [Performance notes](#performance-notes)
+- [Notes](#notes)
 
 ---
 
@@ -42,8 +41,6 @@ It does this with **generation-guarded writes** (CAS) and **read-side validation
 
 ---
 
-### What goes wrong with “normal” caches
-
 | Pattern             | What you do                            | What still goes wrong                                                                 |
 |---------------------|----------------------------------------|---------------------------------------------------------------------------------------|
 | **TTL only**        | Set `user:42` for 5m                   | Readers can see **up to 5m stale** after a write. Reducing TTL increases DB load.     |
@@ -52,39 +49,13 @@ It does this with **generation-guarded writes** (CAS) and **read-side validation
 | **Version in value**| Store `{version, payload}`             | Readers still need **current version**; coordinating that is the same hard problem.   |
 
 ---
-- **Post-invalidation freshness:**
-  Each key carries a **generation**. Mutations call `Invalidate(key)` to bump the generation. Reads accept a cached value **only if** its stored generation matches the current one, otherwise the entry is **deleted** and treated as a miss.
-
-- **Safe conditional writes (CAS):**
-  Writers snapshot the generation **before** reading from the backing store. `SetWithGen(k, v, obs)` commits only if the generation is unchanged. If another writer updated the key, the write is **skipped**, preventing stale data from being reintroduced.
-
-- **Graceful failure modes:**
-  If the generation store is slow or unavailable, single-key reads **self-heal** by treating results as misses, and CAS writes **skip**. The cache never serves stale data.
-
-- **Validated bulk caching:**
-  Bulk entries are checked **member by member** during reads. If any entry is stale, the bulk payload is discarded and CasCache falls back to single-key fetches. Extras in the bulk are ignored during validation and decode; missing members render it invalid.
-
-- **Pluggable providers/genstores:**
-  Works with **Ristretto/BigCache/Redis** for storage and **JSON/CBOR/Msgpack/Proto** for payloads. Wire decoding stays tight and zero-copy for payloads.
----
-
-### When to use it
-
-- Workloads that **must reflect updates immediately** (profile data, product catalogs, permissions, pricing, feature flags etc.)
-- Environments with **multiple replicas** where coordinating invalidations is error-prone.
-- Systems that need **predictable behaviour** under incidents: either serve fresh data or miss, never “maybe stale.”
+- Each key carries a **generation**. Mutations call `Invalidate(key)` to bump the generation. Reads accept a cached value **only if** its stored generation matches the current one, otherwise the entry is **deleted** and treated as a miss.
+- Writers snapshot the generation **before** reading from the backing store. `SetWithGen(k, v, obs)` commits only if the generation is unchanged. If another writer updated the key, the write is **skipped**, preventing stale data from being reintroduced.
+- If the generation store is slow or unavailable, single-key reads **self-heal** by treating results as misses, and CAS writes **skip**. The cache never serves stale data.
+- Bulk entries are checked **member by member** during reads. If any entry is stale, the bulk payload is discarded and CasCache falls back to single-key fetches. Extras in the bulk are ignored during validation and decode; missing members render it invalid.
+- Works with **Ristretto/BigCache/Redis** for storage and **JSON/CBOR/Msgpack/Proto** for payloads. Wire decoding stays tight and zero-copy for payloads.
 
 ---
-
-### Comparison with common patterns
-
-- **TTL-only caching** trades freshness for load. CasCache preserves freshness and uses TTLs strictly for eviction.
-- **Delete-then-set** introduces race windows. Generations make freshness a **read-time concern** instead of a timing exercise.
-- **Write-through caching** still needs coordination. CAS reduces coordination to an explicit sequence: **bump → snapshot → compare**.
-
----
-
-### Minimal mental model
 
 ```text
 DB write succeeds  →  Cache.Invalidate(k)       // bump gen; clear single
@@ -424,29 +395,7 @@ type CAS[V any] interface {
 ```
 ---
 
-## Cache Type Alias
-
-For readability, we provide a type alias:
-
-```go
-type Cache[V any] = CAS[V]
-```
-
-You may use either name. They are **identical types**. Example:
-
-```go
-var a cascache.CAS[User]
-var b cascache.Cache[User]
-
-a = b // ok
-b = a // ok
-```
-
-In examples we often use `CAS` to emphasize the CAS semantics, but `Cache` is equally valid and may read more naturally in your codebase.
-
----
-
-## Performance notes
+## Notes
 
 - **Time:** O(1) singles; O(n) bulk for n members.
 - **Allocations:** zero-copy wire decode; one `string` alloc per bulk item.
