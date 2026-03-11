@@ -133,7 +133,8 @@ func (c *cache[V]) Close(ctx context.Context) error {
 //
 // Failures in (1), (2), and (3) delete the provider entry and return a miss.
 // If the current generation cannot be loaded, Get returns a miss without
-// serving or deleting the cached value.
+// serving or deleting the cached value. Provider read failures are returned
+// as *OpError with OpGet.
 func (c *cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
 	var zero V
 	if !c.enabled {
@@ -142,8 +143,11 @@ func (c *cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
 
 	sk := c.singleKeys(key)
 	raw, ok, err := c.provider.Get(ctx, sk.Value.String())
-	if err != nil || !ok {
-		return zero, false, err
+	if err != nil {
+		return zero, false, opError(OpGet, key, err)
+	}
+	if !ok {
+		return zero, false, nil
 	}
 
 	dgen, payload, err := wire.DecodeSingle(raw)
@@ -191,7 +195,8 @@ func (c *cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
 // longer matches.
 //
 // When the gen store is unreachable the write is skipped entirely. We
-// prefer extra source reads over risking stale data in the cache.
+// prefer extra source reads over risking stale data in the cache. Encode and
+// provider write failures are returned as *OpError with OpSet.
 func (c *cache[V]) SetWithGen(ctx context.Context, key string, value V, observedGen uint64, ttl time.Duration) error {
 	if !c.enabled {
 		return nil
@@ -209,16 +214,16 @@ func (c *cache[V]) SetWithGen(ctx context.Context, key string, value V, observed
 
 	payload, err := c.codec.Encode(value)
 	if err != nil {
-		return err
+		return opError(OpSet, key, err)
 	}
 
 	sw, err := c.singleWriteForKey(sk, observedGen, payload)
 	if err != nil {
-		return err
+		return opError(OpSet, key, err)
 	}
 	ok, err := c.provider.Set(ctx, sw.storageKey, sw.wire, sw.cost, ttl)
 	if err != nil {
-		return err
+		return opError(OpSet, key, err)
 	}
 	if !ok {
 		c.hooks.ProviderSetRejected(sw.storageKey, false)
@@ -249,6 +254,9 @@ func (c *cache[V]) SetWithGen(ctx context.Context, key string, value V, observed
 //   - Bump fails, delete succeeds: the single is gone, but a bulk entry
 //     could reseed it with stale data until the gen store recovers, the bulk
 //     entry is evicted, or a later successful bump invalidates it.
+//
+// When the coupled outage is returned, the outer error is *InvalidateError and
+// its inner causes are *OpError values with OpInvalidate.
 func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 	if !c.enabled {
 		return nil
@@ -261,7 +269,11 @@ func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 	// Only surface the coupled failure (likely full outage).
 	if bumpErr != nil && delErr != nil {
 		c.hooks.InvalidateOutage(key, bumpErr, delErr)
-		return &InvalidateError{Key: key, BumpErr: bumpErr, DelErr: delErr}
+		return &InvalidateError{
+			Key:     key,
+			BumpErr: opError(OpInvalidate, key, bumpErr),
+			DelErr:  opError(OpInvalidate, key, delErr),
+		}
 	}
 	return nil
 }
@@ -290,8 +302,10 @@ func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 //
 // The missing slice preserves the caller's original order and may contain
 // duplicates if the same missing key was requested more than once. The
-// returned error aggregates provider-level errors from the per-key
-// fallback; self-heal events are not treated as errors.
+// returned error aggregates per-key *OpError values from the fallback path.
+// A provider failure while reading the bulk entry is returned immediately as
+// *OpError with OpGetBulk rather than being treated like a miss. Self-heal
+// events are not treated as errors.
 func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []string, error) {
 	out := make(map[string]V, len(keys))
 	missing := make([]string, 0, len(keys))
@@ -312,10 +326,14 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 	us := uniqSorted(keys)
 	bk, err := c.bulkKeySorted(us)
 	if err != nil {
-		return out, missing, err
+		return out, missing, opError(OpGetBulk, "", err)
 	}
 
-	if raw, ok, gErr := c.provider.Get(ctx, bk.String()); gErr == nil && ok {
+	raw, ok, gErr := c.provider.Get(ctx, bk.String())
+	if gErr != nil {
+		return out, missing, opError(OpGetBulk, "", gErr)
+	}
+	if ok {
 		items, dErr := wire.DecodeBulk(raw)
 		if dErr == nil && c.bulkValid(ctx, us, items) {
 			decodedByKey, rErr := c.decodeRequestedBulkItems(us, items)
@@ -376,7 +394,8 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 //
 // The bulk wire entry is encoded with keys in sorted order so that the
 // same set of keys always produces the same storage key regardless of map
-// iteration order.
+// iteration order. Direct bulk-path failures are returned as *OpError with
+// OpSetBulk; fallback per-key errors are returned as *OpError with OpSet.
 func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, observedGens map[string]uint64, ttl time.Duration) error {
 	if !c.enabled || len(items) == 0 {
 		return nil
@@ -421,7 +440,7 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 	for _, k := range keys {
 		payload, eErr := c.codec.Encode(items[k])
 		if eErr != nil {
-			return eErr
+			return opError(OpSetBulk, k, eErr)
 		}
 		wireItems = append(wireItems, wire.BulkItem{
 			Key:     k,
@@ -432,16 +451,16 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 
 	wireb, err := wire.EncodeBulk(wireItems)
 	if err != nil {
-		return err
+		return opError(OpSetBulk, "", err)
 	}
 
 	bk, err := c.bulkKeySorted(keys)
 	if err != nil {
-		return err
+		return opError(OpSetBulk, "", err)
 	}
 	ok, err := c.provider.Set(ctx, bk.String(), wireb, c.computeSetCost(bk.String(), wireb, true, len(items)), bttl)
 	if err != nil {
-		return err
+		return opError(OpSetBulk, "", err)
 	}
 	if !ok {
 		c.hooks.ProviderSetRejected(bk.String(), true)
@@ -457,9 +476,14 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 // (skip the CAS write, log, increment a metric, etc.).
 //
 // A generation of zero for a key that has never been bumped is a valid
-// value, not an error.
+// value, not an error. Returned failures are wrapped in *OpError with
+// OpSnapshot.
 func (c *cache[V]) TrySnapshotGen(ctx context.Context, key string) (uint64, error) {
-	return c.loadGen(ctx, toGenStoreKey(c.space.SingleCacheKey(key)))
+	g, err := c.loadGen(ctx, toGenStoreKey(c.space.SingleCacheKey(key)))
+	if err != nil {
+		return 0, opError(OpSnapshot, key, err)
+	}
+	return g, nil
 }
 
 // TrySnapshotGens returns the current generation for every unique logical key.
@@ -472,6 +496,7 @@ func (c *cache[V]) TrySnapshotGen(ctx context.Context, key string) (uint64, erro
 // On error the map is nil rather than partial. This is an all-or-nothing
 // contract: the caller either gets a complete snapshot suitable for use with
 // SetBulkWithGens, or gets an error and should not attempt the bulk write.
+// Per-key failures are returned as *OpError values with OpSnapshot.
 func (c *cache[V]) TrySnapshotGens(ctx context.Context, keys []string) (map[string]uint64, error) {
 	out, err := c.snapshotGens(ctx, keys)
 	if err != nil {
@@ -572,7 +597,7 @@ func (c *cache[V]) snapshotSortedUniqueGens(ctx context.Context, keys []string) 
 		g, loadErr := c.loadGen(ctx, cacheKeys[i])
 		if loadErr != nil {
 			out[k] = 0
-			errs = append(errs, fmt.Errorf("snapshot %q: %w", k, loadErr))
+			errs = append(errs, &OpError{Op: OpSnapshot, Key: k, Err: loadErr})
 			continue
 		}
 		out[k] = g
@@ -657,7 +682,7 @@ func (c *cache[V]) memoizedSingles(ctx context.Context, keys []string, out map[s
 	errs := make([]error, 0, len(us))
 	for _, k := range us {
 		if err := tmp[k].err; err != nil {
-			errs = append(errs, fmt.Errorf("get %q: %w", k, err))
+			errs = append(errs, err)
 		}
 	}
 	return missing, errors.Join(errs...)
@@ -774,7 +799,7 @@ func (c *cache[V]) seedBulk(ctx context.Context, requested []string, items []wir
 			continue
 		}
 		if err := c.writeSingle(ctx, k, it.Gen, it.Payload, ttl); err != nil {
-			errs = append(errs, fmt.Errorf("set %q: %w", k, err))
+			errs = append(errs, &OpError{Op: OpSet, Key: k, Err: err})
 		}
 	}
 	return errors.Join(errs...)
@@ -795,7 +820,7 @@ func (c *cache[V]) seedBulkIfMissing(ctx context.Context, requested []string, it
 			continue
 		}
 		if err := c.addSingle(ctx, k, it.Gen, it.Payload, ttl); err != nil {
-			errs = append(errs, fmt.Errorf("add %q: %w", k, err))
+			errs = append(errs, &OpError{Op: OpAdd, Key: k, Err: err})
 		}
 	}
 	return errors.Join(errs...)
@@ -869,7 +894,7 @@ func (c *cache[V]) seedSingles(ctx context.Context, items map[string]V, observed
 			continue
 		}
 		if err := c.SetWithGen(ctx, k, v, obs, ttl); err != nil {
-			errs = append(errs, fmt.Errorf("set %q: %w", k, err))
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
