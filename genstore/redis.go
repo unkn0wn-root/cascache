@@ -66,7 +66,7 @@ func (s *RedisGenStore) client() (redis.UniversalClient, error) {
 }
 
 func (s *RedisGenStore) key(cacheKey CacheKey) string {
-	return keyutil.GenStorageKey(cacheKey.String())
+	return keyutil.GenStorageKey(keyutil.CacheKey(cacheKey.String()))
 }
 
 // Snapshot returns the current generation.

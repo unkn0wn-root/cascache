@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"math"
 	"sort"
 	"strconv"
 )
@@ -20,22 +21,24 @@ const (
 	genRoot           = rootPrefix + "gen:"
 	singleKind        = "s:"
 	bulkKind          = "b:"
-	maxBulkKeyPartLen = uint64(^uint32(0))
+	maxBulkKeyPartLen = uint64(math.MaxUint32)
 )
 
+// CacheKey is the canonical single-key identity shared with the gen store.
 type CacheKey string
 
 func (k CacheKey) String() string {
 	return string(k)
 }
 
+// ValueKey is the provider storage key for an encoded cache value.
 type ValueKey string
 
 func (k ValueKey) String() string {
 	return string(k)
 }
 
-// Single holds the canonical key identity used by the genstore
+// Single holds the canonical key identity used by the GenStore and provider.
 type Single struct {
 	Cache CacheKey
 	Value ValueKey
@@ -48,8 +51,9 @@ type Keyspace struct {
 	bulkValuePrefix   string
 }
 
+// NewKeyspace precomputes the stable prefixes for one logical namespace.
 func NewKeyspace(namespace string) Keyspace {
-	framed := ns(namespace)
+	framed := frameNamespace(namespace)
 	singleCachePrefix := singleKind + framed
 
 	return Keyspace{
@@ -74,9 +78,8 @@ func (s Keyspace) Single(userKey string) Single {
 	}
 }
 
-// GenStorageKey maps a canonical single-key identity to its generation storage key.
-func GenStorageKey(cacheKey string) string {
-	return genRoot + cacheKey
+func GenStorageKey(cacheKey CacheKey) string {
+	return genRoot + string(cacheKey)
 }
 
 func (s Keyspace) BulkValue(keys []string) (ValueKey, error) {
@@ -106,7 +109,7 @@ func digestSortedKeys(sortedKeys []string) (string, error) {
 		}
 		total += 4 + klen
 	}
-	if total > uint64(maxInt()) {
+	if total > uint64(math.MaxInt) {
 		return "", errBulkKeyFrameTooLarge
 	}
 
@@ -124,10 +127,6 @@ func digestSortedKeys(sortedKeys []string) (string, error) {
 	return hex.EncodeToString(sum[:16]), nil
 }
 
-func ns(namespace string) string {
-	return strconv.Itoa(len(namespace)) + ":" + namespace + ":"
-}
-
-func maxInt() int {
-	return int(^uint(0) >> 1)
+func frameNamespace(ns string) string {
+	return strconv.Itoa(len(ns)) + ":" + ns + ":"
 }

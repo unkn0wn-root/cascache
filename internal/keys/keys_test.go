@@ -16,8 +16,8 @@ func TestSingleKeysAreInjectiveAcrossNamespaceBoundaries(t *testing.T) {
 	if left.Value == right.Value {
 		t.Fatalf("value keys collided: %q", left.Value)
 	}
-	if GenStorageKey(left.Cache.String()) == GenStorageKey(right.Cache.String()) {
-		t.Fatalf("gen keys collided: %q", GenStorageKey(left.Cache.String()))
+	if GenStorageKey(left.Cache) == GenStorageKey(right.Cache) {
+		t.Fatalf("gen keys collided: %q", GenStorageKey(left.Cache))
 	}
 }
 
