@@ -3,7 +3,7 @@ package cascache
 import (
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -72,8 +72,8 @@ func (e *MissingObservedGensError) Unwrap() error {
 }
 
 func newMissingObservedGensError(missing []string) *MissingObservedGensError {
-	cp := append([]string(nil), missing...)
-	sort.Strings(cp)
+	cp := slices.Clone(missing)
+	slices.Sort(cp)
 	return &MissingObservedGensError{Missing: cp}
 }
 
