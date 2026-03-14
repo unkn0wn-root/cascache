@@ -38,14 +38,17 @@ func (e *InvalidateError) Error() string {
 }
 
 func (e *InvalidateError) Unwrap() []error {
-	errs := make([]error, 0, 2)
-	if e.BumpErr != nil {
-		errs = append(errs, e.BumpErr)
+	switch {
+	case e.BumpErr == nil:
+		if e.DelErr == nil {
+			return nil
+		}
+		return []error{e.DelErr}
+	case e.DelErr == nil:
+		return []error{e.BumpErr}
+	default:
+		return []error{e.BumpErr, e.DelErr}
 	}
-	if e.DelErr != nil {
-		errs = append(errs, e.DelErr)
-	}
-	return errs
 }
 
 // MissingObservedGensError reports which logical keys were missing observed generations.
