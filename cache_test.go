@@ -566,7 +566,7 @@ func TestTrySnapshotGenReturnsError(t *testing.T) {
 	}
 }
 
-func TestOpErrorErrorHandlesZeroValue(t *testing.T) {
+func TestOpErrorErrorContract(t *testing.T) {
 	t.Run("nil_receiver", func(t *testing.T) {
 		var oe *OpError
 		if got := oe.Error(); got != "<nil>" {
@@ -574,21 +574,26 @@ func TestOpErrorErrorHandlesZeroValue(t *testing.T) {
 		}
 	})
 
-	t.Run("zero_value", func(t *testing.T) {
-		if got := (&OpError{}).Error(); got != "missing underlying error" {
-			t.Fatalf("OpError{}.Error() = %q, want %q", got, "missing underlying error")
+	t.Run("nil_err_panics", func(t *testing.T) {
+		tests := []struct {
+			name string
+			err  *OpError
+		}{
+			{name: "zero_value", err: &OpError{}},
+			{name: "op_only", err: &OpError{Op: OpGet}},
+			{name: "key_only", err: &OpError{Key: "k"}},
+			{name: "op_and_key", err: &OpError{Op: OpGet, Key: "k"}},
 		}
-	})
 
-	t.Run("partial_values", func(t *testing.T) {
-		if got := (&OpError{Op: OpGet}).Error(); got != "get: missing underlying error" {
-			t.Fatalf("OpError{Op}.Error() = %q, want %q", got, "get: missing underlying error")
-		}
-		if got := (&OpError{Key: "k"}).Error(); got != `"k": missing underlying error` {
-			t.Fatalf("OpError{Key}.Error() = %q, want %q", got, `"k": missing underlying error`)
-		}
-		if got := (&OpError{Op: OpGet, Key: "k"}).Error(); got != `get "k": missing underlying error` {
-			t.Fatalf("OpError{Op,Key}.Error() = %q, want %q", got, `get "k": missing underlying error`)
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				defer func() {
+					if recover() == nil {
+						t.Fatalf("%s: OpError.Error should panic when Err is nil", tt.name)
+					}
+				}()
+				_ = tt.err.Error()
+			})
 		}
 	})
 }

@@ -8,7 +8,14 @@ import (
 	"strings"
 )
 
-const missingUnderlyingErr = "missing underlying error"
+// ErrMissingObservedGens identifies a SetBulkWithGens caller error where at least
+// one item key has no corresponding observed generation.
+var ErrMissingObservedGens = errors.New("missing observed generations")
+
+// ErrBulkSeedNeedsAdder identifies an invalid configuration where
+// BulkSeedIfMissing is requested with a provider that does not implement
+// Adder.
+var ErrBulkSeedNeedsAdder = errors.New("BulkSeedIfMissing requires Adder")
 
 type InvalidateError struct {
 	Key     string
@@ -40,15 +47,6 @@ func (e *InvalidateError) Unwrap() []error {
 	}
 	return errs
 }
-
-// ErrMissingObservedGens identifies a SetBulkWithGens caller error where at least
-// one item key has no corresponding observed generation.
-var ErrMissingObservedGens = errors.New("missing observed generations")
-
-// ErrBulkSeedNeedsAdder identifies an invalid configuration where
-// BulkSeedIfMissing is requested with a provider that does not implement
-// Adder.
-var ErrBulkSeedNeedsAdder = errors.New("BulkSeedIfMissing requires Adder")
 
 // MissingObservedGensError reports which logical keys were missing observed generations.
 type MissingObservedGensError struct {
@@ -89,11 +87,14 @@ const (
 	OpSetBulk    Op = "set_bulk"
 )
 
-// OpError reports an operation failure and, when applicable, the logical key
-// that triggered it.
+// OpError reports an operation failure and, when applicable,
+// the logical key that triggered it.
 type OpError struct {
 	Op  Op
-	Key string
+	Key string // empty for non-key specific failures such as bulk path failures
+
+	// Err is the underlying cause.
+	// Error panics if Err is nil.
 	Err error
 }
 
@@ -101,28 +102,18 @@ func (e *OpError) Error() string {
 	if e == nil {
 		return "<nil>"
 	}
-	if e.Err == nil {
-		switch {
-		case e.Op != "" && e.Key != "":
-			return fmt.Sprintf("%s %q: %s", e.Op, e.Key, missingUnderlyingErr)
-		case e.Op != "":
-			return fmt.Sprintf("%s: %s", e.Op, missingUnderlyingErr)
-		case e.Key != "":
-			return fmt.Sprintf("%q: %s", e.Key, missingUnderlyingErr)
-		default:
-			return missingUnderlyingErr
-		}
-	}
+
+	err := e.Err.Error()
 
 	switch {
 	case e.Op != "" && e.Key != "":
-		return fmt.Sprintf("%s %q: %v", e.Op, e.Key, e.Err)
+		return fmt.Sprintf("%s %q: %s", e.Op, e.Key, err)
 	case e.Op != "":
-		return fmt.Sprintf("%s: %v", e.Op, e.Err)
+		return fmt.Sprintf("%s: %s", e.Op, err)
 	case e.Key != "":
-		return fmt.Sprintf("%q: %v", e.Key, e.Err)
+		return fmt.Sprintf("%q: %s", e.Key, err)
 	default:
-		return e.Err.Error()
+		return err
 	}
 }
 
@@ -137,5 +128,9 @@ func opError(op Op, key string, err error) error {
 	if err == nil {
 		return nil
 	}
-	return &OpError{Op: op, Key: key, Err: err}
+	return &OpError{
+		Op:  op,
+		Key: key,
+		Err: err,
+	}
 }
