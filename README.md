@@ -146,7 +146,8 @@ func (r *UserRepo) UpdateName(ctx context.Context, id, name string) error {
 > If any member is stale, the bulk is dropped and you fall back to singles. In multi-replica apps, use a shared GenStore (below) or disable bulk.
 > Use `TrySnapshotGens` when you want explicit visibility into generation-store failures. `SnapshotGens` is the convenience form and returns `0` for any failed snapshot.
 > Successful bulk hits are read-only by default. If you want them to warm single-key entries, set `BulkSeed` to `BulkSeedAll` or `BulkSeedIfMissing`.
-> `BulkSeed` affects `GetBulk` hits only. `SetBulkWithGens` still seeds singles after a successful bulk write.
+> `BulkSeed` affects `GetBulk` hits only.
+> Successful `SetBulkWithGens` writes use `BulkWriteSeed`, which defaults to the stricter checked mode. Set `BulkWriteSeedFast` to reuse validated payloads directly or `BulkWriteSeedOff` to skip success-path single seeding.
 > `BulkSeedIfMissing` requires a provider that can do insert-if-missing with native backend support or provider-level atomic coordination via `Adder`.
 
 ```go
@@ -400,6 +401,7 @@ type CAS[V any] interface {
 - **Time:** O(1) singles; O(n) bulk for n members.
 - **Allocations:** zero-copy wire decode; one `string` alloc per bulk item.
 - **Bulk-hit warming:** disabled by default so valid bulk hits do not fan out into single-entry writes unless you opt in with `BulkSeed`.
+- **Post-bulk-write seeding:** strict by default so successful `SetBulkWithGens` writes recheck each single through CAS before seeding it. Use `BulkWriteSeedFast` or `BulkWriteSeedOff` only when you explicitly want the performance tradeoff.
 ```go
 ComputeSetCost: func(key string, raw []byte, isBulk bool, n int) int64 {
     if isBulk { return int64(n) }

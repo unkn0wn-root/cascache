@@ -32,6 +32,34 @@ const (
 	BulkSeedIfMissing
 )
 
+// BulkWriteSeedMode controls how a successful SetBulkWithGens
+// write individual single-key entries.
+//
+// The zero/default value is BulkWriteSeedStrict, which routes each single
+// through SetWithGen again so the post-bulk seeding path preserves the same
+// per-key CAS recheck as standalone writes. Higher-throughput systems can opt
+// into BulkWriteSeedFast to reuse the validated bulk payloads directly, or
+// BulkWriteSeedOff to skip success path single seeding entirely.
+type BulkWriteSeedMode uint8
+
+const (
+	// BulkWriteSeedStrict seeds singles through SetWithGen after the bulk write
+	// has succeeded. Stricter CAS semantics of rechecking
+	// each key's generation immediately before the single write lands.
+	BulkWriteSeedStrict BulkWriteSeedMode = iota
+
+	// BulkWriteSeedFast seeds singles directly from the validated bulk payloads
+	// without a second generation lookup. This is faster but can allow stale
+	// singles to land if a generation changes between batch validation and the
+	// single writes.
+	BulkWriteSeedFast
+
+	// BulkWriteSeedOff skips single seeding after a successful bulk write. The
+	// bulk entry is still written, and fallback paths that skip or reject the
+	// bulk continue to seed singles best-effort through the checked CAS path.
+	BulkWriteSeedOff
+)
+
 // Cache is an alias for CAS so callers can write cascache.Cache[V] if preferred.
 type Cache[V any] = CAS[V]
 
@@ -78,11 +106,18 @@ type Options[V any] struct {
 	GenStore        gen.GenStore  // nil => LocalGenStore (in-process)
 	DisableBulk     bool          // default false => bulk enabled
 	// BulkSeed controls single-entry warming after successful GetBulk hits
-	// only. It does not affect SetBulkWithGens, which still seeds singles after
-	// a successful bulk write. BulkSeedIfMissing requires a provider with
-	// native or provider-level atomic add-if-missing support.
+	// only. It does not affect how successful SetBulkWithGens writes seed
+	// singles; that behavior is controlled separately by BulkWriteSeed.
+	// BulkSeedIfMissing requires a provider with native or provider-level
+	// atomic add-if-missing support.
 	BulkSeed BulkSeedMode
-	Hooks    Hooks
+	// BulkWriteSeed controls single-entry materialization after a successful
+	// SetBulkWithGens bulk write only. The default is BulkWriteSeedStrict,
+	// which re-enters SetWithGen per key to preserve stricter CAS semantics.
+	// It does not affect fallback single seeding when the bulk write is
+	// skipped, rejected, or bulk mode is disabled.
+	BulkWriteSeed BulkWriteSeedMode
+	Hooks         Hooks
 }
 
 func New[V any](opts Options[V]) (CAS[V], error) {
