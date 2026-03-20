@@ -45,6 +45,8 @@ type cache[V any] struct {
 	computeSetCost SetCostFunc
 	gen            gen.GenStore
 	adder          pr.Adder
+	readGuard      ReadGuardFunc[V]
+	bulkReadGuard  BulkReadGuardFunc[V]
 
 	// When false, reads fall back to per-key lookups and bulk writes are skipped.
 	bulkEnabled   bool
@@ -88,6 +90,8 @@ func newCache[V any](opts Options[V]) (*cache[V], error) {
 	} else {
 		c.gen = gen.NewLocalGenStore(c.sweepInterval, c.genRetention)
 	}
+	c.readGuard = opts.ReadGuard
+	c.bulkReadGuard = opts.BulkReadGuard
 
 	c.bulkEnabled = !opts.DisableBulk
 	if adder, ok := opts.Provider.(pr.Adder); ok {
@@ -173,6 +177,12 @@ func (c *cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
 	if err != nil {
 		_ = c.provider.Del(ctx, sk.Value.String()) // self-heal
 		c.hooks.SelfHealSingle(sk.Value.String(), SelfHealReasonValueDecode)
+		return zero, false, nil
+	}
+	allow, guardReason := c.guardSingleRead(ctx, key, v)
+	if !allow {
+		_ = c.provider.Del(ctx, sk.Value.String())
+		c.hooks.SelfHealSingle(sk.Value.String(), guardReason)
 		return zero, false, nil
 	}
 	return v, true, nil
@@ -340,23 +350,29 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 		if dErr == nil && c.bulkValid(ctx, us, items) {
 			decodedByKey, rErr := c.decodeRequestedBulkItems(us, items)
 			if rErr == nil {
-				for _, k := range keys {
-					if item, ok := decodedByKey[k]; ok {
-						out[k] = item.value
-					} else {
-						missing = append(missing, k)
+				if ok, reason := c.guardBulkRead(ctx, decodedByKey); !ok {
+					_ = c.provider.Del(ctx, bk.String())
+					c.hooks.BulkRejected(c.ns, len(us), reason)
+				} else {
+					for _, k := range keys {
+						if item, ok := decodedByKey[k]; ok {
+							out[k] = item.value
+						} else {
+							missing = append(missing, k)
+						}
 					}
+					switch c.bulkSeed {
+					case BulkSeedAll:
+						_ = c.seedBulk(ctx, us, items, c.defaultTTL)
+					case BulkSeedIfMissing:
+						_ = c.seedBulkIfMissing(ctx, us, items, c.defaultTTL)
+					}
+					return out, missing, nil
 				}
-				switch c.bulkSeed {
-				case BulkSeedAll:
-					_ = c.seedBulk(ctx, us, items, c.defaultTTL)
-				case BulkSeedIfMissing:
-					_ = c.seedBulkIfMissing(ctx, us, items, c.defaultTTL)
-				}
-				return out, missing, nil
+			} else {
+				_ = c.provider.Del(ctx, bk.String()) // self-heal undecodable bulk payloads
+				c.hooks.BulkRejected(c.ns, len(us), BulkRejectReasonValueDecode)
 			}
-			_ = c.provider.Del(ctx, bk.String()) // self-heal undecodable bulk payloads
-			c.hooks.BulkRejected(c.ns, len(us), BulkRejectReasonValueDecode)
 		} else {
 			_ = c.provider.Del(ctx, bk.String()) // self-heal
 			reason := BulkRejectReasonInvalidOrStale
@@ -753,6 +769,55 @@ func (c *cache[V]) missingObservedGenKeys(items map[string]V, observedGens map[s
 
 type decodedBulkItem[V any] struct {
 	value V
+}
+
+func (c *cache[V]) guardSingleRead(ctx context.Context, key string, value V) (bool, SelfHealReason) {
+	if c.readGuard == nil {
+		return true, ""
+	}
+	ok, err := c.readGuard(ctx, key, value)
+	if err != nil {
+		return false, SelfHealReasonReadGuardError
+	}
+	if !ok {
+		return false, SelfHealReasonReadGuardReject
+	}
+	return true, ""
+}
+
+func (c *cache[V]) guardBulkRead(ctx context.Context, decodedByKey map[string]decodedBulkItem[V]) (bool, BulkRejectReason) {
+	if len(decodedByKey) == 0 {
+		return true, ""
+	}
+
+	if c.bulkReadGuard != nil {
+		values := make(map[string]V, len(decodedByKey))
+		for k, item := range decodedByKey {
+			values[k] = item.value
+		}
+		rejected, err := c.bulkReadGuard(ctx, values)
+		if err != nil {
+			return false, BulkRejectReasonReadGuardError
+		}
+		if len(rejected) != 0 {
+			return false, BulkRejectReasonReadGuardReject
+		}
+		return true, ""
+	}
+
+	if c.readGuard == nil {
+		return true, ""
+	}
+	for k, item := range decodedByKey {
+		ok, err := c.readGuard(ctx, k, item.value)
+		if err != nil {
+			return false, BulkRejectReasonReadGuardError
+		}
+		if !ok {
+			return false, BulkRejectReasonReadGuardReject
+		}
+	}
+	return true, ""
 }
 
 // decodeRequestedBulkItems decodes only the bulk items that the caller

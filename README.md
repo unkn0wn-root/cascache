@@ -24,6 +24,7 @@ and an opt‑in distributed mode for multi-replica deployments.
 - [Providers](#providers)
 - [Codecs](#codecs)
 - [Distributed generations (multi-replica)](#distributed-generations-multi-replica)
+- [Read guards](#read-guards)
 - [API](#api)
 - [Notes](#notes)
 
@@ -253,6 +254,62 @@ If you implement a custom `GenStore`, note that all methods now use `genstore.Ca
 ---
 > **Alternative type name:** You can use `cascache.Cache[V]` instead of `cascache.CAS[V]`. See [Cache Type alias](#cache-type-alias).
 ---
+
+## Read guards
+
+Generation checks catch most staleness, but there is a small window where the generation is still valid and the source has already changed. A write landed in the DB, but `Invalidate` hasn't fired yet (or hasn't propagated across replicas). During that window the cache will happily serve the old value because the generation still matches.
+`ReadGuard` closes that gap. You give the cache a function that checks whether a decoded value is still good. The cache calls it on every hit, right after decode and generation validation. If the guard says no (returns `false` or an error), the entry gets deleted and the caller sees a miss.
+This means your guard runs on **every single cache hit**. If your guard does a network call, you are adding that latency to every read that would otherwise have been a local cache hit. Keep it cheap - check a version column or a lightweight flag, don't refetch the full row.
+
+#### Single-key guard
+
+`ReadGuard` receives the logical key and the decoded value. Return `true` to serve it, `false` to reject and delete it.
+
+```go
+cache, _ := cascache.New[User](cascache.Options[User]{
+    Namespace: "user",
+    Provider:  redisProvider,
+    Codec:     codec.JSON[User]{},
+    GenStore:  gen.NewRedisGenStoreWithTTL(rdb, 24*time.Hour),
+    ReadGuard: func(ctx context.Context, key string, cached User) (bool, error) {
+        ver, err := dbUserVersion(ctx, key)
+        if err != nil {
+            return false, err
+        }
+        return ver == cached.Version, nil
+    },
+})
+```
+
+This is enough for most cases. If you don't set `BulkReadGuard`, bulk reads will call `ReadGuard` once per member, which works fine but does N separate checks.
+
+#### Bulk guard
+
+If you use bulk caching and want to batch verify in one round-trip instead of N individual checks, set `BulkReadGuard`. It receives all decoded members at once and returns the set of keys you want to reject.
+
+```go
+cache, _ := cascache.New[User](cascache.Options[User]{
+    Namespace:  "user",
+    Provider:   redisProvider,
+    Codec:      codec.JSON[User]{},
+    GenStore:   gen.NewRedisGenStoreWithTTL(rdb, 24*time.Hour),
+    BulkReadGuard: func(ctx context.Context, cached map[string]User) (map[string]struct{}, error) {
+        versions, err := dbUserVersions(ctx, maps.Keys(cached))
+        if err != nil {
+            return nil, err
+        }
+        rejected := map[string]struct{}{}
+        for key, user := range cached {
+            if versions[key] != user.Version {
+                rejected[key] = struct{}{}
+            }
+        }
+        return rejected, nil
+    },
+})
+```
+
+One thing to know: bulk rejection is all-or-nothing. If any key fails the guard the entire bulk entry is deleted because bulk entries are stored as a single blob. The cache then falls back to single-key lookups for all the requested keys. There is no way to partially invalidate a bulk entry.
 
 ## Design
 

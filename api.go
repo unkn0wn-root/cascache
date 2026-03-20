@@ -11,6 +11,22 @@ import (
 
 type SetCostFunc func(key string, raw []byte, isBulk bool, bulkCount int) int64
 
+// ReadGuardFunc can veto serving a decoded cache hit for a single logical key.
+// It is intended for critical paths that need an authoritative source check
+// before a cached value may be returned.
+//
+// Return allow=false to reject the entry as stale or unsafe. Any returned error
+// is treated conservatively as a rejection and the caller receives a miss.
+type ReadGuardFunc[V any] func(ctx context.Context, key string, value V) (allow bool, err error)
+
+// BulkReadGuardFunc is the batch form of ReadGuardFunc for validated bulk hits.
+// The input map contains only the requested logical keys that survived wire and
+// generation checks. Return a set of rejected logical keys; if the set is not
+// empty the entire bulk entry is rejected and the cache falls back to singles.
+//
+// Returning an error is treated conservatively as a bulk rejection.
+type BulkReadGuardFunc[V any] func(ctx context.Context, values map[string]V) (rejected map[string]struct{}, err error)
+
 // BulkSeedMode controls whether a successful bulk read validated
 // members as individual single-key entries.
 // The zero/default value is BulkSeedOff so bulk hits stay read-only unless
@@ -105,6 +121,8 @@ type Options[V any] struct {
 	ComputeSetCost  SetCostFunc   // default 1
 	GenStore        gen.GenStore  // nil => LocalGenStore (in-process)
 	DisableBulk     bool          // default false => bulk enabled
+	ReadGuard       ReadGuardFunc[V]
+	BulkReadGuard   BulkReadGuardFunc[V]
 	// BulkSeed controls single-entry warming after successful GetBulk hits
 	// only. It does not affect how successful SetBulkWithGens writes seed
 	// singles; that behavior is controlled separately by BulkWriteSeed.

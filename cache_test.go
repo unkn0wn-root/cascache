@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -364,6 +365,32 @@ func TestSingleCASFlow(t *testing.T) {
 	}
 	if got, ok, err := cc.Get(ctx, k); err != nil || !ok || got != v {
 		t.Fatalf("Get after fresh set: ok=%v err=%v got=%v", ok, err, got)
+	}
+}
+
+func TestGetReadGuardRejectsAndDeletesEntry(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.ReadGuard = func(context.Context, string, user) (bool, error) { return false, nil }
+	})
+	defer closeTest(t, ctx, cc)
+
+	k := "u:guard"
+	v := user{ID: "guard", Name: "Ada"}
+	if err := cc.SetWithGen(ctx, k, v, cc.SnapshotGen(ctx, k), 0); err != nil {
+		t.Fatalf("SetWithGen: %v", err)
+	}
+
+	got, ok, err := cc.Get(ctx, k)
+	if err != nil || ok {
+		t.Fatalf("Get should miss after read-guard rejection, ok=%v err=%v got=%v", ok, err, got)
+	}
+
+	impl := mustImpl(t, cc)
+	sk := impl.singleKeys(k)
+	if _, found, err := mp.Get(ctx, sk.Value.String()); err != nil || found {
+		t.Fatalf("read-guard rejection should delete stored single, found=%v err=%v", found, err)
 	}
 }
 
@@ -999,6 +1026,47 @@ func TestBulkSeedIfMissing(t *testing.T) {
 	}
 	if mp.addStored != len(keys) {
 		t.Fatalf("if-missing warming should insert all missing singles, stored=%d", mp.addStored)
+	}
+}
+
+func TestGetBulkReadGuardRejectsBulkAndFallsBackToSingles(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.BulkReadGuard = func(context.Context, map[string]user) (map[string]struct{}, error) {
+			return map[string]struct{}{"b": {}}, nil
+		}
+	})
+	defer closeTest(t, ctx, cc)
+
+	keys := []string{"a", "b"}
+	items := map[string]user{
+		"a": {ID: "a", Name: "A"},
+		"b": {ID: "b", Name: "B"},
+	}
+	observed := cc.SnapshotGens(ctx, keys)
+	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBulkWithGens: %v", err)
+	}
+
+	got, missing, err := cc.GetBulk(ctx, keys)
+	if err != nil {
+		t.Fatalf("GetBulk: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("GetBulk missing=%v want none", missing)
+	}
+	if !reflect.DeepEqual(got, items) {
+		t.Fatalf("GetBulk got=%v want=%v", got, items)
+	}
+
+	impl := mustImpl(t, cc)
+	bk, err := impl.bulkKeySorted(keys)
+	if err != nil {
+		t.Fatalf("bulkKeySorted: %v", err)
+	}
+	if _, found, err := mp.Get(ctx, bk.String()); err != nil || found {
+		t.Fatalf("bulk read-guard rejection should delete stored bulk, found=%v err=%v", found, err)
 	}
 }
 
