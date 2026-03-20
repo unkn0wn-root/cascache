@@ -47,8 +47,9 @@ type cache[V any] struct {
 	adder          pr.Adder
 
 	// When false, reads fall back to per-key lookups and bulk writes are skipped.
-	bulkEnabled bool
-	bulkSeed    BulkSeedMode
+	bulkEnabled   bool
+	bulkSeed      BulkSeedMode
+	bulkWriteSeed BulkWriteSeedMode
 }
 
 func newCache[V any](opts Options[V]) (*cache[V], error) {
@@ -98,6 +99,7 @@ func newCache[V any](opts Options[V]) (*cache[V], error) {
 		}
 	}
 	c.bulkSeed = opts.BulkSeed
+	c.bulkWriteSeed = opts.BulkWriteSeed
 	if c.bulkEnabled && isLocalGenStore(c.gen) {
 		c.hooks.LocalGenWithBulk()
 	}
@@ -371,8 +373,9 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 }
 
 // SetBulkWithGens writes a combined bulk entry that bundles multiple keys
-// into a single provider value. Each member is also seeded as an individual
-// single entry so that future single-key Gets can serve them directly.
+// into a single provider value. Depending on BulkWriteSeed, a successful bulk
+// write may also materialize the members as individual single entries so that
+// future single-key Gets can serve them directly.
 //
 // Two checks run before anything is written:
 //
@@ -391,6 +394,9 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 // skipped and we fall back to seeding singles for the same reason.
 //
 // When bulk mode is disabled (DisableBulk option), only singles are seeded.
+// BulkWriteSeed affects only the success path after a bulk value is written;
+// it does not affect the fallback single seeding used when the bulk is skipped
+// or rejected.
 //
 // The bulk wire entry is encoded with keys in sorted order so that the
 // same set of keys always produces the same storage key regardless of map
@@ -467,7 +473,7 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 		return c.seedSingles(ctx, items, observedGens, sttl)
 	}
 
-	_ = c.seedBulk(ctx, keys, wireItems, sttl)
+	_ = c.seedAfterSuccessfulBulkWrite(ctx, keys, items, observedGens, wireItems, sttl)
 	return nil
 }
 
@@ -803,6 +809,22 @@ func (c *cache[V]) seedBulk(ctx context.Context, requested []string, items []wir
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// seedAfterSuccessfulBulkWrite materializes singles after a successful bulk
+// write according to BulkWriteSeed. Unknown enum values default to Strict so
+// the safest behavior wins if a caller passes an out-of-range mode.
+func (c *cache[V]) seedAfterSuccessfulBulkWrite(ctx context.Context, sortedKeys []string, items map[string]V, observedGens map[string]uint64, wireItems []wire.BulkItem, ttl time.Duration) error {
+	switch c.bulkWriteSeed {
+	case BulkWriteSeedOff:
+		return nil
+	case BulkWriteSeedFast:
+		return c.seedBulk(ctx, sortedKeys, wireItems, ttl)
+	case BulkWriteSeedStrict:
+		fallthrough
+	default:
+		return c.seedSingles(ctx, items, observedGens, ttl)
+	}
 }
 
 // seedBulkIfMissing is the conditional variant of seedBulk. It only inserts a

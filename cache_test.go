@@ -1301,7 +1301,7 @@ func TestSetBulkWithGensBulkWriteErrorReturnsOpError(t *testing.T) {
 	}
 }
 
-func TestSetBulkWithGensUsesBatchGen(t *testing.T) {
+func TestSetBulkWithGensStrictUsesBatchGenAndPerKeyRechecks(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	gs := &countingGenStore{inner: genstore.NewLocalGenStore(time.Hour, time.Hour)}
@@ -1322,8 +1322,38 @@ func TestSetBulkWithGensUsesBatchGen(t *testing.T) {
 	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
 		t.Fatalf("SetBulkWithGens: %v", err)
 	}
+	if gs.snapshotCalls != len(keys) {
+		t.Fatalf("strict bulk-write seeding should recheck each key once, got %d", gs.snapshotCalls)
+	}
+	if gs.snapshotManyCalls != 1 {
+		t.Fatalf("validated bulk write should use one SnapshotMany call, got %d", gs.snapshotManyCalls)
+	}
+}
+
+func TestSetBulkWithGensFastUsesBatchGenOnly(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	gs := &countingGenStore{inner: genstore.NewLocalGenStore(time.Hour, time.Hour)}
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.GenStore = gs
+		o.BulkWriteSeed = BulkWriteSeedFast
+	})
+	defer closeTest(t, ctx, cc)
+
+	keys := []string{"a", "b"}
+	items := map[string]user{
+		"a": {ID: "a", Name: "A"},
+		"b": {ID: "b", Name: "B"},
+	}
+	observed := cc.SnapshotGens(ctx, keys)
+	gs.snapshotCalls = 0
+	gs.snapshotManyCalls = 0
+
+	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBulkWithGens: %v", err)
+	}
 	if gs.snapshotCalls != 0 {
-		t.Fatalf("validated bulk write should not do per-key Snapshot calls, got %d", gs.snapshotCalls)
+		t.Fatalf("fast bulk-write seeding should not do per-key Snapshot calls, got %d", gs.snapshotCalls)
 	}
 	if gs.snapshotManyCalls != 1 {
 		t.Fatalf("validated bulk write should use one SnapshotMany call, got %d", gs.snapshotManyCalls)
@@ -1404,7 +1434,42 @@ func TestSetBulkWithGensTTLOverrideAppliesToFallbackSingles(t *testing.T) {
 	}
 }
 
-func TestSetBulkWithGensStaleSingleSelfHealsAfterBatchValidationRace(t *testing.T) {
+func TestSetBulkWithGensOffSkipsSinglesAfterSuccessfulBulkWrite(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.BulkWriteSeed = BulkWriteSeedOff
+	})
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	keys := []string{"a", "b"}
+	items := map[string]user{
+		"a": {ID: "a", Name: "A"},
+		"b": {ID: "b", Name: "B"},
+	}
+	observed := cc.SnapshotGens(ctx, keys)
+
+	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBulkWithGens: %v", err)
+	}
+
+	for _, k := range keys {
+		if _, ok, _ := mp.Get(ctx, impl.singleKeys(k).Value.String()); ok {
+			t.Fatalf("BulkWriteSeedOff should not materialize single %q on successful bulk write", k)
+		}
+	}
+
+	got, missing, err := cc.GetBulk(ctx, keys)
+	if err != nil {
+		t.Fatalf("GetBulk: %v", err)
+	}
+	if len(missing) != 0 || len(got) != len(items) {
+		t.Fatalf("GetBulk expected all hit, missing=%v got=%v", missing, got)
+	}
+}
+
+func TestSetBulkWithGensStrictSkipsSingleAfterBatchValidationRace(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	gs := &bumpAfterSnapshotManyGenStore{
@@ -1413,6 +1478,40 @@ func TestSetBulkWithGensStaleSingleSelfHealsAfterBatchValidationRace(t *testing.
 	}
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
 		o.GenStore = gs
+	})
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	key := "a"
+	gs.bumpKey = toGenStoreKey(impl.singleKeys(key).Cache)
+
+	items := map[string]user{
+		key: {ID: key, Name: "A"},
+	}
+	observed := cc.SnapshotGens(ctx, []string{key})
+
+	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBulkWithGens: %v", err)
+	}
+
+	if _, ok, _ := mp.Get(ctx, impl.singleKeys(key).Value.String()); ok {
+		t.Fatalf("strict post-bulk seeding should skip stale singles after the race")
+	}
+	if _, ok, err := cc.Get(ctx, key); err != nil || ok {
+		t.Fatalf("Get should miss when no checked single landed, ok=%v err=%v", ok, err)
+	}
+}
+
+func TestSetBulkWithGensFastStaleSingleSelfHealsAfterBatchValidationRace(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	gs := &bumpAfterSnapshotManyGenStore{
+		inner:      genstore.NewLocalGenStore(time.Hour, time.Hour),
+		bumpOnCall: 2,
+	}
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.GenStore = gs
+		o.BulkWriteSeed = BulkWriteSeedFast
 	})
 	defer closeTest(t, ctx, cc)
 
