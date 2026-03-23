@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [1.4.2](https://github.com/unkn0wn-root/cascache/compare/v1.4.1...v1.4.2) (2026-03-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cache:** simplify bulk/single paths and clarify guard semantics
+
+* **cache:** simplify bulk/single paths and clarify guard semantics ([a6270f7](https://github.com/unkn0wn-root/cascache/commit/a6270f783459fcf301291f06eec464990b58a14b))
+
 ### [1.4.1](https://github.com/unkn0wn-root/cascache/compare/v1.2.1...v1.4.1) (2026-03-20)
 
 
