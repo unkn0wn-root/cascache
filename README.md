@@ -309,7 +309,7 @@ cache, _ := cascache.New[User](cascache.Options[User]{
 })
 ```
 
-One thing to know: bulk rejection is all-or-nothing. If any key fails the guard the entire bulk entry is deleted because bulk entries are stored as a single blob. The cache then falls back to single-key lookups for all the requested keys. There is no way to partially invalidate a bulk entry.
+One thing to know: the stored bulk blob is all-or-nothing. If any key fails the guard, the entire bulk entry is deleted because bulk entries are stored as a single blob. CasCache may still return non-rejected members from the already-validated payload for that `GetBulk` call to avoid unnecessary per-key reads. Rejected members fall back to single-key reads only when `ReadGuard` is also configured; otherwise they are reported as misses for that call so they cannot be served back from seeded singles. There is no way to partially invalidate a stored bulk entry.
 
 ## Design
 

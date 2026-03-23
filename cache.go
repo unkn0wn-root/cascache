@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"time"
 
@@ -54,6 +56,8 @@ type cache[V any] struct {
 	bulkWriteSeed BulkWriteSeedMode
 }
 
+// newCache validates required options, normalizes defaults, and wires the
+// cache's bulk and generation capabilities from the configured dependencies.
 func newCache[V any](opts Options[V]) (*cache[V], error) {
 	if opts.Provider == nil {
 		return nil, fmt.Errorf("provider is required")
@@ -148,7 +152,8 @@ func (c *cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
 	}
 
 	sk := c.singleKeys(key)
-	raw, ok, err := c.provider.Get(ctx, sk.Value.String())
+	storageKey := sk.Value.String()
+	raw, ok, err := c.provider.Get(ctx, storageKey)
 	if err != nil {
 		return zero, false, opError(OpGet, key, err)
 	}
@@ -158,8 +163,7 @@ func (c *cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
 
 	dgen, payload, err := wire.DecodeSingle(raw)
 	if err != nil {
-		_ = c.provider.Del(ctx, sk.Value.String()) // self-heal corrupt
-		c.hooks.SelfHealSingle(sk.Value.String(), SelfHealReasonCorrupt)
+		c.selfHealSingle(ctx, storageKey, SelfHealReasonCorrupt)
 		return zero, false, nil
 	}
 
@@ -168,21 +172,17 @@ func (c *cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
 		return zero, false, nil
 	}
 	if dgen != currentGen {
-		_ = c.provider.Del(ctx, sk.Value.String())
-		c.hooks.SelfHealSingle(sk.Value.String(), SelfHealReasonGenMismatch)
+		c.selfHealSingle(ctx, storageKey, SelfHealReasonGenMismatch)
 		return zero, false, nil
 	}
 
 	v, err := c.codec.Decode(payload)
 	if err != nil {
-		_ = c.provider.Del(ctx, sk.Value.String()) // self-heal
-		c.hooks.SelfHealSingle(sk.Value.String(), SelfHealReasonValueDecode)
+		c.selfHealSingle(ctx, storageKey, SelfHealReasonValueDecode)
 		return zero, false, nil
 	}
-	allow, guardReason := c.guardSingleRead(ctx, key, v)
-	if !allow {
-		_ = c.provider.Del(ctx, sk.Value.String())
-		c.hooks.SelfHealSingle(sk.Value.String(), guardReason)
+	if guardReason := c.guardSingleRead(ctx, key, v); guardReason != "" {
+		c.selfHealSingle(ctx, storageKey, guardReason)
 		return zero, false, nil
 	}
 	return v, true, nil
@@ -233,12 +233,8 @@ func (c *cache[V]) SetWithGen(ctx context.Context, key string, value V, observed
 	if err != nil {
 		return opError(OpSet, key, err)
 	}
-	ok, err := c.provider.Set(ctx, sw.storageKey, sw.wire, sw.cost, ttl)
-	if err != nil {
+	if err := c.storeSingleWrite(ctx, sw, ttl); err != nil {
 		return opError(OpSet, key, err)
-	}
-	if !ok {
-		c.hooks.ProviderSetRejected(sw.storageKey, false)
 	}
 	return nil
 }
@@ -307,7 +303,11 @@ func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 //     repeated failures on subsequent reads.
 //
 //  3. Fall back to per-key reads via Get. Results are memoized internally so
-//     duplicate keys in the input do not cause duplicate lookups.
+//     duplicate keys in the input do not cause duplicate lookups. If
+//     BulkReadGuard rejects specific members and no ReadGuard is configured,
+//     those rejected members are reported as misses for this call instead of
+//     being served back from seeded singles. If BulkReadGuard errors and no
+//     ReadGuard is configured, the entire batch fails closed to misses.
 //
 // When bulk mode is disabled (DisableBulk option), step 1 is skipped
 // entirely and we go straight to per-key reads.
@@ -336,55 +336,20 @@ func (c *cache[V]) GetBulk(ctx context.Context, keys []string) (map[string]V, []
 	}
 
 	us := uniqSorted(keys)
-	bk, err := c.bulkKeySorted(us)
+	hit, ok, err := c.loadBulkHit(ctx, us)
 	if err != nil {
 		return out, missing, opError(OpGetBulk, "", err)
 	}
-
-	raw, ok, gErr := c.provider.Get(ctx, bk.String())
-	if gErr != nil {
-		return out, missing, opError(OpGetBulk, "", gErr)
-	}
-	if ok {
-		items, dErr := wire.DecodeBulk(raw)
-		if dErr == nil && c.bulkValid(ctx, us, items) {
-			decodedByKey, rErr := c.decodeRequestedBulkItems(us, items)
-			if rErr == nil {
-				if ok, reason := c.guardBulkRead(ctx, decodedByKey); !ok {
-					_ = c.provider.Del(ctx, bk.String())
-					c.hooks.BulkRejected(c.ns, len(us), reason)
-				} else {
-					for _, k := range keys {
-						if item, ok := decodedByKey[k]; ok {
-							out[k] = item.value
-						} else {
-							missing = append(missing, k)
-						}
-					}
-					switch c.bulkSeed {
-					case BulkSeedAll:
-						_ = c.seedBulk(ctx, us, items, c.defaultTTL)
-					case BulkSeedIfMissing:
-						_ = c.seedBulkIfMissing(ctx, us, items, c.defaultTTL)
-					}
-					return out, missing, nil
-				}
-			} else {
-				_ = c.provider.Del(ctx, bk.String()) // self-heal undecodable bulk payloads
-				c.hooks.BulkRejected(c.ns, len(us), BulkRejectReasonValueDecode)
-			}
-		} else {
-			_ = c.provider.Del(ctx, bk.String()) // self-heal
-			reason := BulkRejectReasonInvalidOrStale
-			if dErr != nil {
-				reason = BulkRejectReasonDecodeError
-			}
-			c.hooks.BulkRejected(c.ns, len(us), reason)
-		}
+	if !ok {
+		missing, err = c.memoizedSingles(ctx, keys, out)
+		return out, missing, err
 	}
 
-	// fallback to per-key reads.
-	missing, err = c.memoizedSingles(ctx, keys, out)
+	plan := c.buildBulkReadPlan(ctx, hit.values)
+	if plan.action != bulkReadServeAll {
+		c.rejectBulk(ctx, hit.storageKey, len(us), plan.reason)
+	}
+	missing, err = c.applyBulkReadPlan(ctx, keys, us, hit, plan, out)
 	return out, missing, err
 }
 
@@ -501,7 +466,7 @@ func (c *cache[V]) SetBulkWithGens(ctx context.Context, items map[string]V, obse
 // value, not an error. Returned failures are wrapped in *OpError with
 // OpSnapshot.
 func (c *cache[V]) TrySnapshotGen(ctx context.Context, key string) (uint64, error) {
-	g, err := c.loadGen(ctx, toGenStoreKey(c.space.SingleCacheKey(key)))
+	g, err := c.loadGen(ctx, c.singleGenKey(key))
 	if err != nil {
 		return 0, opError(OpSnapshot, key, err)
 	}
@@ -533,7 +498,7 @@ func (c *cache[V]) TrySnapshotGens(ctx context.Context, keys []string) (map[stri
 // the gen store at write time and skip the write if it is still down,
 // so no stale data can be introduced.
 func (c *cache[V]) SnapshotGen(ctx context.Context, key string) uint64 {
-	g, err := c.loadGen(ctx, toGenStoreKey(c.space.SingleCacheKey(key)))
+	g, err := c.loadGen(ctx, c.singleGenKey(key))
 	if err != nil {
 		return 0
 	}
@@ -599,20 +564,46 @@ func (c *cache[V]) snapshotSortedUniqueGens(ctx context.Context, keys []string) 
 		return map[string]uint64{}, nil
 	}
 
-	cacheKeys := make([]gen.CacheKey, len(keys))
-	for i, k := range keys {
-		cacheKeys[i] = toGenStoreKey(c.space.SingleCacheKey(k))
-	}
+	cacheKeys := c.singleGenKeys(keys)
 
 	m, err := c.loadGens(ctx, cacheKeys)
 	if err == nil {
-		out := make(map[string]uint64, len(keys))
-		for i, k := range keys {
-			out[k] = m[cacheKeys[i]]
-		}
-		return out, nil
+		return mapLogicalGens(keys, cacheKeys, m), nil
 	}
 
+	return c.loadSingleGensFallback(ctx, keys, cacheKeys)
+}
+
+// singleGenKey maps one logical key to the canonical generation-store key
+// used for all single-key freshness checks.
+func (c *cache[V]) singleGenKey(key string) gen.CacheKey {
+	return toGenStoreKey(c.space.SingleCacheKey(key))
+}
+
+// singleGenKeys is the slice form of singleGenKey for callers that already
+// have a sorted, deduplicated logical key set.
+func (c *cache[V]) singleGenKeys(keys []string) []gen.CacheKey {
+	cacheKeys := make([]gen.CacheKey, len(keys))
+	for i, k := range keys {
+		cacheKeys[i] = c.singleGenKey(k)
+	}
+	return cacheKeys
+}
+
+// mapLogicalGens converts batch generation results back to caller-facing
+// logical keys while preserving the input order contract.
+func mapLogicalGens(keys []string, cacheKeys []gen.CacheKey, gens map[gen.CacheKey]uint64) map[string]uint64 {
+	out := make(map[string]uint64, len(keys))
+	for i, k := range keys {
+		out[k] = gens[cacheKeys[i]]
+	}
+	return out
+}
+
+// loadSingleGensFallback performs per-key generation reads after a batch
+// snapshot failed. Unreadable keys are mapped to zero and returned errors are
+// wrapped per logical key so strict callers can fail the whole snapshot.
+func (c *cache[V]) loadSingleGensFallback(ctx context.Context, keys []string, cacheKeys []gen.CacheKey) (map[string]uint64, error) {
 	out := make(map[string]uint64, len(keys))
 	errs := make([]error, 0, len(keys))
 	for i, k := range keys {
@@ -638,15 +629,41 @@ func (c *cache[V]) bumpGen(ctx context.Context, cacheKey gen.CacheKey) (uint64, 
 	return g, nil
 }
 
-// bulkValid checks whether a stored bulk entry can serve the requested keys.
-// For each requested key it verifies two things: the key must be present in
-// the bulk, and its stored generation must match the current generation in
-// the gen store. If any member fails either check the entire bulk is
-// considered invalid because we cannot serve partial results from it.
+type bulkHit[V any] struct {
+	storageKey string
+	items      []wire.BulkItem
+	values     map[string]V
+}
+
+type bulkReadAction uint8
+
+const (
+	bulkReadServeAll bulkReadAction = iota
+	bulkReadServeAcceptedMissRejected
+	bulkReadServeAcceptedRefetchRejected
+	bulkReadFallbackSingles
+	bulkReadMissAll
+)
+
+type bulkReadPlan struct {
+	action   bulkReadAction
+	reason   BulkRejectReason
+	rejected map[string]struct{}
+}
+
+type bulkProjection struct {
+	missing      []string
+	fallbackKeys []string
+}
+
+// bulkRejectReason reports whether a stored bulk entry can serve the requested
+// keys. For each requested key it verifies two things: the key must be present
+// in the bulk, and its stored generation must match the current generation in
+// the gen store.
 //
-// Extra keys present in the bulk but not in the requested set are ignored.
-// The sortedRequested slice must already be sorted and deduplicated.
-func (c *cache[V]) bulkValid(ctx context.Context, sortedRequested []string, items []wire.BulkItem) bool {
+// Extra keys present in the bulk but not in the requested set are ignored. A
+// non-empty return means the entry should be rejected for this read.
+func (c *cache[V]) bulkRejectReason(ctx context.Context, sortedRequested []string, items []wire.BulkItem) BulkRejectReason {
 	itemGen := make(map[string]uint64, len(items))
 	for _, it := range items {
 		itemGen[it.Key] = it.Gen // duplicates in stored items: last wins
@@ -654,19 +671,161 @@ func (c *cache[V]) bulkValid(ctx context.Context, sortedRequested []string, item
 
 	gens, err := c.snapshotSortedUniqueGens(ctx, sortedRequested)
 	if err != nil {
-		return false
+		return BulkRejectReasonInvalidOrStale
 	}
 
 	for _, k := range sortedRequested {
 		g, ok := itemGen[k]
 		if !ok {
-			return false // missing member in bulk
+			return BulkRejectReasonInvalidOrStale
 		}
 		if g != gens[k] {
-			return false // stale member
+			return BulkRejectReasonInvalidOrStale
 		}
 	}
-	return true
+	return ""
+}
+
+func (c *cache[V]) bulkValid(ctx context.Context, sortedRequested []string, items []wire.BulkItem) bool {
+	return c.bulkRejectReason(ctx, sortedRequested, items) == ""
+}
+
+// loadBulkHit reads, validates, and decodes a bulk entry for one unique key
+// set. Corrupt, stale, or undecodable entries are self-healed here so callers
+// can treat a false hit as a normal fallback-to-singles condition.
+func (c *cache[V]) loadBulkHit(ctx context.Context, sortedRequested []string) (bulkHit[V], bool, error) {
+	bk, err := c.bulkKeySorted(sortedRequested)
+	if err != nil {
+		return bulkHit[V]{}, false, err
+	}
+	storageKey := bk.String()
+
+	raw, ok, err := c.provider.Get(ctx, storageKey)
+	if err != nil {
+		return bulkHit[V]{}, false, err
+	}
+	if !ok {
+		return bulkHit[V]{}, false, nil
+	}
+
+	items, err := wire.DecodeBulk(raw)
+	if err != nil {
+		c.rejectBulk(ctx, storageKey, len(sortedRequested), BulkRejectReasonDecodeError)
+		return bulkHit[V]{}, false, nil
+	}
+	if reason := c.bulkRejectReason(ctx, sortedRequested, items); reason != "" {
+		c.rejectBulk(ctx, storageKey, len(sortedRequested), reason)
+		return bulkHit[V]{}, false, nil
+	}
+
+	values, err := c.decodeRequestedBulkItems(sortedRequested, items)
+	if err != nil {
+		c.rejectBulk(ctx, storageKey, len(sortedRequested), BulkRejectReasonValueDecode)
+		return bulkHit[V]{}, false, nil
+	}
+
+	return bulkHit[V]{
+		storageKey: storageKey,
+		items:      items,
+		values:     values,
+	}, true, nil
+}
+
+// buildBulkReadPlan translates guard outcomes into one internal action so
+// GetBulk can keep policy decisions separate from result projection and I/O.
+func (c *cache[V]) buildBulkReadPlan(ctx context.Context, values map[string]V) bulkReadPlan {
+	guard := c.guardBulkRead(ctx, values)
+	if guard.allowed() {
+		return bulkReadPlan{action: bulkReadServeAll}
+	}
+
+	plan := bulkReadPlan{
+		reason:   guard.reason,
+		rejected: guard.rejected,
+	}
+	switch {
+	case c.bulkReadGuard != nil && len(guard.rejected) != 0 && c.readGuard == nil:
+		plan.action = bulkReadServeAcceptedMissRejected
+	case c.bulkReadGuard != nil && len(guard.rejected) != 0 && c.readGuard != nil:
+		plan.action = bulkReadServeAcceptedRefetchRejected
+	case c.bulkReadGuard != nil && c.readGuard == nil:
+		plan.action = bulkReadMissAll
+	default:
+		plan.action = bulkReadFallbackSingles
+	}
+	return plan
+}
+
+// applyBulkReadPlan materializes a previously chosen bulk-read action back
+// onto the caller's requested key order, including warming or single-key
+// fallback when the plan requires it.
+func (c *cache[V]) applyBulkReadPlan(ctx context.Context, keys, sortedRequested []string, hit bulkHit[V], plan bulkReadPlan, out map[string]V) ([]string, error) {
+	switch plan.action {
+	case bulkReadServeAll:
+		projection := projectBulkValues(keys, hit.values, nil, out, false)
+		c.seedBulkReadHit(ctx, sortedRequested, hit.items)
+		return projection.missing, nil
+	case bulkReadServeAcceptedMissRejected:
+		projection := projectBulkValues(keys, hit.values, plan.rejected, out, false)
+		return projection.missing, nil
+	case bulkReadServeAcceptedRefetchRejected:
+		projection := projectBulkValues(keys, hit.values, plan.rejected, out, true)
+		missing, err := c.memoizedSingles(ctx, projection.fallbackKeys, out)
+		return append(projection.missing, missing...), err
+	case bulkReadMissAll:
+		return slices.Clone(keys), nil
+	case bulkReadFallbackSingles:
+	}
+	return c.memoizedSingles(ctx, keys, out)
+}
+
+// projectBulkValues maps decoded bulk members back to the caller's original
+// request shape. Rejected keys are either reported as misses immediately or
+// collected for later single-key fallback, depending on the caller's plan.
+func projectBulkValues[V any](keys []string, values map[string]V, rejected map[string]struct{}, out map[string]V, fallbackRejected bool) bulkProjection {
+	projection := bulkProjection{
+		missing: make([]string, 0, len(keys)),
+	}
+	if fallbackRejected {
+		projection.fallbackKeys = make([]string, 0, len(keys))
+	}
+
+	for _, k := range keys {
+		if _, ok := rejected[k]; ok {
+			if fallbackRejected {
+				projection.fallbackKeys = append(projection.fallbackKeys, k)
+			} else {
+				projection.missing = append(projection.missing, k)
+			}
+			continue
+		}
+
+		v, ok := values[k]
+		if !ok {
+			projection.missing = append(projection.missing, k)
+			continue
+		}
+		out[k] = v
+	}
+	return projection
+}
+
+// rejectBulk best-effort deletes an unusable bulk blob and emits the matching
+// operational hook so repeated reads do not keep reprocessing bad data.
+func (c *cache[V]) rejectBulk(ctx context.Context, storageKey string, requested int, reason BulkRejectReason) {
+	_ = c.provider.Del(ctx, storageKey)
+	c.hooks.BulkRejected(c.ns, requested, reason)
+}
+
+// seedBulkReadHit warms single-key entries from an already validated bulk hit
+// according to the configured BulkSeed policy.
+func (c *cache[V]) seedBulkReadHit(ctx context.Context, sortedRequested []string, items []wire.BulkItem) {
+	switch c.bulkSeed {
+	case BulkSeedAll:
+		_ = c.seedBulk(ctx, sortedRequested, items, c.defaultTTL)
+	case BulkSeedIfMissing:
+		_ = c.seedBulkIfMissing(ctx, sortedRequested, items, c.defaultTTL)
+	}
 }
 
 // memoizedSingles reads each unique key exactly once via Get and maps the
@@ -767,57 +926,75 @@ func (c *cache[V]) missingObservedGenKeys(items map[string]V, observedGens map[s
 	return missing
 }
 
-type decodedBulkItem[V any] struct {
-	value V
+type bulkReadGuardResult struct {
+	reason   BulkRejectReason
+	rejected map[string]struct{}
 }
 
-func (c *cache[V]) guardSingleRead(ctx context.Context, key string, value V) (bool, SelfHealReason) {
+func (r bulkReadGuardResult) allowed() bool { return r.reason == "" }
+
+// guardSingleRead applies the configured single-key read guard and translates
+// its result into the self-heal reason Get should record on rejection.
+func (c *cache[V]) guardSingleRead(ctx context.Context, key string, value V) SelfHealReason {
 	if c.readGuard == nil {
-		return true, ""
+		return ""
 	}
 	ok, err := c.readGuard(ctx, key, value)
 	if err != nil {
-		return false, SelfHealReasonReadGuardError
+		return SelfHealReasonReadGuardError
 	}
 	if !ok {
-		return false, SelfHealReasonReadGuardReject
+		return SelfHealReasonReadGuardReject
 	}
-	return true, ""
+	return ""
 }
 
-func (c *cache[V]) guardBulkRead(ctx context.Context, decodedByKey map[string]decodedBulkItem[V]) (bool, BulkRejectReason) {
-	if len(decodedByKey) == 0 {
-		return true, ""
+// guardBulkRead applies the authoritative validation configured for bulk hits.
+// It prefers BulkReadGuard when present, validates any reported rejected keys,
+// and otherwise falls back to per-member ReadGuard checks.
+func (c *cache[V]) guardBulkRead(ctx context.Context, values map[string]V) bulkReadGuardResult {
+	if len(values) == 0 {
+		return bulkReadGuardResult{}
 	}
 
 	if c.bulkReadGuard != nil {
-		values := make(map[string]V, len(decodedByKey))
-		for k, item := range decodedByKey {
-			values[k] = item.value
-		}
-		rejected, err := c.bulkReadGuard(ctx, values)
+		guardValues := make(map[string]V, len(values))
+		maps.Copy(guardValues, values)
+		rejected, err := c.bulkReadGuard(ctx, guardValues)
 		if err != nil {
-			return false, BulkRejectReasonReadGuardError
+			return bulkReadGuardResult{reason: BulkRejectReasonReadGuardError}
 		}
-		if len(rejected) != 0 {
-			return false, BulkRejectReasonReadGuardReject
+		if len(rejected) == 0 {
+			return bulkReadGuardResult{}
 		}
-		return true, ""
+
+		filtered := make(map[string]struct{}, len(rejected))
+		for k := range rejected {
+			if _, ok := values[k]; !ok {
+				// A guard may reject only members that were actually validated.
+				return bulkReadGuardResult{reason: BulkRejectReasonReadGuardError}
+			}
+			filtered[k] = struct{}{}
+		}
+		return bulkReadGuardResult{
+			reason:   BulkRejectReasonReadGuardReject,
+			rejected: filtered,
+		}
 	}
 
 	if c.readGuard == nil {
-		return true, ""
+		return bulkReadGuardResult{}
 	}
-	for k, item := range decodedByKey {
-		ok, err := c.readGuard(ctx, k, item.value)
+	for k, v := range values {
+		ok, err := c.readGuard(ctx, k, v)
 		if err != nil {
-			return false, BulkRejectReasonReadGuardError
+			return bulkReadGuardResult{reason: BulkRejectReasonReadGuardError}
 		}
 		if !ok {
-			return false, BulkRejectReasonReadGuardReject
+			return bulkReadGuardResult{reason: BulkRejectReasonReadGuardReject}
 		}
 	}
-	return true, ""
+	return bulkReadGuardResult{}
 }
 
 // decodeRequestedBulkItems decodes only the bulk items that the caller
@@ -826,13 +1003,13 @@ func (c *cache[V]) guardBulkRead(ctx context.Context, decodedByKey map[string]de
 // partial results. A decode failure on a requested item means the bulk
 // entry is not trustworthy and the caller should delete it and fall back
 // to per-key reads.
-func (c *cache[V]) decodeRequestedBulkItems(requested []string, items []wire.BulkItem) (map[string]decodedBulkItem[V], error) {
+func (c *cache[V]) decodeRequestedBulkItems(requested []string, items []wire.BulkItem) (map[string]V, error) {
 	wanted := make(map[string]struct{}, len(requested))
 	for _, k := range requested {
 		wanted[k] = struct{}{}
 	}
 
-	decodedByKey := make(map[string]decodedBulkItem[V], len(requested))
+	decodedByKey := make(map[string]V, len(requested))
 	for _, it := range items {
 		if _, ok := wanted[it.Key]; !ok {
 			continue
@@ -841,7 +1018,7 @@ func (c *cache[V]) decodeRequestedBulkItems(requested []string, items []wire.Bul
 		if err != nil {
 			return nil, fmt.Errorf("decode bulk item %q: %w", it.Key, err)
 		}
-		decodedByKey[it.Key] = decodedBulkItem[V]{value: v}
+		decodedByKey[it.Key] = v
 	}
 	return decodedByKey, nil
 }
@@ -934,14 +1111,16 @@ func (c *cache[V]) singleWriteForKey(sk keyutil.Single, gen uint64, payload []by
 	}, nil
 }
 
-// writeSingle encodes one single entry frame from an already validated bulk
-// member and stores it through the normal provider Set path.
-func (c *cache[V]) writeSingle(ctx context.Context, key string, gen uint64, payload []byte, ttl time.Duration) error {
-	sk := c.singleKeys(key)
-	sw, err := c.singleWriteForKey(sk, gen, payload)
-	if err != nil {
-		return err
-	}
+// selfHealSingle deletes one unusable single entry and emits the matching
+// hook reason. Read paths call this after conservative validation failures.
+func (c *cache[V]) selfHealSingle(ctx context.Context, storageKey string, reason SelfHealReason) {
+	_ = c.provider.Del(ctx, storageKey)
+	c.hooks.SelfHealSingle(storageKey, reason)
+}
+
+// storeSingleWrite executes a prepared single-entry provider Set and reports
+// admission rejection through hooks without treating it as an error.
+func (c *cache[V]) storeSingleWrite(ctx context.Context, sw singleWrite, ttl time.Duration) error {
 	ok, err := c.provider.Set(ctx, sw.storageKey, sw.wire, sw.cost, ttl)
 	if err != nil {
 		return err
@@ -950,6 +1129,17 @@ func (c *cache[V]) writeSingle(ctx context.Context, key string, gen uint64, payl
 		c.hooks.ProviderSetRejected(sw.storageKey, false)
 	}
 	return nil
+}
+
+// writeSingle encodes one single entry frame from an already validated bulk
+// member and stores it through the normal provider Set path.
+func (c *cache[V]) writeSingle(ctx context.Context, key string, gen uint64, payload []byte, ttl time.Duration) error {
+	sk := c.singleKeys(key)
+	sw, err := c.singleWriteForKey(sk, gen, payload)
+	if err != nil {
+		return err
+	}
+	return c.storeSingleWrite(ctx, sw, ttl)
 }
 
 // addSingle encodes one single-entry frame from an already validated bulk

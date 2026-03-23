@@ -19,11 +19,17 @@ type SetCostFunc func(key string, raw []byte, isBulk bool, bulkCount int) int64
 // is treated conservatively as a rejection and the caller receives a miss.
 type ReadGuardFunc[V any] func(ctx context.Context, key string, value V) (allow bool, err error)
 
-// BulkReadGuardFunc is the batch form of ReadGuardFunc for validated bulk hits.
+// BulkReadGuardFunc is the batch form of ReadGuardFunc for validated GetBulk hits.
 // The input map contains only the requested logical keys that survived wire and
-// generation checks. Return a set of rejected logical keys; if the set is not
-// empty the entire bulk entry is rejected and the cache falls back to singles.
+// generation checks. Return the keys that failed validation. Any non-empty
+// result deletes the stored bulk entry because bulk values are stored as a
+// single blob.
 //
+// If ReadGuard is also configured, GetBulk rechecks the rejected keys through
+// per-key fallback reads. Otherwise, rejected keys are treated as misses for
+// that GetBulk call so they cannot be served back from seeded singles.
+// Returning a key that was not present in values or returning an error is
+// treated conservatively as a guard failure.
 // Returning an error is treated conservatively as a bulk rejection.
 type BulkReadGuardFunc[V any] func(ctx context.Context, values map[string]V) (rejected map[string]struct{}, err error)
 
