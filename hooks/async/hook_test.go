@@ -34,7 +34,7 @@ func TestHooksCloseDropsLateEvents(t *testing.T) {
 	h.Close()
 
 	h.SelfHealSingle("k", cascache.SelfHealReasonCorrupt)
-	h.BulkRejected("ns", 1, cascache.BulkRejectReasonDecodeError)
+	h.BatchRejected("ns", 1, cascache.BatchRejectReasonDecodeError)
 }
 
 func TestHooksCloseWaitsForInFlightEvent(t *testing.T) {

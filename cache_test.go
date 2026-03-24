@@ -23,7 +23,7 @@ type memEntry struct {
 	exp time.Time // zero => no TTL
 }
 
-const bulkValueRoot = "cas:v1:val:b:"
+const batchValueRoot = "cas:v2:val:b:"
 
 type memProvider struct {
 	m map[string]memEntry
@@ -84,16 +84,16 @@ func (p *getErrProvider) Get(_ context.Context, key string) ([]byte, bool, error
 	return nil, false, p.err
 }
 
-type bulkGetErrProvider struct {
+type batchGetErrProvider struct {
 	*memProvider
 	err            error
 	singleGetCalls int
 }
 
-var _ pr.Provider = (*bulkGetErrProvider)(nil)
+var _ pr.Provider = (*batchGetErrProvider)(nil)
 
-func (p *bulkGetErrProvider) Get(ctx context.Context, key string) ([]byte, bool, error) {
-	if strings.HasPrefix(key, bulkValueRoot) {
+func (p *batchGetErrProvider) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	if strings.HasPrefix(key, batchValueRoot) {
 		return nil, false, p.err
 	}
 	p.singleGetCalls++
@@ -109,7 +109,7 @@ type singleGetErrProvider struct {
 var _ pr.Provider = (*singleGetErrProvider)(nil)
 
 func (p *singleGetErrProvider) Get(ctx context.Context, key string) ([]byte, bool, error) {
-	if strings.HasPrefix(key, bulkValueRoot) {
+	if strings.HasPrefix(key, batchValueRoot) {
 		return p.memProvider.Get(ctx, key)
 	}
 	p.singleGetCalls++
@@ -149,28 +149,28 @@ func (p *plainProvider) Close(ctx context.Context) error {
 	return p.inner.Close(ctx)
 }
 
-type bulkRejectSingleErrProvider struct {
+type batchRejectSingleErrProvider struct {
 	*memProvider
 	err error
 }
 
-var _ pr.Provider = (*bulkRejectSingleErrProvider)(nil)
+var _ pr.Provider = (*batchRejectSingleErrProvider)(nil)
 
-func (p *bulkRejectSingleErrProvider) Set(_ context.Context, key string, value []byte, _ int64, ttl time.Duration) (bool, error) {
-	if strings.HasPrefix(key, bulkValueRoot) {
+func (p *batchRejectSingleErrProvider) Set(_ context.Context, key string, value []byte, _ int64, ttl time.Duration) (bool, error) {
+	if strings.HasPrefix(key, batchValueRoot) {
 		return false, nil
 	}
 	return false, p.err
 }
 
-type bulkRejectProvider struct {
+type batchRejectProvider struct {
 	*memProvider
 }
 
-var _ pr.Provider = (*bulkRejectProvider)(nil)
+var _ pr.Provider = (*batchRejectProvider)(nil)
 
-func (p *bulkRejectProvider) Set(ctx context.Context, key string, value []byte, cost int64, ttl time.Duration) (bool, error) {
-	if strings.HasPrefix(key, bulkValueRoot) {
+func (p *batchRejectProvider) Set(ctx context.Context, key string, value []byte, cost int64, ttl time.Duration) (bool, error) {
+	if strings.HasPrefix(key, batchValueRoot) {
 		return false, nil
 	}
 	return p.memProvider.Set(ctx, key, value, cost, ttl)
@@ -271,12 +271,107 @@ func (s *bumpAfterSnapshotManyGenStore) Close(ctx context.Context) error {
 	return s.inner.Close(ctx)
 }
 
+type recordingKeyAdapter struct {
+	setStored       bool
+	setErr          error
+	invalidateErr   error
+	setCalls        int
+	invalidateCalls int
+	lastVersionKey  genstore.CacheKey
+	lastValueKey    string
+	lastExpected    uint64
+	lastWireValue   []byte
+	lastTTL         time.Duration
+}
+
+var _ KeyMutator = (*recordingKeyAdapter)(nil)
+
+func (s *recordingKeyAdapter) SetIfVersion(_ context.Context, versionKey genstore.CacheKey, valueKey string, expected uint64, wireValue []byte, ttl time.Duration) (bool, error) {
+	s.setCalls++
+	s.lastVersionKey = versionKey
+	s.lastValueKey = valueKey
+	s.lastExpected = expected
+	s.lastWireValue = append([]byte(nil), wireValue...)
+	s.lastTTL = ttl
+	return s.setStored, s.setErr
+}
+
+func (s *recordingKeyAdapter) Invalidate(_ context.Context, versionKey genstore.CacheKey, valueKey string) error {
+	s.invalidateCalls++
+	s.lastVersionKey = versionKey
+	s.lastValueKey = valueKey
+	return s.invalidateErr
+}
+
 type user struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 }
 
-func newTestCache(t *testing.T, ns string, mp pr.Provider, optsOpt func(*Options[user])) CAS[user] {
+type legacyTestCache[V any] struct {
+	CAS[V]
+}
+
+func (c *legacyTestCache[V]) SnapshotGen(ctx context.Context, key string) uint64 {
+	v, err := c.CAS.SnapshotVersion(ctx, key)
+	if err != nil {
+		return 0
+	}
+	return v.uint64()
+}
+
+func (c *legacyTestCache[V]) SnapshotGens(ctx context.Context, keys []string) map[string]uint64 {
+	versions, err := c.CAS.SnapshotVersions(ctx, keys)
+	if err != nil {
+		out := make(map[string]uint64, len(keys))
+		for _, key := range uniqSorted(keys) {
+			out[key] = 0
+		}
+		return out
+	}
+	out := make(map[string]uint64, len(versions))
+	for k, v := range versions {
+		out[k] = v.uint64()
+	}
+	return out
+}
+
+func (c *legacyTestCache[V]) TrySnapshotGen(ctx context.Context, key string) (uint64, error) {
+	v, err := c.CAS.SnapshotVersion(ctx, key)
+	return v.uint64(), err
+}
+
+func (c *legacyTestCache[V]) TrySnapshotGens(ctx context.Context, keys []string) (map[string]uint64, error) {
+	versions, err := c.CAS.SnapshotVersions(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]uint64, len(versions))
+	for k, v := range versions {
+		out[k] = v.uint64()
+	}
+	return out, nil
+}
+
+func (c *legacyTestCache[V]) SetWithGen(ctx context.Context, key string, value V, observedGen uint64, ttl time.Duration) error {
+	_, err := c.CAS.SetIfVersion(ctx, key, value, versionFromUint64(observedGen), ttl)
+	return err
+}
+
+func (c *legacyTestCache[V]) SetBatchWithGens(ctx context.Context, items map[string]V, observedGens map[string]uint64, ttl time.Duration) error {
+	vs := make([]VersionedValue[V], 0, len(items))
+	for key, value := range items {
+		vs = append(vs, VersionedValue[V]{
+			Key:     key,
+			Value:   value,
+			Version: versionFromUint64(observedGens[key]),
+		})
+	}
+	_, err := c.CAS.SetIfVersions(ctx, vs, ttl)
+	return err
+}
+
+func newTestCache(t *testing.T, ns string, mp pr.Provider, optsOpt func(*Options[user])) *legacyTestCache[user] {
 	t.Helper()
 	opts := Options[user]{
 		Namespace: ns,
@@ -290,7 +385,7 @@ func newTestCache(t *testing.T, ns string, mp pr.Provider, optsOpt func(*Options
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return cc
+	return &legacyTestCache[user]{CAS: cc}
 }
 
 func closeTest(t *testing.T, ctx context.Context, c interface{ Close(context.Context) error }) {
@@ -310,17 +405,27 @@ func assertExpiryBefore(t *testing.T, got time.Time, before time.Time, limit tim
 	}
 }
 
-func mustImpl[V any](t *testing.T, c CAS[V]) *cache[V] {
+func mustImpl(t *testing.T, c interface{}) *cache[user] {
 	t.Helper()
-	impl, ok := c.(*cache[V])
+	switch cc := c.(type) {
+	case *cache[user]:
+		return cc
+	case *legacyTestCache[user]:
+		impl, ok := cc.CAS.(*cache[user])
+		if !ok {
+			t.Fatalf("unexpected concrete type for CAS")
+		}
+		return impl
+	}
+	impl, ok := c.(*cache[user])
 	if !ok {
 		t.Fatalf("unexpected concrete type for CAS")
 	}
 	return impl
 }
 
-func bulkValuePrefix(namespace string) string {
-	return fmt.Sprintf("%s%d:%s:", bulkValueRoot, len(namespace), namespace)
+func batchValuePrefix(namespace string) string {
+	return fmt.Sprintf("%s%d:%s:", batchValueRoot, len(namespace), namespace)
 }
 
 // ==============================
@@ -503,22 +608,30 @@ func TestSingleKeyNamespaceFramingAvoidsCollisions(t *testing.T) {
 	}
 }
 
-func TestSetWithGenSnapshotErrorSkipsWrite(t *testing.T) {
+func TestSetIfVersionSnapshotErrorReturnsErrorAndSkipsWrite(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
+	sentinel := errors.New("snapshot failed")
 
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.GenStore = &failingGenStore{snapshotErr: errors.New("snapshot failed")}
+		o.GenStore = &failingGenStore{snapshotErr: sentinel}
 	})
 	defer closeTest(t, ctx, cc)
 
-	if err := cc.SetWithGen(ctx, "u:1", user{ID: "1", Name: "Ada"}, 0, time.Minute); err != nil {
-		t.Fatalf("SetWithGen: %v", err)
+	result, err := cc.SetIfVersion(ctx, "u:1", user{ID: "1", Name: "Ada"}, Version{}, time.Minute)
+	if err == nil {
+		t.Fatalf("SetIfVersion should return an error")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("SetIfVersion error mismatch: %v", err)
+	}
+	if result.Outcome != WriteOutcomeSnapshotError {
+		t.Fatalf("SetIfVersion outcome=%q want %q", result.Outcome, WriteOutcomeSnapshotError)
 	}
 
 	impl := mustImpl(t, cc)
 	if _, ok, _ := mp.Get(ctx, impl.singleKeys("u:1").Value.String()); ok {
-		t.Fatalf("SetWithGen should skip writes when snapshot fails")
+		t.Fatalf("SetIfVersion should skip writes when snapshot fails")
 	}
 }
 
@@ -803,12 +916,12 @@ func TestLocalGenStoreNoLeakOnClose(t *testing.T) {
 }
 
 // ==============================
-// Bulk behavior tests
+// Batch behavior tests
 // ==============================
 
-// TestBulkHappyAndStale validates bulk read, then invalidation of one member causes
-// bulk rejection and fallback to singles with missing reported for the invalidated key.
-func TestBulkHappyAndStale(t *testing.T) {
+// TestBatchHappyAndStale validates batch read, then invalidation of one member causes
+// batch rejection and fallback to singles with missing reported for the invalidated key.
+func TestBatchHappyAndStale(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, nil)
@@ -824,55 +937,55 @@ func TestBulkHappyAndStale(t *testing.T) {
 	// Snapshot gens (all zero).
 	snap := cc.SnapshotGens(ctx, keys)
 
-	// Write bulk with gens.
-	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	// Write batch with gens.
+	if err := cc.SetBatchWithGens(ctx, items, snap, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
-	// First GetBulk: all present, no missing.
-	got, missing, err := cc.GetBulk(ctx, keys)
+	// First GetMany: all present, no missing.
+	got, missing, err := cc.GetMany(ctx, keys)
 	if err != nil {
-		t.Fatalf("GetBulk: %v", err)
+		t.Fatalf("GetMany: %v", err)
 	}
 	if len(missing) != 0 || len(got) != len(items) {
-		t.Fatalf("GetBulk expected all hit, missing=%v got=%v", missing, got)
+		t.Fatalf("GetMany expected all hit, missing=%v got=%v", missing, got)
 	}
 
-	// Invalidate "b": removes its single and bumps gen. Bulk should be rejected on next read.
+	// Invalidate "b": removes its single and bumps gen. Batch should be rejected on next read.
 	if err := cc.Invalidate(ctx, "b"); err != nil {
 		t.Fatalf("Invalidate: %v", err)
 	}
 
-	got2, missing2, err := cc.GetBulk(ctx, keys)
+	got2, missing2, err := cc.GetMany(ctx, keys)
 	if err != nil {
-		t.Fatalf("GetBulk after invalidate: %v", err)
+		t.Fatalf("GetMany after invalidate: %v", err)
 	}
 	if len(missing2) != 1 || missing2[0] != "b" {
 		t.Fatalf("expected only 'b' missing, got %v", missing2)
 	}
 	// 'a' and 'c' should still be present (from singles seeding).
 	if _, ok := got2["a"]; !ok {
-		t.Fatalf("expected 'a' present after bulk rejection")
+		t.Fatalf("expected 'a' present after batch rejection")
 	}
 	if _, ok := got2["c"]; !ok {
-		t.Fatalf("expected 'c' present after bulk rejection")
+		t.Fatalf("expected 'c' present after batch rejection")
 	}
 
-	// Ensure the stale bulk was dropped from provider.
+	// Ensure the stale batch was dropped from provider.
 	for k := range mp.m {
-		if strings.HasPrefix(k, bulkValuePrefix("user")) {
-			t.Fatalf("stale bulk should have been deleted, found %q", k)
+		if strings.HasPrefix(k, batchValuePrefix("user")) {
+			t.Fatalf("stale batch should have been deleted, found %q", k)
 		}
 	}
 }
 
-// TestBulkDisabled ensures that when bulk is disabled, no bulk keys are written
-// and GetBulk falls back to singles.
-func TestBulkDisabled(t *testing.T) {
+// TestBatchDisabled ensures that when batch is disabled, no batch keys are written
+// and GetMany falls back to singles.
+func TestBatchDisabled(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.DisableBulk = true
+		o.DisableBatch = true
 	})
 	defer closeTest(t, ctx, cc)
 
@@ -883,29 +996,29 @@ func TestBulkDisabled(t *testing.T) {
 	}
 	snap := cc.SnapshotGens(ctx, keys)
 
-	// Set bulk with gens -> should seed singles only (no bulk key).
-	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
-		t.Fatalf("SetBulkWithGens (bulk disabled): %v", err)
+	// Set batch with gens -> should seed singles only (no batch key).
+	if err := cc.SetBatchWithGens(ctx, items, snap, 0); err != nil {
+		t.Fatalf("SetBatchWithGens (batch disabled): %v", err)
 	}
 
-	// GetBulk should return both via singles path.
-	got, missing, err := cc.GetBulk(ctx, keys)
+	// GetMany should return both via singles path.
+	got, missing, err := cc.GetMany(ctx, keys)
 	if err != nil {
-		t.Fatalf("GetBulk (bulk disabled): %v", err)
+		t.Fatalf("GetMany (batch disabled): %v", err)
 	}
 	if len(missing) != 0 || len(got) != 2 {
-		t.Fatalf("GetBulk (bulk disabled) expected all present, missing=%v got=%v", missing, got)
+		t.Fatalf("GetMany (batch disabled) expected all present, missing=%v got=%v", missing, got)
 	}
 
-	// Assert no bulk key exists in provider.
+	// Assert no batch key exists in provider.
 	for k := range mp.m {
-		if strings.HasPrefix(k, bulkValuePrefix("user")) {
-			t.Fatalf("bulk disabled but found bulk key %q written", k)
+		if strings.HasPrefix(k, batchValuePrefix("user")) {
+			t.Fatalf("batch disabled but found batch key %q written", k)
 		}
 	}
 }
 
-func TestBulkDefaultNoSeed(t *testing.T) {
+func TestBatchDefaultNoSeed(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, nil)
@@ -918,48 +1031,70 @@ func TestBulkDefaultNoSeed(t *testing.T) {
 		"b": {ID: "b", Name: "B"},
 	}
 	snap := cc.SnapshotGens(ctx, keys)
-	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, snap, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
 	for _, k := range keys {
 		_ = impl.provider.Del(ctx, impl.singleKeys(k).Value.String())
 	}
 
-	got, missing, err := cc.GetBulk(ctx, keys)
+	got, missing, err := cc.GetMany(ctx, keys)
 	if err != nil {
-		t.Fatalf("GetBulk: %v", err)
+		t.Fatalf("GetMany: %v", err)
 	}
 	if len(missing) != 0 || len(got) != len(items) {
-		t.Fatalf("GetBulk expected all hit, missing=%v got=%v", missing, got)
+		t.Fatalf("GetMany expected all hit, missing=%v got=%v", missing, got)
 	}
 
 	for _, k := range keys {
 		if _, ok, _ := mp.Get(ctx, impl.singleKeys(k).Value.String()); ok {
-			t.Fatalf("default bulk hit should not seed single %q", k)
+			t.Fatalf("default batch hit should not seed single %q", k)
 		}
 	}
 }
 
-func TestNewBulkSeedIfMissingNeedsSupport(t *testing.T) {
+func TestNewBatchSeedIfMissingNeedsSupport(t *testing.T) {
 	_, err := New[user](Options[user]{
-		Namespace: "user",
-		Provider:  &plainProvider{inner: newMemProvider()},
-		Codec:     c.JSON[user]{},
-		BulkSeed:  BulkSeedIfMissing,
+		Namespace:     "user",
+		Provider:      &plainProvider{inner: newMemProvider()},
+		Codec:         c.JSON[user]{},
+		BatchReadSeed: BatchReadSeedIfMissing,
 	})
-	if !errors.Is(err, ErrBulkSeedNeedsAdder) {
+	if !errors.Is(err, ErrBatchReadSeedNeedsAdder) {
 		t.Fatalf("New error mismatch: %v", err)
 	}
 }
 
-func TestBulkSeedAllUsesBatchGen(t *testing.T) {
+func TestNewRejectsBuiltInLocalGenCleanupSettings(t *testing.T) {
+	_, err := New[user](Options[user]{
+		Namespace:       "user",
+		Provider:        newMemProvider(),
+		Codec:           c.JSON[user]{},
+		CleanupInterval: time.Minute,
+	})
+	if !errors.Is(err, ErrLocalGenCleanupUnsupported) {
+		t.Fatalf("New error mismatch: %v", err)
+	}
+
+	_, err = New[user](Options[user]{
+		Namespace:    "user",
+		Provider:     newMemProvider(),
+		Codec:        c.JSON[user]{},
+		GenRetention: time.Hour,
+	})
+	if !errors.Is(err, ErrLocalGenCleanupUnsupported) {
+		t.Fatalf("New error mismatch: %v", err)
+	}
+}
+
+func TestBatchSeedAllUsesBatchGen(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	gs := &countingGenStore{inner: genstore.NewLocalGenStore(time.Hour, time.Hour)}
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
 		o.GenStore = gs
-		o.BulkSeed = BulkSeedAll
+		o.BatchReadSeed = BatchReadSeedAll
 	})
 	defer closeTest(t, ctx, cc)
 
@@ -971,8 +1106,8 @@ func TestBulkSeedAllUsesBatchGen(t *testing.T) {
 		"c": {ID: "c", Name: "C"},
 	}
 	snap := cc.SnapshotGens(ctx, keys)
-	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, snap, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
 	for _, k := range keys {
@@ -981,32 +1116,32 @@ func TestBulkSeedAllUsesBatchGen(t *testing.T) {
 	gs.snapshotCalls = 0
 	gs.snapshotManyCalls = 0
 
-	got, missing, err := cc.GetBulk(ctx, keys)
+	got, missing, err := cc.GetMany(ctx, keys)
 	if err != nil {
-		t.Fatalf("GetBulk: %v", err)
+		t.Fatalf("GetMany: %v", err)
 	}
 	if len(missing) != 0 || len(got) != len(items) {
-		t.Fatalf("GetBulk expected all hit, missing=%v got=%v", missing, got)
+		t.Fatalf("GetMany expected all hit, missing=%v got=%v", missing, got)
 	}
 	if gs.snapshotCalls != 0 {
-		t.Fatalf("bulk-hit warming should not do per-key Snapshot calls, got %d", gs.snapshotCalls)
+		t.Fatalf("batch-hit warming should not do per-key Snapshot calls, got %d", gs.snapshotCalls)
 	}
 	if gs.snapshotManyCalls != 1 {
-		t.Fatalf("bulk-hit validation should use one SnapshotMany call, got %d", gs.snapshotManyCalls)
+		t.Fatalf("batch-hit validation should use one SnapshotMany call, got %d", gs.snapshotManyCalls)
 	}
 
 	for _, k := range keys {
 		if _, ok, _ := mp.Get(ctx, impl.singleKeys(k).Value.String()); !ok {
-			t.Fatalf("checked bulk-hit warming should seed single %q", k)
+			t.Fatalf("checked batch-hit warming should seed single %q", k)
 		}
 	}
 }
 
-func TestSetBulkWithGensSeedsSinglesWhenBulkSeedOff(t *testing.T) {
+func TestSetBatchWithGensSeedsSinglesWhenBatchSeedOff(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.BulkSeed = BulkSeedOff
+		o.BatchReadSeed = BatchReadSeedOff
 	})
 	defer closeTest(t, ctx, cc)
 
@@ -1018,21 +1153,21 @@ func TestSetBulkWithGensSeedsSinglesWhenBulkSeedOff(t *testing.T) {
 	keys := []string{"a", "b"}
 	observed := cc.SnapshotGens(ctx, keys)
 
-	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 	for _, k := range keys {
 		if _, ok, _ := mp.Get(ctx, impl.singleKeys(k).Value.String()); !ok {
-			t.Fatalf("bulk write should seed single %q even when BulkSeedOff", k)
+			t.Fatalf("batch write should seed single %q even when BatchReadSeedOff", k)
 		}
 	}
 }
 
-func TestBulkSeedIfMissing(t *testing.T) {
+func TestBatchSeedIfMissing(t *testing.T) {
 	ctx := context.Background()
 	mp := &countingAdderProvider{memProvider: newMemProvider()}
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.BulkSeed = BulkSeedIfMissing
+		o.BatchReadSeed = BatchReadSeedIfMissing
 	})
 	defer closeTest(t, ctx, cc)
 
@@ -1043,8 +1178,8 @@ func TestBulkSeedIfMissing(t *testing.T) {
 		"b": {ID: "b", Name: "B"},
 	}
 	snap := cc.SnapshotGens(ctx, keys)
-	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, snap, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
 	for _, k := range keys {
@@ -1054,12 +1189,12 @@ func TestBulkSeedIfMissing(t *testing.T) {
 	mp.addCalls = 0
 	mp.addStored = 0
 
-	got, missing, err := cc.GetBulk(ctx, keys)
+	got, missing, err := cc.GetMany(ctx, keys)
 	if err != nil {
-		t.Fatalf("GetBulk: %v", err)
+		t.Fatalf("GetMany: %v", err)
 	}
 	if len(missing) != 0 || len(got) != len(items) {
-		t.Fatalf("GetBulk expected all hit, missing=%v got=%v", missing, got)
+		t.Fatalf("GetMany expected all hit, missing=%v got=%v", missing, got)
 	}
 	if mp.setCalls != 0 {
 		t.Fatalf("if-absent warming should not call Set, got %d calls", mp.setCalls)
@@ -1072,11 +1207,11 @@ func TestBulkSeedIfMissing(t *testing.T) {
 	}
 }
 
-func TestGetBulkReadGuardRejectsBulkAndMissesRejectedKeysWithoutReadGuard(t *testing.T) {
+func TestGetBatchReadGuardRejectsBatchAndMissesRejectedKeysWithoutReadGuard(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.BulkReadGuard = func(context.Context, map[string]user) (map[string]struct{}, error) {
+		o.BatchReadGuard = func(context.Context, map[string]user) (map[string]struct{}, error) {
 			return map[string]struct{}{"b": {}}, nil
 		}
 	})
@@ -1088,39 +1223,39 @@ func TestGetBulkReadGuardRejectsBulkAndMissesRejectedKeysWithoutReadGuard(t *tes
 		"b": {ID: "b", Name: "B"},
 	}
 	observed := cc.SnapshotGens(ctx, keys)
-	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
-	got, missing, err := cc.GetBulk(ctx, keys)
+	got, missing, err := cc.GetMany(ctx, keys)
 	if err != nil {
-		t.Fatalf("GetBulk: %v", err)
+		t.Fatalf("GetMany: %v", err)
 	}
 	if len(missing) != 1 || missing[0] != "b" {
-		t.Fatalf("GetBulk missing=%v want [b]", missing)
+		t.Fatalf("GetMany missing=%v want [b]", missing)
 	}
 	if len(got) != 1 || got["a"] != items["a"] {
-		t.Fatalf("GetBulk got=%v want only a=%v", got, items["a"])
+		t.Fatalf("GetMany got=%v want only a=%v", got, items["a"])
 	}
 	if _, ok := got["b"]; ok {
-		t.Fatalf("GetBulk should not serve bulk-read-guard rejection from singles")
+		t.Fatalf("GetMany should not serve batch-read-guard rejection from singles")
 	}
 
 	impl := mustImpl(t, cc)
-	bk, err := impl.bulkKeySorted(keys)
+	bk, err := impl.batchKeySorted(keys)
 	if err != nil {
-		t.Fatalf("bulkKeySorted: %v", err)
+		t.Fatalf("batchKeySorted: %v", err)
 	}
 	if _, found, err := mp.Get(ctx, bk.String()); err != nil || found {
-		t.Fatalf("bulk read-guard rejection should delete stored bulk, found=%v err=%v", found, err)
+		t.Fatalf("batch read-guard rejection should delete stored batch, found=%v err=%v", found, err)
 	}
 }
 
-func TestGetBulkReadGuardRejectWithoutReadGuardPreservesDuplicateMissing(t *testing.T) {
+func TestGetBatchReadGuardRejectWithoutReadGuardPreservesDuplicateMissing(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.BulkReadGuard = func(context.Context, map[string]user) (map[string]struct{}, error) {
+		o.BatchReadGuard = func(context.Context, map[string]user) (map[string]struct{}, error) {
 			return map[string]struct{}{"b": {}}, nil
 		}
 	})
@@ -1132,30 +1267,30 @@ func TestGetBulkReadGuardRejectWithoutReadGuardPreservesDuplicateMissing(t *test
 		"b": {ID: "b", Name: "B"},
 	}
 	observed := cc.SnapshotGens(ctx, []string{"a", "b"})
-	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
-	got, missing, err := cc.GetBulk(ctx, keys)
+	got, missing, err := cc.GetMany(ctx, keys)
 	if err != nil {
-		t.Fatalf("GetBulk: %v", err)
+		t.Fatalf("GetMany: %v", err)
 	}
 	if !reflect.DeepEqual(missing, []string{"b", "b"}) {
-		t.Fatalf("GetBulk missing=%v want [b b]", missing)
+		t.Fatalf("GetMany missing=%v want [b b]", missing)
 	}
 	if len(got) != 1 || got["a"] != items["a"] {
-		t.Fatalf("GetBulk got=%v want only a=%v", got, items["a"])
+		t.Fatalf("GetMany got=%v want only a=%v", got, items["a"])
 	}
 }
 
-func TestGetBulkReadGuardRejectFallsBackToSinglesWithReadGuard(t *testing.T) {
+func TestGetBatchReadGuardRejectFallsBackToSinglesWithReadGuard(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
 		o.ReadGuard = func(_ context.Context, _ string, cached user) (bool, error) {
 			return cached.Name != "stale", nil
 		}
-		o.BulkReadGuard = func(_ context.Context, cached map[string]user) (map[string]struct{}, error) {
+		o.BatchReadGuard = func(_ context.Context, cached map[string]user) (map[string]struct{}, error) {
 			rejected := make(map[string]struct{})
 			for key, value := range cached {
 				if value.Name == "stale" {
@@ -1173,8 +1308,8 @@ func TestGetBulkReadGuardRejectFallsBackToSinglesWithReadGuard(t *testing.T) {
 		"b": {ID: "b", Name: "stale"},
 	}
 	observed := cc.SnapshotGens(ctx, keys)
-	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
 	freshB := user{ID: "b", Name: "fresh"}
@@ -1182,37 +1317,37 @@ func TestGetBulkReadGuardRejectFallsBackToSinglesWithReadGuard(t *testing.T) {
 		t.Fatalf("SetWithGen fresh single: %v", err)
 	}
 
-	got, missing, err := cc.GetBulk(ctx, keys)
+	got, missing, err := cc.GetMany(ctx, keys)
 	if err != nil {
-		t.Fatalf("GetBulk: %v", err)
+		t.Fatalf("GetMany: %v", err)
 	}
 	if len(missing) != 0 {
-		t.Fatalf("GetBulk missing=%v want none", missing)
+		t.Fatalf("GetMany missing=%v want none", missing)
 	}
 	want := map[string]user{
 		"a": items["a"],
 		"b": freshB,
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("GetBulk got=%v want=%v", got, want)
+		t.Fatalf("GetMany got=%v want=%v", got, want)
 	}
 
 	impl := mustImpl(t, cc)
-	bk, err := impl.bulkKeySorted(keys)
+	bk, err := impl.batchKeySorted(keys)
 	if err != nil {
-		t.Fatalf("bulkKeySorted: %v", err)
+		t.Fatalf("batchKeySorted: %v", err)
 	}
 	if _, found, err := mp.Get(ctx, bk.String()); err != nil || found {
-		t.Fatalf("bulk read-guard rejection should delete stored bulk, found=%v err=%v", found, err)
+		t.Fatalf("batch read-guard rejection should delete stored batch, found=%v err=%v", found, err)
 	}
 }
 
-func TestGetBulkReadGuardErrorFailsClosedWithoutReadGuard(t *testing.T) {
+func TestGetBatchReadGuardErrorFailsClosedWithoutReadGuard(t *testing.T) {
 	ctx := context.Background()
-	sentinel := errors.New("bulk guard failed")
+	sentinel := errors.New("batch guard failed")
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.BulkReadGuard = func(context.Context, map[string]user) (map[string]struct{}, error) {
+		o.BatchReadGuard = func(context.Context, map[string]user) (map[string]struct{}, error) {
 			return nil, sentinel
 		}
 	})
@@ -1224,36 +1359,36 @@ func TestGetBulkReadGuardErrorFailsClosedWithoutReadGuard(t *testing.T) {
 		"b": {ID: "b", Name: "B"},
 	}
 	observed := cc.SnapshotGens(ctx, keys)
-	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
-	got, missing, err := cc.GetBulk(ctx, keys)
+	got, missing, err := cc.GetMany(ctx, keys)
 	if err != nil {
-		t.Fatalf("GetBulk: %v", err)
+		t.Fatalf("GetMany: %v", err)
 	}
 	if len(got) != 0 {
-		t.Fatalf("GetBulk got=%v want empty on bulk-read-guard error without single guard", got)
+		t.Fatalf("GetMany got=%v want empty on batch-read-guard error without single guard", got)
 	}
 	if !reflect.DeepEqual(missing, keys) {
-		t.Fatalf("GetBulk missing=%v want=%v", missing, keys)
+		t.Fatalf("GetMany missing=%v want=%v", missing, keys)
 	}
 
 	impl := mustImpl(t, cc)
-	bk, err := impl.bulkKeySorted(keys)
+	bk, err := impl.batchKeySorted(keys)
 	if err != nil {
-		t.Fatalf("bulkKeySorted: %v", err)
+		t.Fatalf("batchKeySorted: %v", err)
 	}
 	if _, found, err := mp.Get(ctx, bk.String()); err != nil || found {
-		t.Fatalf("bulk read-guard error should delete stored bulk, found=%v err=%v", found, err)
+		t.Fatalf("batch read-guard error should delete stored batch, found=%v err=%v", found, err)
 	}
 }
 
-func TestGetBulkReadGuardInvalidRejectedKeyFailsClosedWithoutReadGuard(t *testing.T) {
+func TestGetBatchReadGuardInvalidRejectedKeyFailsClosedWithoutReadGuard(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.BulkReadGuard = func(context.Context, map[string]user) (map[string]struct{}, error) {
+		o.BatchReadGuard = func(context.Context, map[string]user) (map[string]struct{}, error) {
 			return map[string]struct{}{"ghost": {}}, nil
 		}
 	})
@@ -1265,38 +1400,38 @@ func TestGetBulkReadGuardInvalidRejectedKeyFailsClosedWithoutReadGuard(t *testin
 		"b": {ID: "b", Name: "B"},
 	}
 	observed := cc.SnapshotGens(ctx, keys)
-	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
-	got, missing, err := cc.GetBulk(ctx, keys)
+	got, missing, err := cc.GetMany(ctx, keys)
 	if err != nil {
-		t.Fatalf("GetBulk: %v", err)
+		t.Fatalf("GetMany: %v", err)
 	}
 	if len(got) != 0 {
-		t.Fatalf("GetBulk got=%v want empty on invalid bulk-read-guard result", got)
+		t.Fatalf("GetMany got=%v want empty on invalid batch-read-guard result", got)
 	}
 	if !reflect.DeepEqual(missing, keys) {
-		t.Fatalf("GetBulk missing=%v want=%v", missing, keys)
+		t.Fatalf("GetMany missing=%v want=%v", missing, keys)
 	}
 
 	impl := mustImpl(t, cc)
-	bk, err := impl.bulkKeySorted(keys)
+	bk, err := impl.batchKeySorted(keys)
 	if err != nil {
-		t.Fatalf("bulkKeySorted: %v", err)
+		t.Fatalf("batchKeySorted: %v", err)
 	}
 	if _, found, err := mp.Get(ctx, bk.String()); err != nil || found {
-		t.Fatalf("invalid bulk read-guard result should delete stored bulk, found=%v err=%v", found, err)
+		t.Fatalf("invalid batch read-guard result should delete stored batch, found=%v err=%v", found, err)
 	}
 }
 
-func TestGetBulkReadGuardErrorFallsBackToSinglesWithReadGuard(t *testing.T) {
+func TestGetBatchReadGuardErrorFallsBackToSinglesWithReadGuard(t *testing.T) {
 	ctx := context.Background()
-	sentinel := errors.New("bulk guard failed")
+	sentinel := errors.New("batch guard failed")
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
 		o.ReadGuard = func(context.Context, string, user) (bool, error) { return true, nil }
-		o.BulkReadGuard = func(context.Context, map[string]user) (map[string]struct{}, error) {
+		o.BatchReadGuard = func(context.Context, map[string]user) (map[string]struct{}, error) {
 			return nil, sentinel
 		}
 	})
@@ -1308,48 +1443,48 @@ func TestGetBulkReadGuardErrorFallsBackToSinglesWithReadGuard(t *testing.T) {
 		"b": {ID: "b", Name: "B"},
 	}
 	observed := cc.SnapshotGens(ctx, keys)
-	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
-	got, missing, err := cc.GetBulk(ctx, keys)
+	got, missing, err := cc.GetMany(ctx, keys)
 	if err != nil {
-		t.Fatalf("GetBulk: %v", err)
+		t.Fatalf("GetMany: %v", err)
 	}
 	if len(missing) != 0 {
-		t.Fatalf("GetBulk missing=%v want none", missing)
+		t.Fatalf("GetMany missing=%v want none", missing)
 	}
 	if !reflect.DeepEqual(got, items) {
-		t.Fatalf("GetBulk got=%v want=%v", got, items)
+		t.Fatalf("GetMany got=%v want=%v", got, items)
 	}
 
 	impl := mustImpl(t, cc)
-	bk, err := impl.bulkKeySorted(keys)
+	bk, err := impl.batchKeySorted(keys)
 	if err != nil {
-		t.Fatalf("bulkKeySorted: %v", err)
+		t.Fatalf("batchKeySorted: %v", err)
 	}
 	if _, found, err := mp.Get(ctx, bk.String()); err != nil || found {
-		t.Fatalf("bulk read-guard error should delete stored bulk, found=%v err=%v", found, err)
+		t.Fatalf("batch read-guard error should delete stored batch, found=%v err=%v", found, err)
 	}
 }
 
-func TestGetBulkPropagatesSingleErrors(t *testing.T) {
+func TestGetBatchPropagatesSingleErrors(t *testing.T) {
 	ctx := context.Background()
 	sentinel := errors.New("get failed")
 	mp := &getErrProvider{memProvider: newMemProvider(), err: sentinel}
 
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.DisableBulk = true
+		o.DisableBatch = true
 	})
 	defer closeTest(t, ctx, cc)
 
-	got, missing, err := cc.GetBulk(ctx, []string{"a", "b"})
+	got, missing, err := cc.GetMany(ctx, []string{"a", "b"})
 	if !errors.Is(err, sentinel) {
-		t.Fatalf("GetBulk error mismatch: %v", err)
+		t.Fatalf("GetMany error mismatch: %v", err)
 	}
 	var oe *OpError
 	if !errors.As(err, &oe) {
-		t.Fatalf("GetBulk error should be *OpError, got %T", err)
+		t.Fatalf("GetMany error should be *OpError, got %T", err)
 	}
 	if oe.Op != OpGet {
 		t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpGet)
@@ -1358,17 +1493,17 @@ func TestGetBulkPropagatesSingleErrors(t *testing.T) {
 		t.Fatalf("OpError.Key = %q, want %q or %q", oe.Key, "a", "b")
 	}
 	if len(got) != 0 {
-		t.Fatalf("GetBulk should not return values on provider error, got %v", got)
+		t.Fatalf("GetMany should not return values on provider error, got %v", got)
 	}
 	if len(missing) != 2 || missing[0] != "a" || missing[1] != "b" {
-		t.Fatalf("GetBulk missing mismatch: %v", missing)
+		t.Fatalf("GetMany missing mismatch: %v", missing)
 	}
 }
 
-func TestGetBulkBulkReadErrorReturnsOpError(t *testing.T) {
+func TestGetBatchBatchReadErrorReturnsOpError(t *testing.T) {
 	ctx := context.Background()
-	sentinel := errors.New("bulk get failed")
-	mp := &bulkGetErrProvider{memProvider: newMemProvider(), err: sentinel}
+	sentinel := errors.New("batch get failed")
+	mp := &batchGetErrProvider{memProvider: newMemProvider(), err: sentinel}
 	cc := newTestCache(t, "user", mp, nil)
 	defer closeTest(t, ctx, cc)
 
@@ -1377,39 +1512,39 @@ func TestGetBulkBulkReadErrorReturnsOpError(t *testing.T) {
 		"b": {ID: "b", Name: "B"},
 	}
 	observed := cc.SnapshotGens(ctx, []string{"a", "b"})
-	if err := cc.SetBulkWithGens(ctx, items, observed, time.Minute); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, observed, time.Minute); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
-	got, missing, err := cc.GetBulk(ctx, []string{"a", "b"})
+	got, missing, err := cc.GetMany(ctx, []string{"a", "b"})
 	if err == nil {
-		t.Fatalf("GetBulk should return an error on bulk provider read failure")
+		t.Fatalf("GetMany should return an error on batch provider read failure")
 	}
 	if !errors.Is(err, sentinel) {
-		t.Fatalf("GetBulk error mismatch: %v", err)
+		t.Fatalf("GetMany error mismatch: %v", err)
 	}
 	var oe *OpError
 	if !errors.As(err, &oe) {
-		t.Fatalf("GetBulk error should be *OpError, got %T", err)
+		t.Fatalf("GetMany error should be *OpError, got %T", err)
 	}
-	if oe.Op != OpGetBulk {
-		t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpGetBulk)
+	if oe.Op != OpGetMany {
+		t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpGetMany)
 	}
 	if oe.Key != "" {
 		t.Fatalf("OpError.Key = %q, want empty", oe.Key)
 	}
 	if len(got) != 0 {
-		t.Fatalf("GetBulk should not return values when bulk read fails, got %v", got)
+		t.Fatalf("GetMany should not return values when batch read fails, got %v", got)
 	}
 	if len(missing) != 0 {
-		t.Fatalf("GetBulk missing should stay empty on bulk read failure, got %v", missing)
+		t.Fatalf("GetMany missing should stay empty on batch read failure, got %v", missing)
 	}
 	if mp.singleGetCalls != 0 {
-		t.Fatalf("GetBulk should not fall back to singles on bulk read failure, got %d single reads", mp.singleGetCalls)
+		t.Fatalf("GetMany should not fall back to singles on batch read failure, got %d single reads", mp.singleGetCalls)
 	}
 }
 
-func TestBulkValueDecodeFallsBackToSinglesAndDeletesBulk(t *testing.T) {
+func TestBatchValueDecodeFallsBackToSinglesAndDeletesBatch(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, nil)
@@ -1420,39 +1555,39 @@ func TestBulkValueDecodeFallsBackToSinglesAndDeletesBulk(t *testing.T) {
 		"a": {ID: "a", Name: "A"},
 	}
 	snap := cc.SnapshotGens(ctx, []string{"a"})
-	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, snap, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
-	bulkKey, err := impl.bulkKeySorted(uniqSorted([]string{"a"}))
+	batchKey, err := impl.batchKeySorted(uniqSorted([]string{"a"}))
 	if err != nil {
-		t.Fatalf("bulkKeySorted: %v", err)
+		t.Fatalf("batchKeySorted: %v", err)
 	}
-	entry, ok := mp.m[bulkKey.String()]
+	entry, ok := mp.m[batchKey.String()]
 	if !ok {
-		t.Fatalf("expected bulk entry %q", bulkKey)
+		t.Fatalf("expected batch entry %q", batchKey)
 	}
 	corrupt := append([]byte(nil), entry.v...)
 	corrupt[len(corrupt)-1] = 0xFF
 	entry.v = corrupt
-	mp.m[bulkKey.String()] = entry
+	mp.m[batchKey.String()] = entry
 
-	got, missing, err := cc.GetBulk(ctx, []string{"a"})
+	got, missing, err := cc.GetMany(ctx, []string{"a"})
 	if err != nil {
-		t.Fatalf("GetBulk: %v", err)
+		t.Fatalf("GetMany: %v", err)
 	}
 	if len(missing) != 0 {
-		t.Fatalf("GetBulk should fall back to singles, missing=%v", missing)
+		t.Fatalf("GetMany should fall back to singles, missing=%v", missing)
 	}
 	if got["a"] != items["a"] {
-		t.Fatalf("GetBulk fallback mismatch: got=%v want=%v", got["a"], items["a"])
+		t.Fatalf("GetMany fallback mismatch: got=%v want=%v", got["a"], items["a"])
 	}
-	if _, ok, _ := mp.Get(ctx, bulkKey.String()); ok {
-		t.Fatalf("undecodable bulk should be deleted")
+	if _, ok, _ := mp.Get(ctx, batchKey.String()); ok {
+		t.Fatalf("undecodable batch should be deleted")
 	}
 }
 
-func TestBulkFallbackPropagatesSingleErrors(t *testing.T) {
+func TestBatchFallbackPropagatesSingleErrors(t *testing.T) {
 	ctx := context.Background()
 	sentinel := errors.New("single get failed")
 	mp := &singleGetErrProvider{memProvider: newMemProvider(), err: sentinel}
@@ -1465,45 +1600,45 @@ func TestBulkFallbackPropagatesSingleErrors(t *testing.T) {
 		"b": {ID: "b", Name: "B"},
 	}
 	observed := cc.SnapshotGens(ctx, []string{"a", "b"})
-	if err := cc.SetBulkWithGens(ctx, items, observed, time.Minute); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, observed, time.Minute); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
-	bulkKey, err := impl.bulkKeySorted(uniqSorted([]string{"a", "b"}))
+	batchKey, err := impl.batchKeySorted(uniqSorted([]string{"a", "b"}))
 	if err != nil {
-		t.Fatalf("bulkKeySorted: %v", err)
+		t.Fatalf("batchKeySorted: %v", err)
 	}
-	entry, ok := mp.m[bulkKey.String()]
+	entry, ok := mp.m[batchKey.String()]
 	if !ok {
-		t.Fatalf("expected bulk entry %q", bulkKey)
+		t.Fatalf("expected batch entry %q", batchKey)
 	}
 	corrupt := append([]byte(nil), entry.v...)
 	corrupt[len(corrupt)-1] = 0xFF
 	entry.v = corrupt
-	mp.m[bulkKey.String()] = entry
+	mp.m[batchKey.String()] = entry
 
-	got, missing, err := cc.GetBulk(ctx, []string{"a", "b"})
+	got, missing, err := cc.GetMany(ctx, []string{"a", "b"})
 	if err == nil {
-		t.Fatalf("GetBulk should return an error when fallback singles fail")
+		t.Fatalf("GetMany should return an error when fallback singles fail")
 	}
 	if !errors.Is(err, sentinel) {
-		t.Fatalf("GetBulk error mismatch: %v", err)
+		t.Fatalf("GetMany error mismatch: %v", err)
 	}
 	if len(got) != 0 {
-		t.Fatalf("GetBulk should not return values on fallback single error, got %v", got)
+		t.Fatalf("GetMany should not return values on fallback single error, got %v", got)
 	}
 	if len(missing) != 2 || missing[0] != "a" || missing[1] != "b" {
-		t.Fatalf("GetBulk missing mismatch: %v", missing)
+		t.Fatalf("GetMany missing mismatch: %v", missing)
 	}
-	if _, ok, _ := mp.Get(ctx, bulkKey.String()); ok {
-		t.Fatalf("undecodable bulk should be deleted")
+	if _, ok, _ := mp.Get(ctx, batchKey.String()); ok {
+		t.Fatalf("undecodable batch should be deleted")
 	}
 	if mp.singleGetCalls != 2 {
 		t.Fatalf("expected one fallback single read per unique key, got %d", mp.singleGetCalls)
 	}
 }
 
-func TestBulkSnapshotManyFallbackPreservesBulkPath(t *testing.T) {
+func TestBatchSnapshotManyFallbackPreservesBatchPath(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
@@ -1517,38 +1652,38 @@ func TestBulkSnapshotManyFallbackPreservesBulkPath(t *testing.T) {
 		"b": {ID: "b", Name: "B"},
 	}
 	observed := cc.SnapshotGens(ctx, []string{"a", "b"})
-	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
-	bulkKey, err := impl.bulkKeySorted([]string{"a", "b"})
+	batchKey, err := impl.batchKeySorted([]string{"a", "b"})
 	if err != nil {
-		t.Fatalf("bulkKeySorted: %v", err)
+		t.Fatalf("batchKeySorted: %v", err)
 	}
-	if _, ok, _ := mp.Get(ctx, bulkKey.String()); !ok {
-		t.Fatalf("expected bulk entry %q", bulkKey)
+	if _, ok, _ := mp.Get(ctx, batchKey.String()); !ok {
+		t.Fatalf("expected batch entry %q", batchKey)
 	}
 
 	for k := range items {
 		_ = impl.provider.Del(ctx, impl.singleKeys(k).Value.String())
 	}
 
-	got, missing, err := cc.GetBulk(ctx, []string{"b", "a"})
+	got, missing, err := cc.GetMany(ctx, []string{"b", "a"})
 	if err != nil {
-		t.Fatalf("GetBulk: %v", err)
+		t.Fatalf("GetMany: %v", err)
 	}
 	if len(missing) != 0 {
 		t.Fatalf("expected no missing, got %v", missing)
 	}
 	if got["a"] != items["a"] || got["b"] != items["b"] {
-		t.Fatalf("GetBulk mismatch: got=%v want=%v", got, items)
+		t.Fatalf("GetMany mismatch: got=%v want=%v", got, items)
 	}
-	if _, ok, _ := mp.Get(ctx, bulkKey.String()); !ok {
-		t.Fatalf("expected bulk entry to remain after fallback validation")
+	if _, ok, _ := mp.Get(ctx, batchKey.String()); !ok {
+		t.Fatalf("expected batch entry to remain after fallback validation")
 	}
 }
 
-func TestBulkIgnoresUndecodableExtras(t *testing.T) {
+func TestBatchIgnoresUndecodableExtras(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, nil)
@@ -1559,73 +1694,60 @@ func TestBulkIgnoresUndecodableExtras(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	wireEntry, err := wire.EncodeBulk([]wire.BulkItem{
+	wireEntry, err := wire.EncodeBatch([]wire.BatchItem{
 		{Key: "a", Gen: 0, Payload: payload},
 		{Key: "z", Gen: 0, Payload: []byte{0xFF}},
 	})
 	if err != nil {
-		t.Fatalf("EncodeBulk: %v", err)
+		t.Fatalf("EncodeBatch: %v", err)
 	}
 
-	bulkKey, err := impl.bulkKeySorted([]string{"a"})
+	batchKey, err := impl.batchKeySorted([]string{"a"})
 	if err != nil {
-		t.Fatalf("bulkKeySorted: %v", err)
+		t.Fatalf("batchKeySorted: %v", err)
 	}
-	if ok, err := impl.provider.Set(ctx, bulkKey.String(), wireEntry, 1, time.Minute); err != nil || !ok {
-		t.Fatalf("inject bulk: ok=%v err=%v", ok, err)
+	if ok, err := impl.provider.Set(ctx, batchKey.String(), wireEntry, 1, time.Minute); err != nil || !ok {
+		t.Fatalf("inject batch: ok=%v err=%v", ok, err)
 	}
 
-	got, missing, err := cc.GetBulk(ctx, []string{"a"})
+	got, missing, err := cc.GetMany(ctx, []string{"a"})
 	if err != nil {
-		t.Fatalf("GetBulk: %v", err)
+		t.Fatalf("GetMany: %v", err)
 	}
 	if len(missing) != 0 {
 		t.Fatalf("expected no missing, got %v", missing)
 	}
 	if got["a"] != (user{ID: "a", Name: "A"}) {
-		t.Fatalf("GetBulk mismatch: got=%v", got["a"])
+		t.Fatalf("GetMany mismatch: got=%v", got["a"])
 	}
-	if _, ok, _ := mp.Get(ctx, bulkKey.String()); !ok {
-		t.Fatalf("expected bulk entry to remain when only extras are undecodable")
+	if _, ok, _ := mp.Get(ctx, batchKey.String()); !ok {
+		t.Fatalf("expected batch entry to remain when only extras are undecodable")
 	}
 }
 
-func TestSetBulkWithGensMissingObservedGensReturnsError(t *testing.T) {
+func TestSetBatchIfVersionsRejectsDuplicateKeys(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 
 	cc := newTestCache(t, "user", mp, nil)
 	defer closeTest(t, ctx, cc)
 
-	items := map[string]user{
-		"a": {ID: "a", Name: "A"},
-		"b": {ID: "b", Name: "B"},
-	}
-	observed := map[string]uint64{
-		"a": 0,
-	}
-
-	err := cc.SetBulkWithGens(ctx, items, observed, time.Minute)
-	if !errors.Is(err, ErrMissingObservedGens) {
-		t.Fatalf("SetBulkWithGens error mismatch: %v", err)
-	}
-
-	var moe *MissingObservedGensError
-	if !errors.As(err, &moe) {
-		t.Fatalf("expected MissingObservedGensError, got %T", err)
-	}
-	if len(moe.Missing) != 1 || moe.Missing[0] != "b" {
-		t.Fatalf("unexpected missing keys: %v", moe.Missing)
+	_, err := cc.SetIfVersions(ctx, []VersionedValue[user]{
+		{Key: "a", Value: user{ID: "a", Name: "A"}, Version: Version{}},
+		{Key: "a", Value: user{ID: "a2", Name: "A2"}, Version: Version{}},
+	}, time.Minute)
+	if err == nil {
+		t.Fatalf("SetIfVersions should reject duplicate keys")
 	}
 	if len(mp.m) != 0 {
-		t.Fatalf("SetBulkWithGens should not write anything on caller error, provider=%v", mp.m)
+		t.Fatalf("SetIfVersions should not write anything on caller error, provider=%v", mp.m)
 	}
 }
 
-func TestSetBulkWithGensFallbackPropagatesSingleErrors(t *testing.T) {
+func TestSetBatchWithGensFallbackPropagatesSingleErrors(t *testing.T) {
 	ctx := context.Background()
 	sentinel := errors.New("set failed")
-	mp := &bulkRejectSingleErrProvider{memProvider: newMemProvider(), err: sentinel}
+	mp := &batchRejectSingleErrProvider{memProvider: newMemProvider(), err: sentinel}
 
 	cc := newTestCache(t, "user", mp, nil)
 	defer closeTest(t, ctx, cc)
@@ -1639,26 +1761,26 @@ func TestSetBulkWithGensFallbackPropagatesSingleErrors(t *testing.T) {
 		"b": 0,
 	}
 
-	err := cc.SetBulkWithGens(ctx, items, observed, time.Minute)
+	err := cc.SetBatchWithGens(ctx, items, observed, time.Minute)
 	if !errors.Is(err, sentinel) {
-		t.Fatalf("SetBulkWithGens error mismatch: %v", err)
+		t.Fatalf("SetBatchWithGens error mismatch: %v", err)
 	}
 	var oe *OpError
 	if !errors.As(err, &oe) {
-		t.Fatalf("SetBulkWithGens error should be *OpError, got %T", err)
+		t.Fatalf("SetBatchWithGens error should be *OpError, got %T", err)
 	}
 	if oe.Op != OpSet {
 		t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpSet)
 	}
 }
 
-func TestSetBulkWithGensBulkWriteErrorReturnsOpError(t *testing.T) {
+func TestSetBatchWithGensBatchWriteErrorReturnsOpError(t *testing.T) {
 	ctx := context.Background()
-	sentinel := errors.New("bulk set failed")
+	sentinel := errors.New("batch set failed")
 	cc := newTestCache(t, "user", &setErrProvider{memProvider: newMemProvider(), err: sentinel}, nil)
 	defer closeTest(t, ctx, cc)
 
-	err := cc.SetBulkWithGens(ctx, map[string]user{
+	err := cc.SetBatchWithGens(ctx, map[string]user{
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
 	}, map[string]uint64{
@@ -1666,24 +1788,24 @@ func TestSetBulkWithGensBulkWriteErrorReturnsOpError(t *testing.T) {
 		"b": 0,
 	}, time.Minute)
 	if err == nil {
-		t.Fatalf("SetBulkWithGens should return an error")
+		t.Fatalf("SetBatchWithGens should return an error")
 	}
 	if !errors.Is(err, sentinel) {
-		t.Fatalf("SetBulkWithGens error mismatch: %v", err)
+		t.Fatalf("SetBatchWithGens error mismatch: %v", err)
 	}
 	var oe *OpError
 	if !errors.As(err, &oe) {
-		t.Fatalf("SetBulkWithGens error should be *OpError, got %T", err)
+		t.Fatalf("SetBatchWithGens error should be *OpError, got %T", err)
 	}
-	if oe.Op != OpSetBulk {
-		t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpSetBulk)
+	if oe.Op != OpSetIfVersions {
+		t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpSetIfVersions)
 	}
 	if oe.Key != "" {
 		t.Fatalf("OpError.Key = %q, want empty", oe.Key)
 	}
 }
 
-func TestSetBulkWithGensStrictUsesBatchGenAndPerKeyRechecks(t *testing.T) {
+func TestSetBatchWithGensStrictUsesBatchGenAndPerKeyRechecks(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	gs := &countingGenStore{inner: genstore.NewLocalGenStore(time.Hour, time.Hour)}
@@ -1701,24 +1823,24 @@ func TestSetBulkWithGensStrictUsesBatchGenAndPerKeyRechecks(t *testing.T) {
 	gs.snapshotCalls = 0
 	gs.snapshotManyCalls = 0
 
-	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 	if gs.snapshotCalls != len(keys) {
-		t.Fatalf("strict bulk-write seeding should recheck each key once, got %d", gs.snapshotCalls)
+		t.Fatalf("strict batch-write seeding should recheck each key once, got %d", gs.snapshotCalls)
 	}
 	if gs.snapshotManyCalls != 1 {
-		t.Fatalf("validated bulk write should use one SnapshotMany call, got %d", gs.snapshotManyCalls)
+		t.Fatalf("validated batch write should use one SnapshotMany call, got %d", gs.snapshotManyCalls)
 	}
 }
 
-func TestSetBulkWithGensFastUsesBatchGenOnly(t *testing.T) {
+func TestSetBatchWithGensFastUsesBatchGenOnly(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	gs := &countingGenStore{inner: genstore.NewLocalGenStore(time.Hour, time.Hour)}
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
 		o.GenStore = gs
-		o.BulkWriteSeed = BulkWriteSeedFast
+		o.BatchWriteSeed = BatchWriteSeedFast
 	})
 	defer closeTest(t, ctx, cc)
 
@@ -1731,23 +1853,23 @@ func TestSetBulkWithGensFastUsesBatchGenOnly(t *testing.T) {
 	gs.snapshotCalls = 0
 	gs.snapshotManyCalls = 0
 
-	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 	if gs.snapshotCalls != 0 {
-		t.Fatalf("fast bulk-write seeding should not do per-key Snapshot calls, got %d", gs.snapshotCalls)
+		t.Fatalf("fast batch-write seeding should not do per-key Snapshot calls, got %d", gs.snapshotCalls)
 	}
 	if gs.snapshotManyCalls != 1 {
-		t.Fatalf("validated bulk write should use one SnapshotMany call, got %d", gs.snapshotManyCalls)
+		t.Fatalf("validated batch write should use one SnapshotMany call, got %d", gs.snapshotManyCalls)
 	}
 }
 
-func TestSetBulkWithGensTTLOverrideAppliesToSeededSingles(t *testing.T) {
+func TestSetBatchWithGensTTLOverrideAppliesToSeededSingles(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
 		o.DefaultTTL = time.Hour
-		o.BulkTTL = 2 * time.Hour
+		o.BatchTTL = 2 * time.Hour
 	})
 	defer closeTest(t, ctx, cc)
 
@@ -1761,19 +1883,19 @@ func TestSetBulkWithGensTTLOverrideAppliesToSeededSingles(t *testing.T) {
 	override := 50 * time.Millisecond
 	before := time.Now()
 
-	if err := cc.SetBulkWithGens(ctx, items, observed, override); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, observed, override); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
-	bulkKey, err := impl.bulkKeySorted(keys)
+	batchKey, err := impl.batchKeySorted(keys)
 	if err != nil {
-		t.Fatalf("bulkKeySorted: %v", err)
+		t.Fatalf("batchKeySorted: %v", err)
 	}
-	bulkEntry, ok := mp.m[bulkKey.String()]
+	batchEntry, ok := mp.m[batchKey.String()]
 	if !ok {
-		t.Fatalf("expected bulk entry to be written")
+		t.Fatalf("expected batch entry to be written")
 	}
-	assertExpiryBefore(t, bulkEntry.exp, before, 5*time.Second, "bulk entry")
+	assertExpiryBefore(t, batchEntry.exp, before, 5*time.Second, "batch entry")
 
 	for _, k := range keys {
 		entry, ok := mp.m[impl.singleKeys(k).Value.String()]
@@ -1784,12 +1906,12 @@ func TestSetBulkWithGensTTLOverrideAppliesToSeededSingles(t *testing.T) {
 	}
 }
 
-func TestSetBulkWithGensTTLOverrideAppliesToFallbackSingles(t *testing.T) {
+func TestSetBatchWithGensTTLOverrideAppliesToFallbackSingles(t *testing.T) {
 	ctx := context.Background()
-	mp := &bulkRejectProvider{memProvider: newMemProvider()}
+	mp := &batchRejectProvider{memProvider: newMemProvider()}
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
 		o.DefaultTTL = time.Hour
-		o.BulkTTL = 2 * time.Hour
+		o.BatchTTL = 2 * time.Hour
 	})
 	defer closeTest(t, ctx, cc)
 
@@ -1803,8 +1925,8 @@ func TestSetBulkWithGensTTLOverrideAppliesToFallbackSingles(t *testing.T) {
 	override := 50 * time.Millisecond
 	before := time.Now()
 
-	if err := cc.SetBulkWithGens(ctx, items, observed, override); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, observed, override); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
 	for _, k := range keys {
@@ -1816,11 +1938,11 @@ func TestSetBulkWithGensTTLOverrideAppliesToFallbackSingles(t *testing.T) {
 	}
 }
 
-func TestSetBulkWithGensOffSkipsSinglesAfterSuccessfulBulkWrite(t *testing.T) {
+func TestSetBatchWithGensOffSkipsSinglesAfterSuccessfulBatchWrite(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.BulkWriteSeed = BulkWriteSeedOff
+		o.BatchWriteSeed = BatchWriteSeedOff
 	})
 	defer closeTest(t, ctx, cc)
 
@@ -1832,26 +1954,26 @@ func TestSetBulkWithGensOffSkipsSinglesAfterSuccessfulBulkWrite(t *testing.T) {
 	}
 	observed := cc.SnapshotGens(ctx, keys)
 
-	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
 	for _, k := range keys {
 		if _, ok, _ := mp.Get(ctx, impl.singleKeys(k).Value.String()); ok {
-			t.Fatalf("BulkWriteSeedOff should not materialize single %q on successful bulk write", k)
+			t.Fatalf("BatchWriteSeedOff should not materialize single %q on successful batch write", k)
 		}
 	}
 
-	got, missing, err := cc.GetBulk(ctx, keys)
+	got, missing, err := cc.GetMany(ctx, keys)
 	if err != nil {
-		t.Fatalf("GetBulk: %v", err)
+		t.Fatalf("GetMany: %v", err)
 	}
 	if len(missing) != 0 || len(got) != len(items) {
-		t.Fatalf("GetBulk expected all hit, missing=%v got=%v", missing, got)
+		t.Fatalf("GetMany expected all hit, missing=%v got=%v", missing, got)
 	}
 }
 
-func TestSetBulkWithGensStrictSkipsSingleAfterBatchValidationRace(t *testing.T) {
+func TestSetBatchWithGensStrictSkipsSingleAfterBatchValidationRace(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	gs := &bumpAfterSnapshotManyGenStore{
@@ -1872,19 +1994,19 @@ func TestSetBulkWithGensStrictSkipsSingleAfterBatchValidationRace(t *testing.T) 
 	}
 	observed := cc.SnapshotGens(ctx, []string{key})
 
-	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
 	if _, ok, _ := mp.Get(ctx, impl.singleKeys(key).Value.String()); ok {
-		t.Fatalf("strict post-bulk seeding should skip stale singles after the race")
+		t.Fatalf("strict post-batch seeding should skip stale singles after the race")
 	}
 	if _, ok, err := cc.Get(ctx, key); err != nil || ok {
 		t.Fatalf("Get should miss when no checked single landed, ok=%v err=%v", ok, err)
 	}
 }
 
-func TestSetBulkWithGensFastStaleSingleSelfHealsAfterBatchValidationRace(t *testing.T) {
+func TestSetBatchWithGensFastStaleSingleSelfHealsAfterBatchValidationRace(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	gs := &bumpAfterSnapshotManyGenStore{
@@ -1893,7 +2015,7 @@ func TestSetBulkWithGensFastStaleSingleSelfHealsAfterBatchValidationRace(t *test
 	}
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
 		o.GenStore = gs
-		o.BulkWriteSeed = BulkWriteSeedFast
+		o.BatchWriteSeed = BatchWriteSeedFast
 	})
 	defer closeTest(t, ctx, cc)
 
@@ -1906,8 +2028,8 @@ func TestSetBulkWithGensFastStaleSingleSelfHealsAfterBatchValidationRace(t *test
 	}
 	observed := cc.SnapshotGens(ctx, []string{key})
 
-	if err := cc.SetBulkWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
 	raw, ok, err := mp.Get(ctx, impl.singleKeys(key).Value.String())
@@ -1930,8 +2052,8 @@ func TestSetBulkWithGensFastStaleSingleSelfHealsAfterBatchValidationRace(t *test
 	}
 }
 
-// TestBulkOrderInsensitiveHit: Same set, different order → same bulk key, bulk hit.
-func TestBulkOrderInsensitiveHit(t *testing.T) {
+// TestBatchOrderInsensitiveHit: Same set, different order → same batch key, batch hit.
+func TestBatchOrderInsensitiveHit(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, nil)
@@ -1939,26 +2061,26 @@ func TestBulkOrderInsensitiveHit(t *testing.T) {
 
 	impl := mustImpl(t, cc)
 
-	// Write a bulk for {u1,u3,u4}
+	// Write a batch for {u1,u3,u4}
 	items := map[string]user{
 		"u1": {ID: "u1", Name: "A"},
 		"u3": {ID: "u3", Name: "B"},
 		"u4": {ID: "u4", Name: "C"},
 	}
 	snap := cc.SnapshotGens(ctx, []string{"u1", "u3", "u4"})
-	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, snap, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
-	// Remove singles so GetBulk must rely on the bulk entry
+	// Remove singles so GetMany must rely on the batch entry
 	for k := range items {
 		_ = impl.provider.Del(ctx, impl.singleKeys(k).Value.String())
 	}
 
-	// Request same set, different order → should hit bulk, no missing
-	got, missing, err := cc.GetBulk(ctx, []string{"u3", "u1", "u4"})
+	// Request same set, different order → should hit batch, no missing
+	got, missing, err := cc.GetMany(ctx, []string{"u3", "u1", "u4"})
 	if err != nil {
-		t.Fatalf("GetBulk: %v", err)
+		t.Fatalf("GetMany: %v", err)
 	}
 	if len(missing) != 0 {
 		t.Fatalf("expected no missing, got %v", missing)
@@ -1967,21 +2089,21 @@ func TestBulkOrderInsensitiveHit(t *testing.T) {
 		t.Fatalf("expected 3 values, got %d (%v)", len(got), got)
 	}
 
-	// Bulk should remain (valid hit)
-	foundBulk := false
+	// Batch should remain (valid hit)
+	foundBatch := false
 	for k := range mp.m {
-		if strings.HasPrefix(k, bulkValuePrefix("user")) {
-			foundBulk = true
+		if strings.HasPrefix(k, batchValuePrefix("user")) {
+			foundBatch = true
 			break
 		}
 	}
-	if !foundBulk {
-		t.Fatalf("expected bulk entry to remain after valid hit")
+	if !foundBatch {
+		t.Fatalf("expected batch entry to remain after valid hit")
 	}
 }
 
-// TestBulkDuplicateRequestHit: Request has duplicates → still hits unique-set bulk.
-func TestBulkDuplicateRequestHit(t *testing.T) {
+// TestBatchDuplicateRequestHit: Request has duplicates → still hits unique-set batch.
+func TestBatchDuplicateRequestHit(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, nil)
@@ -1989,27 +2111,27 @@ func TestBulkDuplicateRequestHit(t *testing.T) {
 
 	impl := mustImpl(t, cc)
 
-	// Write a bulk for {u1,u3,u4}
+	// Write a batch for {u1,u3,u4}
 	items := map[string]user{
 		"u1": {ID: "u1", Name: "A"},
 		"u3": {ID: "u3", Name: "B"},
 		"u4": {ID: "u4", Name: "C"},
 	}
 	snap := cc.SnapshotGens(ctx, []string{"u1", "u3", "u4"})
-	if err := cc.SetBulkWithGens(ctx, items, snap, 0); err != nil {
-		t.Fatalf("SetBulkWithGens: %v", err)
+	if err := cc.SetBatchWithGens(ctx, items, snap, 0); err != nil {
+		t.Fatalf("SetBatchWithGens: %v", err)
 	}
 
-	// Remove singles so GetBulk must rely on the bulk entry
+	// Remove singles so GetMany must rely on the batch entry
 	for k := range items {
 		_ = impl.provider.Del(ctx, impl.singleKeys(k).Value.String())
 	}
 
-	// Request contains duplicates → should still hit the same bulk key
+	// Request contains duplicates → should still hit the same batch key
 	req := []string{"u1", "u3", "u3", "u4"}
-	got, missing, err := cc.GetBulk(ctx, req)
+	got, missing, err := cc.GetMany(ctx, req)
 	if err != nil {
-		t.Fatalf("GetBulk dup: %v", err)
+		t.Fatalf("GetMany dup: %v", err)
 	}
 	if len(missing) != 0 {
 		t.Fatalf("expected no missing for dup request, got %v", missing)
@@ -2019,8 +2141,8 @@ func TestBulkDuplicateRequestHit(t *testing.T) {
 	}
 }
 
-// TestBulkKeyCanonicalization: equal sets (order/dups ignored) produce same bulk key.
-func TestBulkKeyCanonicalization(t *testing.T) {
+// TestBatchKeyCanonicalization: equal sets (order/dups ignored) produce same batch key.
+func TestBatchKeyCanonicalization(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, nil)
@@ -2028,16 +2150,16 @@ func TestBulkKeyCanonicalization(t *testing.T) {
 
 	impl := mustImpl(t, cc)
 
-	k1, err := impl.bulkKeySorted(uniqSorted([]string{"u3", "u1", "u4"}))
+	k1, err := impl.batchKeySorted(uniqSorted([]string{"u3", "u1", "u4"}))
 	if err != nil {
-		t.Fatalf("bulkKeySorted k1: %v", err)
+		t.Fatalf("batchKeySorted k1: %v", err)
 	}
-	k2, err := impl.bulkKeySorted(uniqSorted([]string{"u1", "u3", "u3", "u4"}))
+	k2, err := impl.batchKeySorted(uniqSorted([]string{"u1", "u3", "u3", "u4"}))
 	if err != nil {
-		t.Fatalf("bulkKeySorted k2: %v", err)
+		t.Fatalf("batchKeySorted k2: %v", err)
 	}
 	if k1 != k2 {
-		t.Fatalf("bulk keys differ for equivalent sets: %q vs %q", k1, k2)
+		t.Fatalf("batch keys differ for equivalent sets: %q vs %q", k1, k2)
 	}
 }
 
@@ -2057,55 +2179,55 @@ func TestWireDecodeSingleRejectsTrailing(t *testing.T) {
 	}
 }
 
-// DecodeBulk must reject trailing bytes (strict framing).
-func TestWireDecodeBulkRejectsTrailing(t *testing.T) {
-	enc, err := wire.EncodeBulk([]wire.BulkItem{
+// DecodeBatch must reject trailing bytes (strict framing).
+func TestWireDecodeBatchRejectsTrailing(t *testing.T) {
+	enc, err := wire.EncodeBatch([]wire.BatchItem{
 		{Key: "k", Gen: 1, Payload: []byte("v")},
 	})
 	if err != nil {
-		t.Fatalf("EncodeBulk: %v", err)
+		t.Fatalf("EncodeBatch: %v", err)
 	}
 	enc = append(enc, 0xBE, 0xEF)
-	if _, err := wire.DecodeBulk(enc); err == nil {
-		t.Fatalf("DecodeBulk should reject trailing bytes")
+	if _, err := wire.DecodeBatch(enc); err == nil {
+		t.Fatalf("DecodeBatch should reject trailing bytes")
 	}
 }
 
-// EncodeBulk should error on invalid key lengths (0 and > 0xFFFF),
+// EncodeBatch should error on invalid key lengths (0 and > 0xFFFF),
 // and succeed on boundary length 0xFFFF.
-func TestEncodeBulkKeyLengthValidation(t *testing.T) {
+func TestEncodeBatchKeyLengthValidation(t *testing.T) {
 	// Empty key -> error
-	if _, err := wire.EncodeBulk([]wire.BulkItem{
+	if _, err := wire.EncodeBatch([]wire.BatchItem{
 		{Key: "", Gen: 1, Payload: []byte("x")},
 	}); err == nil {
-		t.Fatalf("EncodeBulk should error on empty key")
+		t.Fatalf("EncodeBatch should error on empty key")
 	}
 
 	// Too long key (65536) -> error
 	longKey := strings.Repeat("a", 0x10000)
-	if _, err := wire.EncodeBulk([]wire.BulkItem{
+	if _, err := wire.EncodeBatch([]wire.BatchItem{
 		{Key: longKey, Gen: 1, Payload: []byte("x")},
 	}); err == nil {
-		t.Fatalf("EncodeBulk should error on key length > 0xFFFF")
+		t.Fatalf("EncodeBatch should error on key length > 0xFFFF")
 	}
 
 	// Boundary (65535) -> ok
 	boundaryKey := strings.Repeat("b", 0xFFFF)
-	if _, err := wire.EncodeBulk([]wire.BulkItem{
+	if _, err := wire.EncodeBatch([]wire.BatchItem{
 		{Key: boundaryKey, Gen: 1, Payload: []byte("x")},
 	}); err != nil {
-		t.Fatalf("EncodeBulk should succeed at 0xFFFF key length, got err: %v", err)
+		t.Fatalf("EncodeBatch should succeed at 0xFFFF key length, got err: %v", err)
 	}
 }
 
-// Bogus n in bulk header should not preallocate huge capacity and should error cleanly.
-func TestDecodeBulkFakeNNotPrealloc(t *testing.T) {
+// Bogus n in batch header should not preallocate huge capacity and should error cleanly.
+func TestDecodeBatchFakeNNotPrealloc(t *testing.T) {
 	var buf bytes.Buffer
 	// magic "CASC"
 	buf.Write([]byte{'C', 'A', 'S', 'C'})
 	// version
 	buf.WriteByte(1)
-	// kind bulk
+	// kind batch
 	buf.WriteByte(2)
 	// n = 0xFFFFFFFF
 	var u4 [4]byte
@@ -2113,8 +2235,8 @@ func TestDecodeBulkFakeNNotPrealloc(t *testing.T) {
 	buf.Write(u4[:])
 	// no items
 
-	if _, err := wire.DecodeBulk(buf.Bytes()); err == nil {
-		t.Fatalf("DecodeBulk should fail on wrong n with insufficient bytes")
+	if _, err := wire.DecodeBatch(buf.Bytes()); err == nil {
+		t.Fatalf("DecodeBatch should fail on wrong n with insufficient bytes")
 	}
 }
 
@@ -2160,7 +2282,7 @@ func TestSelfHealOnGenMismatchSingle(t *testing.T) {
 	}
 }
 
-func TestBulkValidTable(t *testing.T) {
+func TestBatchRejectReasonFreshnessChecks(t *testing.T) {
 	ctx := context.Background()
 
 	newImpl := func(t *testing.T) *cache[user] {
@@ -2188,17 +2310,17 @@ func TestBulkValidTable(t *testing.T) {
 			bumpTo(impl, k, 1)
 		}
 
-		items := []wire.BulkItem{
+		items := []wire.BatchItem{
 			{Key: "a", Gen: 1, Payload: nil},
 			{Key: "b", Gen: 1, Payload: nil},
 			{Key: "c", Gen: 1, Payload: nil},
 		}
-		if !impl.bulkValid(ctx, keys, items) {
-			t.Fatalf("bulkValid should be true for fresh members")
+		if reason := impl.batchRejectReason(ctx, keys, items); reason != "" {
+			t.Fatalf("batchRejectReason = %q, want empty for fresh members", reason)
 		}
 	})
 
-	t.Run("missing_member_in_bulk", func(t *testing.T) {
+	t.Run("missing_member_in_batch", func(t *testing.T) {
 		impl := newImpl(t)
 		keys := []string{"a", "b", "c"}
 
@@ -2208,12 +2330,12 @@ func TestBulkValidTable(t *testing.T) {
 		}
 
 		// omit "b" from items
-		items := []wire.BulkItem{
+		items := []wire.BatchItem{
 			{Key: "a", Gen: 1, Payload: nil},
 			{Key: "c", Gen: 1, Payload: nil},
 		}
-		if impl.bulkValid(ctx, keys, items) {
-			t.Fatalf("bulkValid should be false when a requested member is missing")
+		if reason := impl.batchRejectReason(ctx, keys, items); reason != BatchRejectReasonInvalidOrStale {
+			t.Fatalf("batchRejectReason = %q, want %q when a requested member is missing", reason, BatchRejectReasonInvalidOrStale)
 		}
 	})
 
@@ -2227,13 +2349,13 @@ func TestBulkValidTable(t *testing.T) {
 		}
 
 		// Make "b" stale by putting Gen=0 (current is 1)
-		items := []wire.BulkItem{
+		items := []wire.BatchItem{
 			{Key: "a", Gen: 1, Payload: nil},
 			{Key: "b", Gen: 0, Payload: nil}, // stale
 			{Key: "c", Gen: 1, Payload: nil},
 		}
-		if impl.bulkValid(ctx, keys, items) {
-			t.Fatalf("bulkValid should be false when any member is stale")
+		if reason := impl.batchRejectReason(ctx, keys, items); reason != BatchRejectReasonInvalidOrStale {
+			t.Fatalf("batchRejectReason = %q, want %q when any member is stale", reason, BatchRejectReasonInvalidOrStale)
 		}
 	})
 
@@ -2247,13 +2369,13 @@ func TestBulkValidTable(t *testing.T) {
 		}
 
 		// Include an extra "z" that isn't requested. Should be ignored.
-		items := []wire.BulkItem{
+		items := []wire.BatchItem{
 			{Key: "a", Gen: 1, Payload: nil},
 			{Key: "b", Gen: 1, Payload: nil},
 			{Key: "z", Gen: 999, Payload: nil}, // extra
 		}
-		if !impl.bulkValid(ctx, keys, items) {
-			t.Fatalf("bulkValid should be true; extras in bulk are ignored")
+		if reason := impl.batchRejectReason(ctx, keys, items); reason != "" {
+			t.Fatalf("batchRejectReason = %q, want empty when extras are ignored", reason)
 		}
 	})
 }
@@ -2308,6 +2430,86 @@ func TestSnapshotGensBehavior(t *testing.T) {
 			t.Fatalf("mixed: got %v want %v", got, want)
 		}
 	})
+}
+
+func TestNewUsesConfiguredKeyWriterForSetIfVersion(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	mp := newMemProvider()
+	keyAdapter := &recordingKeyAdapter{}
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.KeyWriter = keyAdapter
+	})
+	defer closeTest(t, ctx, cc)
+
+	key := "u:1"
+	value := user{ID: "1", Name: "Ada"}
+	result, err := cc.CAS.SetIfVersion(ctx, key, value, versionFromUint64(0), 5*time.Second)
+	if err != nil {
+		t.Fatalf("SetIfVersion: %v", err)
+	}
+	if result.Outcome != WriteOutcomeVersionMismatch {
+		t.Fatalf("SetIfVersion outcome = %q, want %q", result.Outcome, WriteOutcomeVersionMismatch)
+	}
+	if keyAdapter.setCalls != 1 {
+		t.Fatalf("SetIfVersion should call configured KeyWriter once, got %d", keyAdapter.setCalls)
+	}
+	if len(mp.m) != 0 {
+		t.Fatalf("provider should not be written directly when KeyWriter is configured")
+	}
+
+	impl := mustImpl(t, cc)
+	sk := impl.singleKeys(key)
+	if keyAdapter.lastVersionKey != toGenStoreKey(sk.Cache) {
+		t.Fatalf("version key mismatch: got %q want %q", keyAdapter.lastVersionKey, toGenStoreKey(sk.Cache))
+	}
+	if keyAdapter.lastValueKey != sk.Value.String() {
+		t.Fatalf("value key mismatch: got %q want %q", keyAdapter.lastValueKey, sk.Value.String())
+	}
+	if keyAdapter.lastExpected != 0 {
+		t.Fatalf("expected observed version 0, got %d", keyAdapter.lastExpected)
+	}
+	if len(keyAdapter.lastWireValue) == 0 {
+		t.Fatalf("expected encoded wire payload to be passed to KeyWriter")
+	}
+}
+
+func TestNewUsesConfiguredKeyInvalidatorForInvalidate(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	sentinel := errors.New("atomic invalidate failed")
+	keyAdapter := &recordingKeyAdapter{invalidateErr: sentinel}
+	cc := newTestCache(t, "user", newMemProvider(), func(o *Options[user]) {
+		o.KeyInvalidator = keyAdapter
+	})
+	defer closeTest(t, ctx, cc)
+
+	key := "u:invalidate"
+	err := cc.Invalidate(ctx, key)
+	if err == nil {
+		t.Fatal("Invalidate should return the KeyInvalidator error")
+	}
+	var invErr *InvalidateError
+	if !errors.As(err, &invErr) {
+		t.Fatalf("Invalidate error should wrap InvalidateError, got %T", err)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Invalidate error should wrap configured KeyInvalidator error, got %v", err)
+	}
+	if keyAdapter.invalidateCalls != 1 {
+		t.Fatalf("Invalidate should call configured KeyInvalidator once, got %d", keyAdapter.invalidateCalls)
+	}
+
+	impl := mustImpl(t, cc)
+	sk := impl.singleKeys(key)
+	if keyAdapter.lastVersionKey != toGenStoreKey(sk.Cache) {
+		t.Fatalf("version key mismatch: got %q want %q", keyAdapter.lastVersionKey, toGenStoreKey(sk.Cache))
+	}
+	if keyAdapter.lastValueKey != sk.Value.String() {
+		t.Fatalf("value key mismatch: got %q want %q", keyAdapter.lastValueKey, sk.Value.String())
+	}
 }
 
 // ==============================
@@ -2391,17 +2593,29 @@ func TestInvalidateBothFailReturnsError(t *testing.T) {
 	}
 }
 
-func TestInvalidateBumpFailDeleteOKNoError(t *testing.T) {
+func TestInvalidateBumpFailDeleteOKReturnsError(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
+	sentinel := errors.New("bump failed")
 
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.GenStore = &failingGenStore{bumpErr: errors.New("bump failed")}
+		o.GenStore = &failingGenStore{bumpErr: sentinel}
 	})
 	defer closeTest(t, ctx, cc)
 
-	if err := cc.Invalidate(ctx, "k2"); err != nil {
-		t.Fatalf("expected no error when bump fails but delete succeeds; got %v", err)
+	err := cc.Invalidate(ctx, "k2")
+	if err == nil {
+		t.Fatalf("expected error when bump fails, even if delete succeeds")
+	}
+	var ie *InvalidateError
+	if !errors.As(err, &ie) {
+		t.Fatalf("expected InvalidateError, got %T: %v", err, err)
+	}
+	if ie.DelErr != nil {
+		t.Fatalf("expected delete error to be nil, got %v", ie.DelErr)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected errors.Is(err, bumpErr) to be true")
 	}
 }
 

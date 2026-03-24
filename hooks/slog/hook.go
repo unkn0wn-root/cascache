@@ -15,8 +15,8 @@ import (
 // Options configures the slog-based Hooks.
 type Options struct {
 	// Sampling to avoid log floods; 0 or 1 = log every event.
-	SelfHealEvery   uint64
-	BulkRejectEvery uint64
+	SelfHealEvery    uint64
+	BatchRejectEvery uint64
 
 	// Optional key redactor. If nil, a short SHA-256 prefix is used.
 	Redact func(string) string
@@ -27,8 +27,8 @@ type Hooks struct {
 	l    *slog.Logger
 	opts Options
 
-	selfHealCtr   atomic.Uint64
-	bulkRejectCtr atomic.Uint64
+	selfHealCtr    atomic.Uint64
+	batchRejectCtr atomic.Uint64
 }
 
 var _ cascache.Hooks = (*Hooks)(nil)
@@ -63,23 +63,23 @@ func (h *Hooks) SelfHealSingle(storageKey string, reason cascache.SelfHealReason
 		"reason", string(reason))
 }
 
-func (h *Hooks) BulkRejected(ns string, requested int, reason cascache.BulkRejectReason) {
-	if h.l == nil || !sample(h.opts.BulkRejectEvery, &h.bulkRejectCtr) {
+func (h *Hooks) BatchRejected(ns string, requested int, reason cascache.BatchRejectReason) {
+	if h.l == nil || !sample(h.opts.BatchRejectEvery, &h.batchRejectCtr) {
 		return
 	}
-	h.l.Info("cascache.bulk_rejected",
+	h.l.Info("cascache.batch_rejected",
 		"ns", ns,
 		"requested", requested,
 		"reason", string(reason))
 }
 
-func (h *Hooks) ProviderSetRejected(storageKey string, isBulk bool) {
+func (h *Hooks) ProviderSetRejected(storageKey string, isBatch bool) {
 	if h.l == nil {
 		return
 	}
 	h.l.Warn("cascache.provider_set_rejected",
 		"key", h.redact(storageKey),
-		"is_bulk", isBulk)
+		"is_batch", isBatch)
 }
 
 func (h *Hooks) GenSnapshotError(count int, err error) {
@@ -110,10 +110,10 @@ func (h *Hooks) InvalidateOutage(key string, bumpErr, delErr error) {
 		"del_err", delErr)
 }
 
-func (h *Hooks) LocalGenWithBulk() {
+func (h *Hooks) LocalGenWithBatch() {
 	if h.l == nil {
 		return
 	}
-	h.l.Warn("cascache.local_gen_with_bulk",
-		"msg", "bulk enabled with local genstore; stale bulks possible in multi-replica")
+	h.l.Warn("cascache.local_gen_with_batch",
+		"msg", "batch enabled with local genstore; stale batches possible in multi-replica")
 }

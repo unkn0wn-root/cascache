@@ -1,12 +1,12 @@
 // Package wire contains the compact, versioned on-the-wire format used by cascache
 // to store values in the underlying Provider. It provides zero-copy decoders and
-// pre-sized encoders for both single entries and bulk entries.
+// pre-sized encoders for both single entries and batch entries.
 //
 // Encoding choices:
 //   - All integers are big-endian (network byte order).
 //   - A 4-byte ASCII magic ("CASC") allows quick format discrimination.
 //   - A 1-byte version enables forward/backward compatibility in place.
-//   - "kind" distinguishes single vs bulk payloads.
+//   - "kind" distinguishes single vs batch payloads.
 //   - The payload after the fixed header is codec-opaque ([]byte).
 //   - Decoders are written for bounds safety: every slice operation is preceded by
 //     length checks; on any mismatch they return ErrCorrupt.
@@ -15,7 +15,7 @@
 //     If you need to retain or mutate the payload beyond the frame’s lifetime,
 //     make your own copy.
 //   - Encode paths pre-compute capacity and bytes.Buffer.Grow to avoid realloc.
-//   - Bulk decode allocates exactly one string per item to materialize the key
+//   - Batch decode allocates exactly one string per item to materialize the key
 //     (stable map key semantics).
 //
 // Strict framing:
@@ -34,7 +34,7 @@ const (
 	// version is the wire-format version. Bump only on incompatible layout changes.
 	version       byte = 1
 	kindSingle         = 1
-	kindBulk           = 2
+	kindBatch          = 2
 	maxUint32Wire      = uint64(^uint32(0))
 )
 
@@ -115,25 +115,25 @@ func DecodeSingle(b []byte) (gen uint64, payload []byte, err error) {
 	return gen, b[off : off+vlen], nil
 }
 
-// BulkItem holds one member of a bulk-encoded set.
-type BulkItem struct {
+// BatchItem holds one member of a batch-encoded set.
+type BatchItem struct {
 	Key     string
 	Gen     uint64
 	Payload []byte
 }
 
-// EncodeBulk encodes a bulk set of items in a single value.
+// EncodeBatch encodes a batch set of items in a single value.
 //
 // Layout (big-endian):
 //
-//	magic(4) | ver(1) | kind(1=bulk) | n(u32)
+//	magic(4) | ver(1) | kind(1=batch) | n(u32)
 //	repeated n times:
 //	  keyLen(u16) | key(keyLen) | gen(u64) | vlen(u32) | payload(vlen)
 //
 // Returns an error if item count or payload lengths exceed uint32, or if any
 // key length is 0 or > 65535 (u16).
-func EncodeBulk(items []BulkItem) ([]byte, error) {
-	n, err := checkedUint32(uint64(len(items)), "bulk item count")
+func EncodeBatch(items []BatchItem) ([]byte, error) {
+	n, err := checkedUint32(uint64(len(items)), "batch item count")
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +156,7 @@ func EncodeBulk(items []BulkItem) ([]byte, error) {
 	// header
 	buf.Write(magic4[:])
 	buf.WriteByte(version)
-	buf.WriteByte(kindBulk)
+	buf.WriteByte(kindBatch)
 
 	var u8 [8]byte
 	var u4 [4]byte
@@ -185,15 +185,15 @@ func EncodeBulk(items []BulkItem) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// DecodeBulk parses a bulk entry into items.
+// DecodeBatch parses a batch entry into items.
 // Each item’s Payload is a zero-copy subslice of b and must be treated as read-only.
 //
 // For each item, Payload is a zero-copy subslice of b. Key is converted to a
 // string (one allocation per item). Duplicate keys in the stored items are
 // allowed; the last occurrence wins.
-func DecodeBulk(b []byte) ([]BulkItem, error) {
+func DecodeBatch(b []byte) ([]BatchItem, error) {
 	const hdr = 4 + 1 + 1 + 4
-	if len(b) < hdr || !hasMagic(b) || b[4] != version || b[5] != kindBulk {
+	if len(b) < hdr || !hasMagic(b) || b[4] != version || b[5] != kindBatch {
 		return nil, ErrCorrupt
 	}
 
@@ -215,7 +215,7 @@ func DecodeBulk(b []byte) ([]BulkItem, error) {
 	}
 
 	capHint := min(n, maxPlausible)
-	items := make([]BulkItem, 0, capHint)
+	items := make([]BatchItem, 0, capHint)
 
 	for range n {
 		// keyLen
@@ -255,7 +255,7 @@ func DecodeBulk(b []byte) ([]BulkItem, error) {
 		payload := b[off : off+vlen]
 		off += vlen
 
-		items = append(items, BulkItem{
+		items = append(items, BatchItem{
 			Key:     string(keyBytes), // one expected alloc per item
 			Gen:     gen,
 			Payload: payload,

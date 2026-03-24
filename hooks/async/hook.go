@@ -6,25 +6,27 @@
 //
 //	"github.com/unkn0wn-root/cascache"
 //	"github.com/unkn0wn-root/cascache/codec"
-//	"github.com/unkn0wn-root/cascache/genstore"
 //	"github.com/unkn0wn-root/cascache/hooks/async"
 //	"github.com/unkn0wn-root/cascache/hooks/slog"
+//	cascacheredis "github.com/unkn0wn-root/cascache/redis"
 //
 // )
 //
 //	raw := sloghook.New(slog.Default(), sloghook.Options{
 //	    SelfHealEvery:   10, // sample logs: ~every 10th self-heal
-//	    BulkRejectEvery: 1,  // log every bulk rejection
+//	    BatchRejectEvery: 1,  // log every batch rejection
 //	})
 //
 // hooks := asynchook.New(raw, 1, 1000) // 1 worker; queue 1000 events
 // defer hooks.Close()
 //
+// sharedGenStore, _ := cascacheredis.NewGenStore(rdb)
+//
 //	cache, _ := cascache.New[User](cascache.Options[User]{
 //	    Namespace: "app:prod:user",
 //	    Provider:  provider,
 //	    Codec:     codec.JSON[User]{},
-//	    GenStore:  genstore.NewRedisGenStoreWithTTL(rdb, 24*time.Hour),
+//	    GenStore:  sharedGenStore,
 //	    Hooks:     hooks, // or `raw` if you don’t want async
 //	})
 package asynchook
@@ -97,19 +99,27 @@ func (h *Hooks) try(f func()) {
 func (h *Hooks) SelfHealSingle(k string, r cascache.SelfHealReason) {
 	h.try(func() { h.inner.SelfHealSingle(k, r) })
 }
+
 func (h *Hooks) GenBumpError(k genstore.CacheKey, err error) {
 	h.try(func() { h.inner.GenBumpError(k, err) })
 }
-func (h *Hooks) LocalGenWithBulk() { h.try(func() { h.inner.LocalGenWithBulk() }) }
-func (h *Hooks) BulkRejected(ns string, n int, r cascache.BulkRejectReason) {
-	h.try(func() { h.inner.BulkRejected(ns, n, r) })
+
+func (h *Hooks) LocalGenWithBatch() {
+	h.try(func() { h.inner.LocalGenWithBatch() })
 }
+
+func (h *Hooks) BatchRejected(ns string, n int, r cascache.BatchRejectReason) {
+	h.try(func() { h.inner.BatchRejected(ns, n, r) })
+}
+
 func (h *Hooks) ProviderSetRejected(k string, b bool) {
 	h.try(func() { h.inner.ProviderSetRejected(k, b) })
 }
+
 func (h *Hooks) GenSnapshotError(n int, err error) {
 	h.try(func() { h.inner.GenSnapshotError(n, err) })
 }
+
 func (h *Hooks) InvalidateOutage(k string, be, de error) {
 	h.try(func() { h.inner.InvalidateOutage(k, be, de) })
 }

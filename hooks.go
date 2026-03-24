@@ -11,24 +11,24 @@ import "github.com/unkn0wn-root/cascache/genstore"
 //   - GenBumpError: canonical genstore.CacheKey identity.
 type Hooks interface {
 	SelfHealSingle(storageKey string, reason SelfHealReason)
-	BulkRejected(namespace string, requested int, reason BulkRejectReason)
-	ProviderSetRejected(storageKey string, isBulk bool)
+	BatchRejected(namespace string, requested int, reason BatchRejectReason)
+	ProviderSetRejected(storageKey string, isBatch bool)
 	GenSnapshotError(count int, err error)
 	GenBumpError(cacheKey genstore.CacheKey, err error)
 	InvalidateOutage(key string, bumpErr, delErr error)
-	LocalGenWithBulk()
+	LocalGenWithBatch()
 }
 
 // NopHooks is a default no-op.
 type NopHooks struct{}
 
-func (NopHooks) SelfHealSingle(string, SelfHealReason)      {}
-func (NopHooks) BulkRejected(string, int, BulkRejectReason) {}
-func (NopHooks) ProviderSetRejected(string, bool)           {}
-func (NopHooks) GenSnapshotError(int, error)                {}
-func (NopHooks) GenBumpError(genstore.CacheKey, error)      {}
-func (NopHooks) InvalidateOutage(string, error, error)      {}
-func (NopHooks) LocalGenWithBulk()                          {}
+func (NopHooks) SelfHealSingle(string, SelfHealReason)        {}
+func (NopHooks) BatchRejected(string, int, BatchRejectReason) {}
+func (NopHooks) ProviderSetRejected(string, bool)             {}
+func (NopHooks) GenSnapshotError(int, error)                  {}
+func (NopHooks) GenBumpError(genstore.CacheKey, error)        {}
+func (NopHooks) InvalidateOutage(string, error, error)        {}
+func (NopHooks) LocalGenWithBatch()                           {}
 
 // Multi returns a Hooks implementation that fans out to all provided hooks
 // in order. Nil entries are silently skipped. Panics from any hook propagate
@@ -71,9 +71,9 @@ func (m multiHooks) SelfHealSingle(k string, r SelfHealReason) {
 	}
 }
 
-func (m multiHooks) BulkRejected(ns string, n int, r BulkRejectReason) {
+func (m multiHooks) BatchRejected(ns string, n int, r BatchRejectReason) {
 	for _, h := range m {
-		h.BulkRejected(ns, n, r)
+		h.BatchRejected(ns, n, r)
 	}
 }
 
@@ -101,8 +101,8 @@ func (m multiHooks) InvalidateOutage(k string, be, de error) {
 	}
 }
 
-func (m multiHooks) LocalGenWithBulk() {
+func (m multiHooks) LocalGenWithBatch() {
 	for _, h := range m {
-		h.LocalGenWithBulk()
+		h.LocalGenWithBatch()
 	}
 }
