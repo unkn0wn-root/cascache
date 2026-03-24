@@ -1,5 +1,10 @@
 # CasCache
 
+> [!WARNING]
+> This README documents `v2`, which is a complete rewrite of CasCache.
+> It is a breaking change to the public API and should be treated as a migration, not a drop-in upgrade from `v1`.
+> If you are running `v1` in production today, stay on `v1` until you have planned, tested, and validated the move to `v2`.
+
 `cascache` is a cache library for applications/backends where invalidation is part of correctness, not just best-effort cleanup.
 
 Most caches are fine at storing values, but they do not solve one of the hardest cache bugs: a request can read old data, another request can update the source of truth and invalidate the cache, and then the first request can arrive late and put the old value back.
@@ -20,6 +25,34 @@ The effect of this is:
 - stale writers do not put old data back into the cache
 - version-store trouble degrades to misses or skipped writes instead of "maybe stale"
 - TTL stays an eviction policy, not the thing that makes freshness safe
+
+## Moving from v1 to v2
+
+> [!IMPORTANT]
+> `v2` requires a migration from `v1`.
+> Do not treat this as a drop-in upgrade.
+> Re-check your topology, update caller code to the `v2` API and validate behavior.
+
+`v2` is not a compatibility release. The cache internals, naming, Redis integration shape and the API were completely redesigned.
+
+If you are coming from `v1`, assume you will need to update code, tests, and rollout plans.
+
+What to do:
+
+1. Do not upgrade blindly. Keep production pinned to `v1` until your migration is ready.
+2. Recheck your topology choice. In `v2`, the recommended Redis entry point is `cascache/redis.New(...)`, while `cascache/redis.NewGenStore(...)` is for shared-generation setups where values stay outside Redis.
+3. Rewrite repository load paths around the `v2` CAS flow:
+   `SnapshotVersion` -> read source of truth -> `SetIfVersion` -> `Invalidate` after successful writes.
+4. Update multi-key call sites to the `v2`:
+   `GetMany`, `SnapshotVersions`, and `SetIfVersions`.
+5. Revisit any direct Redis wiring. In `v2`, Redis-specific pieces live under `cascache/redis`.
+
+What not to assume:
+
+- `v1` method names or wiring still exist
+- old Redis integration layout still applies
+- existing hooks, option names, or bulk/batch APIs are unchanged
+- a passing compile is enough to prove the migration is safe
 
 ## Why CasCache
 
