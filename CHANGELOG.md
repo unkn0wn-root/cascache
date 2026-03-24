@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [2.0.0](https://github.com/unkn0wn-root/cascache/compare/v1.4.2...v2.0.0) (2026-03-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* update readme about v2 release
+
+* update readme about v2 release ([f49e967](https://github.com/unkn0wn-root/cascache/commit/f49e9673f3e28178b2d3be396d8026af1ad91b84))
+
 ### [1.4.2](https://github.com/unkn0wn-root/cascache/compare/v1.4.1...v1.4.2) (2026-03-23)
 
 
