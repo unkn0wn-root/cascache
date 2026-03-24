@@ -3,7 +3,7 @@
 > [!WARNING]
 > This README documents `v2`, which is a complete rewrite of CasCache.
 > It is a breaking change to the public API and should be treated as a migration, not a drop-in upgrade from `v1`.
-> If you are running `v1` in production today, stay on `v1` until you have planned, tested, and validated the move to `v2`.
+> If you are running `v1` today, stay on `v1` until you have planned, tested, and validated the move to `v2`.
 
 `cascache` is a cache library for applications/backends where invalidation is part of correctness, not just best-effort cleanup.
 
@@ -17,11 +17,11 @@ The usual race usually looks like this:
 
 That race is easy to miss, and a plain `DEL` followed by a later `SET` does not prevent it. The cache has no memory that the key was invalidated after the stale reader started.
 
-CasCache is built around one idea: every logical key has a version. Readers return a cached value only if the stored version still matches the current one. Writers snapshot the version before reading the source of truth, then store only if that version is still current. After a successful write to the source of truth, `Invalidate` bumps the version so any older snapshot loses automatically.
+CasCache is built around one idea: every logical key has a version. Readers return a cached value only if the stored version still matches the current one. Writers snapshot the version before reading the source of truth, then store only if that version is still current. After a successful write to the source of truth, the caller must successfully run `Invalidate`; once that succeeds, older snapshots lose automatically.
 
 The effect of this is:
 
-- single-key reads do not serve values that have already been invalidated
+- after a successful invalidate, single-key reads do not serve cached values from an older version
 - stale writers do not put old data back into the cache
 - version-store trouble degrades to misses or skipped writes instead of "maybe stale"
 - TTL stays an eviction policy, not the thing that makes freshness safe
@@ -31,7 +31,7 @@ The effect of this is:
 > [!IMPORTANT]
 > `v2` requires a migration from `v1`.
 > Do not treat this as a drop-in upgrade.
-> Re-check your topology, update caller code to the `v2` API and validate behavior.
+> Update caller code to the `v2` API and validate.
 
 `v2` is not a compatibility release. The cache internals, naming, Redis integration shape and the API were completely redesigned.
 
@@ -39,24 +39,17 @@ If you are coming from `v1`, assume you will need to update code, tests, and rol
 
 What to do:
 
-1. Do not upgrade blindly. Keep production pinned to `v1` until your migration is ready.
-2. Recheck your topology choice. In `v2`, the recommended Redis entry point is `cascache/redis.New(...)`, while `cascache/redis.NewGenStore(...)` is for shared-generation setups where values stay outside Redis.
+1. Keep pinned to `v1` until your migration is ready.
+2. In `v2`, the recommended Redis entry point is `cascache/redis.New(...)`, while `cascache/redis.NewGenStore(...)` is for shared-generation setups where values stay outside Redis.
 3. Rewrite cache-backed read and write paths around the `v2` CAS flow:
    `SnapshotVersion` -> read source of truth -> `SetIfVersion` -> `Invalidate` after successful writes.
 4. Update multi-key call sites to the `v2`:
    `GetMany`, `SnapshotVersions`, and `SetIfVersions`.
 5. Revisit any direct Redis wiring. In `v2`, Redis-specific pieces live under `cascache/redis`.
 
-What not to assume:
-
-- `v1` method names or wiring still exist
-- old Redis integration layout still applies
-- existing hooks, option names, or bulk/batch APIs are unchanged
-- a passing compile is enough to prove the migration is safe
-
 ## Why CasCache
 
-CasCache exists for systems where "usually fresh" is not good enough. That includes data such as permissions, profiles, pricing, feature flags, inventory, or any other record where a successful write should take effect immediately from the cache's point of view.
+CasCache exists for systems where "usually fresh" is not good enough. That includes data such as permissions, profiles, pricing, feature flags, inventory, or any other record where a successful write followed by successful invalidate should take effect immediately from the cache's point of view.
 
 Common cache patterns still leave a stale-data window:
 
@@ -121,11 +114,11 @@ if err := writeToDB(ctx, key, updatedValue); err != nil {
 return cache.Invalidate(ctx, key)
 ```
 
-## Choosing right topology
+## Choosing the right topology
 
 Most confusion looking at this library can come from the Redis related constructors. The short rule is:
 
-- if you are unsure (recommend in multi-pod/container env.), use `cascache/redis.New(...)`
+- if you are unsure, and especially in multi-pod/container environments, use `cascache/redis.New(...)`
 - use `cascache/redis.NewGenStore(...)` only when values should stay outside Redis
 - treat `cascache/redis.NewProvider(...)` and `cascache/redis.NewKeyMutator(...)` as advanced composition APIs
 
@@ -252,7 +245,7 @@ func newUserCache() (cascache.CAS[User], error) {
 		Provider:   provider,
 		Codec:      codec.JSON[User]{},
 		DefaultTTL: 5 * time.Minute,
-		BatchTTL:    5 * time.Minute,
+		BatchTTL:   5 * time.Minute,
 	})
 }
 ```
@@ -334,7 +327,7 @@ func newSharedVersionCache() (cascache.CAS[User], error) {
 		Codec:      codec.JSON[User]{},
 		GenStore:   genStore,
 		DefaultTTL: 5 * time.Minute,
-		BatchTTL:    5 * time.Minute,
+		BatchTTL:   5 * time.Minute,
 	})
 }
 ```
@@ -367,7 +360,7 @@ func newRedisUserCache() (cascache.CAS[User], error) {
 		Client:      client,
 		Codec:       codec.JSON[User]{},
 		DefaultTTL:  5 * time.Minute,
-		BatchTTL:     5 * time.Minute,
+		BatchTTL:    5 * time.Minute,
 		CloseClient: true,
 	})
 }
@@ -438,6 +431,7 @@ If a guard rejects a value, CasCache deletes that cache entry and treats it as a
 
 ## Notes
 
+- Outside the full Redis topology, single-key writes are conditional but not performed as one atomic operation with the version store. Safety comes from version checks on read and conditional store-on-match behavior, not from one cross-system transaction.
 - `Get` does not return a single-key value whose stored version is no longer current.
 - `SetIfVersion` stores only when the observed version still matches.
 - `Invalidate` returns an error if the version bump fails.
