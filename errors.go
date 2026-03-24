@@ -3,19 +3,18 @@ package cascache
 import (
 	"errors"
 	"fmt"
-	"slices"
-	"strconv"
-	"strings"
 )
 
-// ErrMissingObservedGens identifies a SetBulkWithGens caller error where at least
-// one item key has no corresponding observed generation.
-var ErrMissingObservedGens = errors.New("missing observed generations")
-
-// ErrBulkSeedNeedsAdder identifies an invalid configuration where
-// BulkSeedIfMissing is requested with a provider that does not implement
+// ErrBatchReadSeedNeedsAdder identifies an invalid configuration where
+// BatchReadSeedIfMissing is requested with a provider that does not implement
 // Adder.
-var ErrBulkSeedNeedsAdder = errors.New("BulkSeedIfMissing requires Adder")
+var ErrBatchReadSeedNeedsAdder = errors.New("BatchReadSeedIfMissing requires Adder")
+
+// ErrLocalGenCleanupUnsupported identifies an invalid v2 configuration where
+// the built-in strict local generation store is asked to prune generations.
+// Generation cleanup can resurrect stale entries, so callers that need custom
+// retention must provide and own a custom GenStore explicitly.
+var ErrLocalGenCleanupUnsupported = errors.New("built-in local GenStore does not support cleanup or retention in v2")
 
 type InvalidateError struct {
 	Key     string
@@ -51,50 +50,24 @@ func (e *InvalidateError) Unwrap() []error {
 	}
 }
 
-// MissingObservedGensError reports which logical keys were missing observed generations.
-type MissingObservedGensError struct {
-	Missing []string
-}
-
-func (e *MissingObservedGensError) Error() string {
-	if e == nil || len(e.Missing) == 0 {
-		return ErrMissingObservedGens.Error()
-	}
-	quoted := make([]string, len(e.Missing))
-	for i, key := range e.Missing {
-		quoted[i] = strconv.Quote(key)
-	}
-	return fmt.Sprintf("%s for keys [%s]", ErrMissingObservedGens, strings.Join(quoted, ", "))
-}
-
-func (e *MissingObservedGensError) Unwrap() error {
-	return ErrMissingObservedGens
-}
-
-func newMissingObservedGensError(missing []string) *MissingObservedGensError {
-	cp := slices.Clone(missing)
-	slices.Sort(cp)
-	return &MissingObservedGensError{Missing: cp}
-}
-
 // Op identifies the logical cache operation that failed.
 type Op string
 
 const (
-	OpGet        Op = "get"
-	OpSet        Op = "set"
-	OpAdd        Op = "add"
-	OpSnapshot   Op = "snapshot"
-	OpInvalidate Op = "invalidate"
-	OpGetBulk    Op = "get_bulk"
-	OpSetBulk    Op = "set_bulk"
+	OpGet           Op = "get"
+	OpSet           Op = "set"
+	OpAdd           Op = "add"
+	OpSnapshot      Op = "snapshot"
+	OpInvalidate    Op = "invalidate"
+	OpGetMany       Op = "get_many"
+	OpSetIfVersions Op = "set_if_versions"
 )
 
 // OpError reports an operation failure and, when applicable,
 // the logical key that triggered it.
 type OpError struct {
 	Op  Op
-	Key string // empty for non-key specific failures such as bulk path failures
+	Key string // empty for non-key specific failures such as batch path failures
 
 	// Err is the underlying cause.
 	// Error panics if Err is nil.

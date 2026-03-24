@@ -47,6 +47,16 @@ func TestLocalSnapshotManyDoesNotMutateInput(t *testing.T) {
 	}
 }
 
+func TestNewStrictLocalGenStoreDisablesAutomaticCleanup(t *testing.T) {
+	s := NewStrictLocalGenStore()
+	if s.stopCh != nil {
+		t.Fatalf("strict local gen store should not start a cleanup goroutine")
+	}
+	if s.retention != 0 {
+		t.Fatalf("strict local gen store should not retain cleanup settings, got %v", s.retention)
+	}
+}
+
 func TestLocalCleanupPrunesOld(t *testing.T) {
 	ctx := context.Background()
 	s := NewLocalGenStore(0, time.Second) // retention=1s

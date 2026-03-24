@@ -6,22 +6,23 @@ import (
 	"encoding/hex"
 	"errors"
 	"math"
-	"sort"
 	"strconv"
 )
 
 var (
-	errBulkKeyPartTooLong   = errors.New("bulk key component exceeds uint32 framing limit")
-	errBulkKeyFrameTooLarge = errors.New("bulk key frame exceeds platform int capacity")
+	errBatchKeyPartTooLong   = errors.New("batch key component exceeds uint32 framing limit")
+	errBatchKeyFrameTooLarge = errors.New("batch key frame exceeds platform int capacity")
+	errBatchKeysNotSorted    = errors.New("batch keys must be sorted in ascending order")
+	errBatchKeysNotUnique    = errors.New("batch keys must be unique")
 )
 
 const (
-	rootPrefix        = "cas:v1:"
-	valueRoot         = rootPrefix + "val:"
-	genRoot           = rootPrefix + "gen:"
-	singleKind        = "s:"
-	bulkKind          = "b:"
-	maxBulkKeyPartLen = uint64(math.MaxUint32)
+	rootPrefix         = "cas:v2:"
+	valueRoot          = rootPrefix + "val:"
+	genRoot            = rootPrefix + "gen:"
+	singleKind         = "s:"
+	batchKind          = "b:"
+	maxBatchKeyPartLen = uint64(math.MaxUint32)
 )
 
 // CacheKey is the canonical single-key identity shared with the gen store.
@@ -44,73 +45,85 @@ type Single struct {
 	Value ValueKey
 }
 
-// Keyspace owns the v1 keyspace for one logical namespace.
+// Keyspace owns the v2 keyspace for one logical namespace.
 type Keyspace struct {
-	singleCachePrefix string
-	singleValuePrefix string
-	bulkValuePrefix   string
+	singlePrefix string
+	batchPrefix  string
 }
 
 // NewKeyspace precomputes the stable prefixes for one logical namespace.
 func NewKeyspace(namespace string) Keyspace {
-	framed := frameNamespace(namespace)
-	singleCachePrefix := singleKind + framed
+	fr := frameNamespace(namespace)
+	sp := singleKind + fr
 
 	return Keyspace{
-		singleCachePrefix: singleCachePrefix,
-		singleValuePrefix: valueRoot + singleCachePrefix,
-		bulkValuePrefix:   valueRoot + bulkKind + framed,
+		singlePrefix: sp,
+		batchPrefix:  valueRoot + batchKind + fr,
 	}
 }
 
+// SingleCacheKey returns the canonical identity for one logical key.
+// This is the key seen by the GenStore and by slot-tag derivation.
 func (s Keyspace) SingleCacheKey(userKey string) CacheKey {
-	return CacheKey(s.singleCachePrefix + userKey)
+	return CacheKey(s.singlePrefix + userKey)
 }
 
+// SingleValueKey returns the provider storage key for one logical key.
 func (s Keyspace) SingleValueKey(userKey string) ValueKey {
-	return ValueKey(s.singleValuePrefix + userKey)
+	return singleStorageKey(s.SingleCacheKey(userKey))
 }
 
+// Single returns both canonical keys for one logical key.
 func (s Keyspace) Single(userKey string) Single {
+	cacheKey := s.SingleCacheKey(userKey)
 	return Single{
-		Cache: s.SingleCacheKey(userKey),
-		Value: s.SingleValueKey(userKey),
+		Cache: cacheKey,
+		Value: singleStorageKey(cacheKey),
 	}
 }
 
+// GenStorageKey returns the backing storage key for a generation counter.
+// Single value keys and generation keys intentionally share the same Redis
+// hash tag so backend-native single-key scripts can target one cluster slot.
 func GenStorageKey(cacheKey CacheKey) string {
-	return genRoot + string(cacheKey)
+	return genRoot + slotPrefix(cacheKey) + string(cacheKey)
 }
 
-func (s Keyspace) BulkValue(keys []string) (ValueKey, error) {
-	sorted := make([]string, len(keys))
-	copy(sorted, keys)
-	sort.Strings(sorted)
-	return s.BulkValueSorted(sorted)
-}
-
-// BulkValueSorted returns the provider value key for a bulk entry.
-// sortedKeys must already be sorted in ascending order.
-func (s Keyspace) BulkValueSorted(sortedKeys []string) (ValueKey, error) {
+// BatchValueSorted returns the provider value key for a batch entry.
+// sortedKeys must already be sorted in ascending order and contain no duplicates.
+func (s Keyspace) BatchValueSorted(sortedKeys []string) (ValueKey, error) {
 	digest, err := digestSortedKeys(sortedKeys)
 	if err != nil {
 		return "", err
 	}
-	return ValueKey(s.bulkValuePrefix + digest), nil
+	return ValueKey(s.batchPrefix + digest), nil
 }
 
+// digestSortedKeys hashes a canonical sorted, duplicate-free logical key set.
+// Length framing preserves boundaries so ["ab", "c"] and ["a", "bc"] do not
+// collide before hashing.
 func digestSortedKeys(sortedKeys []string) (string, error) {
 	// exact buffer size: 4 bytes length + key bytes per key.
 	total := uint64(0)
-	for _, k := range sortedKeys {
+	for i, k := range sortedKeys {
+		if i > 0 {
+			prev := sortedKeys[i-1]
+			switch {
+			case k < prev:
+				return "", errBatchKeysNotSorted
+			case k == prev:
+				return "", errBatchKeysNotUnique
+			}
+		}
+
 		klen := uint64(len(k))
-		if klen > maxBulkKeyPartLen {
-			return "", errBulkKeyPartTooLong
+		if klen > maxBatchKeyPartLen {
+			return "", errBatchKeyPartTooLong
 		}
 		total += 4 + klen
 	}
 	if total > uint64(math.MaxInt) {
-		return "", errBulkKeyFrameTooLarge
+		return "", errBatchKeyFrameTooLarge
 	}
 
 	buf := make([]byte, int(total))
@@ -129,4 +142,22 @@ func digestSortedKeys(sortedKeys []string) (string, error) {
 
 func frameNamespace(ns string) string {
 	return strconv.Itoa(len(ns)) + ":" + ns + ":"
+}
+
+// singleStorageKey derives the provider value key for one canonical key.
+func singleStorageKey(cacheKey CacheKey) ValueKey {
+	return ValueKey(valueRoot + slotPrefix(cacheKey) + string(cacheKey))
+}
+
+// slotPrefix wraps the stable hash tag used to colocate related Redis keys.
+func slotPrefix(cacheKey CacheKey) string {
+	return "{" + slotTag(cacheKey) + "}:"
+}
+
+// slotTag derives the Redis Cluster hash tag from the canonical single-key
+// identity rather than the raw user key so namespace framing stays part of the
+// placement decision.
+func slotTag(cacheKey CacheKey) string {
+	sum := sha256.Sum256([]byte(cacheKey))
+	return hex.EncodeToString(sum[:16])
 }

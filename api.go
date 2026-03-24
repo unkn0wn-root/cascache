@@ -9,7 +9,40 @@ import (
 	pr "github.com/unkn0wn-root/cascache/provider"
 )
 
-type SetCostFunc func(key string, raw []byte, isBulk bool, bulkCount int) int64
+// KeyWriter is an optional backend-native fast path for single-key
+// compare-and-write operations.
+//
+// versionKey identifies the canonical generation tracked by the configured
+// GenStore. valueKey identifies the provider storage key for the encoded single
+// value entry. Implementations are responsible for coordinating those two keys
+// so SetIfVersion preserves the same freshness contract as the generic cache
+// path.
+//
+// The core cache still uses Provider and GenStore directly for reads, batch
+// validation, and version snapshots.
+type KeyWriter interface {
+	SetIfVersion(ctx context.Context, versionKey gen.CacheKey, valueKey string, expected uint64, wireValue []byte, ttl time.Duration) (stored bool, err error)
+}
+
+// KeyInvalidator is an optional backend-native fast path for single-key
+// invalidation.
+//
+// versionKey identifies the canonical generation tracked by the configured
+// GenStore. valueKey identifies the provider storage key for the encoded single
+// value entry. Implementations are responsible for coordinating those two keys
+// so Invalidate preserves the same contract as the generic cache
+// path.
+//
+// The core cache still uses Provider and GenStore directly for reads, batch
+// validation, and version snapshots.
+type KeyInvalidator interface {
+	Invalidate(ctx context.Context, versionKey gen.CacheKey, valueKey string) error
+}
+
+type KeyMutator interface {
+	KeyWriter
+	KeyInvalidator
+}
 
 // ReadGuardFunc can veto serving a decoded cache hit for a single logical key.
 // It is intended for critical paths that need an authoritative source check
@@ -19,68 +52,28 @@ type SetCostFunc func(key string, raw []byte, isBulk bool, bulkCount int) int64
 // is treated conservatively as a rejection and the caller receives a miss.
 type ReadGuardFunc[V any] func(ctx context.Context, key string, value V) (allow bool, err error)
 
-// BulkReadGuardFunc is the batch form of ReadGuardFunc for validated GetBulk hits.
+// BatchReadGuardFunc is the batch form of ReadGuardFunc for validated GetMany hits.
 // The input map contains only the requested logical keys that survived wire and
 // generation checks. Return the keys that failed validation. Any non-empty
-// result deletes the stored bulk entry because bulk values are stored as a
+// result deletes the stored batch entry because batch values are stored as a
 // single blob.
 //
-// If ReadGuard is also configured, GetBulk rechecks the rejected keys through
+// If ReadGuard is also configured, GetMany rechecks the rejected keys through
 // per-key fallback reads. Otherwise, rejected keys are treated as misses for
-// that GetBulk call so they cannot be served back from seeded singles.
-// Returning a key that was not present in values or returning an error is
-// treated conservatively as a guard failure.
-// Returning an error is treated conservatively as a bulk rejection.
-type BulkReadGuardFunc[V any] func(ctx context.Context, values map[string]V) (rejected map[string]struct{}, err error)
+// that GetMany call so they cannot be served back from seeded singles.
+type BatchReadGuardFunc[V any] func(ctx context.Context, values map[string]V) (rejected map[string]struct{}, err error)
 
-// BulkSeedMode controls whether a successful bulk read validated
-// members as individual single-key entries.
-// The zero/default value is BulkSeedOff so bulk hits stay read-only unless
-// the caller explicitly opts into warming singles.
-type BulkSeedMode uint8
-
-const (
-	// BulkSeedOff returns the bulk hit "as-is" and does not write singles.
-	BulkSeedOff BulkSeedMode = iota
-
-	// BulkSeedAll seeds singles after the bulk has already passed
-	// generation validation. No additional per-key generation lookup is done.
-	BulkSeedAll
-
-	// BulkSeedIfMissing seeds singles only when the provider supports
-	// conditional add/set-if-absent with native backend support or
-	// provider-level atomic coordination. Cache construction fails if the
-	// provider does not implement Adder.
-	BulkSeedIfMissing
-)
-
-// BulkWriteSeedMode controls how a successful SetBulkWithGens
-// write individual single-key entries.
+// SetCostFunc computes the provider cost used for a cache write.
 //
-// The zero/default value is BulkWriteSeedStrict, which routes each single
-// through SetWithGen again so the post-bulk seeding path preserves the same
-// per-key CAS recheck as standalone writes. Higher-throughput systems can opt
-// into BulkWriteSeedFast to reuse the validated bulk payloads directly, or
-// BulkWriteSeedOff to skip success path single seeding entirely.
-type BulkWriteSeedMode uint8
-
-const (
-	// BulkWriteSeedStrict seeds singles through SetWithGen after the bulk write
-	// has succeeded. Stricter CAS semantics of rechecking
-	// each key's generation immediately before the single write lands.
-	BulkWriteSeedStrict BulkWriteSeedMode = iota
-
-	// BulkWriteSeedFast seeds singles directly from the validated bulk payloads
-	// without a second generation lookup. This is faster but can allow stale
-	// singles to land if a generation changes between batch validation and the
-	// single writes.
-	BulkWriteSeedFast
-
-	// BulkWriteSeedOff skips single seeding after a successful bulk write. The
-	// bulk entry is still written, and fallback paths that skip or reject the
-	// bulk continue to seed singles best-effort through the checked CAS path.
-	BulkWriteSeedOff
-)
+// The returned value is passed through to Provider.Set (and Adder.Add when
+// applicable). Providers that use admission or weighted eviction can interpret
+// it as entry weight; providers that ignore cost may discard it.
+//
+// key is the provider storage key cascache is writing. raw is the fully encoded
+// wire value that will be stored. isBatch reports whether the write targets the
+// grouped batch-entry path rather than a single-key entry. memberCount is 1 for
+// single writes and the number of logical keys contained in a batch entry.
+type SetCostFunc func(key string, raw []byte, isBatch bool, memberCount int) int64
 
 // Cache is an alias for CAS so callers can write cascache.Cache[V] if preferred.
 type Cache[V any] = CAS[V]
@@ -94,23 +87,105 @@ type CAS[V any] interface {
 
 	// Single
 	Get(ctx context.Context, key string) (v V, ok bool, err error)
-	SetWithGen(ctx context.Context, key string, value V, observedGen uint64, ttl time.Duration) error
+	SnapshotVersion(ctx context.Context, key string) (Version, error)
+	SetIfVersion(ctx context.Context, key string, value V, version Version, ttl time.Duration) (WriteResult, error)
 	Invalidate(ctx context.Context, key string) error
 
-	// Bulk (order-agnostic return. Use your own ordering by keys slice)
-	GetBulk(ctx context.Context, keys []string) (values map[string]V, missing []string, err error)
-	SetBulkWithGens(ctx context.Context, items map[string]V, observedGens map[string]uint64, ttl time.Duration) error
-
-	// Error-aware generation snapshots for CAS writes.
-	// These return an error so the caller can decide whether to proceed.
-	TrySnapshotGen(ctx context.Context, key string) (uint64, error)
-	TrySnapshotGens(ctx context.Context, keys []string) (map[string]uint64, error)
-
-	// Best-effort generation snapshots.
-	// Failures are reported through Hooks and the generation falls back to zero.
-	SnapshotGen(ctx context.Context, key string) uint64
-	SnapshotGens(ctx context.Context, keys []string) map[string]uint64
+	// Batch (order-agnostic return. Use your own ordering by keys slice)
+	GetMany(ctx context.Context, keys []string) (values map[string]V, missing []string, err error)
+	SnapshotVersions(ctx context.Context, keys []string) (map[string]Version, error)
+	SetIfVersions(ctx context.Context, items []VersionedValue[V], ttl time.Duration) (BatchWriteResult, error)
 }
+
+// Version is per-key freshness token returned by the cache.
+// Treat it as a compare-only value and pass it back unchanged
+// to versioned write APIs.
+type Version struct {
+	raw uint64
+}
+
+func (v Version) Equal(other Version) bool {
+	return v.raw == other.raw
+}
+
+func (v Version) IsZero() bool {
+	return v.raw == 0
+}
+
+func versionFromUint64(v uint64) Version {
+	return Version{raw: v}
+}
+
+func (v Version) uint64() uint64 {
+	return v.raw
+}
+
+// WriteOutcome describes what happened during a versioned write attempt.
+type WriteOutcome string
+
+const (
+	WriteOutcomeStored           WriteOutcome = "stored"
+	WriteOutcomeVersionMismatch  WriteOutcome = "version_mismatch"
+	WriteOutcomeSnapshotError    WriteOutcome = "snapshot_error"
+	WriteOutcomeProviderRejected WriteOutcome = "provider_rejected"
+	WriteOutcomeDisabled         WriteOutcome = "disabled"
+)
+
+type WriteResult struct {
+	Outcome WriteOutcome
+}
+
+// Stored reports whether the write landed in the provider.
+func (r WriteResult) Stored() bool {
+	return r.Outcome == WriteOutcomeStored
+}
+
+// BatchWriteResult describes the result of a versioned write through the batch
+// entry path.
+type BatchWriteResult struct {
+	Outcome       WriteOutcome
+	SeededSingles bool
+}
+
+// Stored reports whether the batch entry landed in the provider.
+func (r BatchWriteResult) Stored() bool {
+	return r.Outcome == WriteOutcomeStored
+}
+
+// VersionedValue is the caller-facing unit for versioned multi-key writes.
+type VersionedValue[V any] struct {
+	Key     string
+	Value   V
+	Version Version
+}
+
+// BatchReadSeedMode controls whether a successful batch read validated
+// members as individual single-key entries.
+// The zero/default value is BatchReadSeedOff so batch hits stay read-only unless
+// the caller explicitly opts into warming singles.
+type BatchReadSeedMode uint8
+
+const (
+	BatchReadSeedOff BatchReadSeedMode = iota
+	BatchReadSeedAll
+	BatchReadSeedIfMissing
+)
+
+// BatchWriteSeedMode controls how a successful SetIfVersions
+// write individual single-key entries.
+//
+// The zero/default value is BatchWriteSeedStrict, which routes each single
+// through SetIfVersion again so the post-batch seeding path preserves the same
+// per-key CAS recheck as standalone writes. Higher-throughput systems can opt
+// into BatchWriteSeedFast to reuse the validated batch payloads directly, or
+// BatchWriteSeedOff to skip success path single seeding entirely.
+type BatchWriteSeedMode uint8
+
+const (
+	BatchWriteSeedStrict BatchWriteSeedMode = iota
+	BatchWriteSeedFast
+	BatchWriteSeedOff
+)
 
 // Options configures the CAS cache.
 // Namespace, Provider, and Codec are required.
@@ -119,29 +194,38 @@ type Options[V any] struct {
 	Provider  pr.Provider
 	Codec     c.Codec[V]
 
-	DefaultTTL      time.Duration // singles; 0 => 10m
-	BulkTTL         time.Duration // bulks; 0 => 10m
-	CleanupInterval time.Duration // 0 => 1h
-	GenRetention    time.Duration // 0 => 30d
-	Disabled        bool          // default false (enabled)
-	ComputeSetCost  SetCostFunc   // default 1
-	GenStore        gen.GenStore  // nil => LocalGenStore (in-process)
-	DisableBulk     bool          // default false => bulk enabled
-	ReadGuard       ReadGuardFunc[V]
-	BulkReadGuard   BulkReadGuardFunc[V]
-	// BulkSeed controls single-entry warming after successful GetBulk hits
-	// only. It does not affect how successful SetBulkWithGens writes seed
-	// singles; that behavior is controlled separately by BulkWriteSeed.
-	// BulkSeedIfMissing requires a provider with native or provider-level
+	DefaultTTL time.Duration // singles; 0 => 10m
+	BatchTTL   time.Duration // batches; 0 => 10m
+	// CleanupInterval and GenRetention are not used by the built-in v2 strict
+	// local GenStore. Supplying either without a custom GenStore returns an
+	// error because pruning generations can break CAS correctness.
+	CleanupInterval time.Duration
+	GenRetention    time.Duration
+	Disabled        bool         // default false (enabled)
+	ComputeSetCost  SetCostFunc  // default 1
+	GenStore        gen.GenStore // nil => LocalGenStore (in-process)
+	// KeyWriter is optional. When set, single-key SetIfVersion uses this
+	// backend-native path instead of the generic compare-then-write flow.
+	KeyWriter KeyWriter
+	// KeyInvalidator is optional. When set, single-key Invalidate uses this
+	// backend-native path instead of the generic bump-then-delete flow.
+	KeyInvalidator KeyInvalidator
+	DisableBatch   bool // default false => batch enabled
+	ReadGuard      ReadGuardFunc[V]
+	BatchReadGuard BatchReadGuardFunc[V]
+	// BatchReadSeed controls single-entry warming after successful GetMany hits
+	// only. It does not affect how successful SetIfVersions writes seed
+	// singles; that behavior is controlled separately by BatchWriteSeed.
+	// BatchReadSeedIfMissing requires a provider with native or provider-level
 	// atomic add-if-missing support.
-	BulkSeed BulkSeedMode
-	// BulkWriteSeed controls single-entry materialization after a successful
-	// SetBulkWithGens bulk write only. The default is BulkWriteSeedStrict,
-	// which re-enters SetWithGen per key to preserve stricter CAS semantics.
-	// It does not affect fallback single seeding when the bulk write is
-	// skipped, rejected, or bulk mode is disabled.
-	BulkWriteSeed BulkWriteSeedMode
-	Hooks         Hooks
+	BatchReadSeed BatchReadSeedMode
+	// BatchWriteSeed controls single-entry materialization after a successful
+	// SetIfVersions batch write only. The default is BatchWriteSeedStrict,
+	// which re-enters SetIfVersion per key to preserve stricter CAS semantics.
+	// It does not affect fallback single seeding when the batch write is
+	// skipped, rejected, or batch mode is disabled.
+	BatchWriteSeed BatchWriteSeedMode
+	Hooks          Hooks
 }
 
 func New[V any](opts Options[V]) (CAS[V], error) {

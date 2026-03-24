@@ -26,11 +26,11 @@ func mustEncodeSingle(t *testing.T, gen uint64, payload []byte) []byte {
 	return b
 }
 
-func mustDecodeBulk(t *testing.T, b []byte) []BulkItem {
+func mustDecodeBatch(t *testing.T, b []byte) []BatchItem {
 	t.Helper()
-	it, err := DecodeBulk(b)
+	it, err := DecodeBatch(b)
 	if err != nil {
-		t.Fatalf("DecodeBulk error: %v", err)
+		t.Fatalf("DecodeBatch error: %v", err)
 	}
 	return it
 }
@@ -83,7 +83,7 @@ func TestSingleCorruptHeadersAndLengths(t *testing.T) {
 
 	// wrong kind
 	badKind := append([]byte(nil), enc...)
-	badKind[5] = kindBulk
+	badKind[5] = kindBatch
 	if _, _, err := DecodeSingle(badKind); err == nil {
 		t.Fatalf("expected error on bad kind")
 	}
@@ -140,8 +140,8 @@ func TestCheckedUint32(t *testing.T) {
 	}
 }
 
-func TestBulkRoundTrip(t *testing.T) {
-	cases := [][]BulkItem{
+func TestBatchRoundTrip(t *testing.T) {
+	cases := [][]BatchItem{
 		nil, // n=0
 		{{Key: "a", Gen: 1, Payload: []byte("x")}},
 		{
@@ -156,11 +156,11 @@ func TestBulkRoundTrip(t *testing.T) {
 		},
 	}
 	for _, items := range cases {
-		enc, err := EncodeBulk(items)
+		enc, err := EncodeBatch(items)
 		if err != nil {
-			t.Fatalf("EncodeBulk error: %v", err)
+			t.Fatalf("EncodeBatch error: %v", err)
 		}
-		got := mustDecodeBulk(t, enc)
+		got := mustDecodeBatch(t, enc)
 		if len(got) != len(items) {
 			t.Fatalf("len mismatch: got %d want %d", len(got), len(items))
 		}
@@ -172,27 +172,27 @@ func TestBulkRoundTrip(t *testing.T) {
 	}
 }
 
-func TestBulkRejectsTrailingBytes(t *testing.T) {
-	enc, err := EncodeBulk([]BulkItem{{Key: "k", Gen: 1, Payload: []byte("v")}})
+func TestBatchRejectsTrailingBytes(t *testing.T) {
+	enc, err := EncodeBatch([]BatchItem{{Key: "k", Gen: 1, Payload: []byte("v")}})
 	if err != nil {
-		t.Fatalf("EncodeBulk: %v", err)
+		t.Fatalf("EncodeBatch: %v", err)
 	}
 	enc = append(enc, 0xBE, 0xEF)
-	if _, err := DecodeBulk(enc); err == nil {
+	if _, err := DecodeBatch(enc); err == nil {
 		t.Fatalf("expected error on trailing bytes")
 	}
 }
 
-func TestBulkWrongAndTruncation(t *testing.T) {
+func TestBatchWrongAndTruncation(t *testing.T) {
 	// Wrong n (very large) with no items -> must error, not panic.
 	var buf bytes.Buffer
 	buf.Write([]byte{'C', 'A', 'S', 'C'})
 	buf.WriteByte(version)
-	buf.WriteByte(kindBulk)
+	buf.WriteByte(kindBatch)
 	var u4 [4]byte
 	binary.BigEndian.PutUint32(u4[:], ^uint32(0)) // n = 0xFFFFFFFF
 	buf.Write(u4[:])
-	if _, err := DecodeBulk(buf.Bytes()); err == nil {
+	if _, err := DecodeBatch(buf.Bytes()); err == nil {
 		t.Fatalf("expected error on bogus n with insufficient bytes")
 	}
 
@@ -200,55 +200,55 @@ func TestBulkWrongAndTruncation(t *testing.T) {
 	buf.Reset()
 	buf.Write([]byte{'C', 'A', 'S', 'C'})
 	buf.WriteByte(version)
-	buf.WriteByte(kindBulk)
+	buf.WriteByte(kindBatch)
 	binary.BigEndian.PutUint32(u4[:], 1)
 	buf.Write(u4[:])
-	if _, err := DecodeBulk(buf.Bytes()); err == nil {
+	if _, err := DecodeBatch(buf.Bytes()); err == nil {
 		t.Fatalf("expected error on truncated item list")
 	}
 }
 
-func TestBulkKeyLengthValidation(t *testing.T) {
+func TestBatchKeyLengthValidation(t *testing.T) {
 	// empty key -> error
-	if _, err := EncodeBulk([]BulkItem{{Key: "", Gen: 1, Payload: []byte("x")}}); err == nil {
+	if _, err := EncodeBatch([]BatchItem{{Key: "", Gen: 1, Payload: []byte("x")}}); err == nil {
 		t.Fatalf("expected error on empty key")
 	}
 	// too long key (65536) -> error
-	if _, err := EncodeBulk([]BulkItem{{Key: strings.Repeat("a", 0x10000), Gen: 1}}); err == nil {
+	if _, err := EncodeBatch([]BatchItem{{Key: strings.Repeat("a", 0x10000), Gen: 1}}); err == nil {
 		t.Fatalf("expected error on key length > 0xFFFF")
 	}
 	// boundary (65535) -> ok
-	if _, err := EncodeBulk([]BulkItem{{Key: strings.Repeat("b", 0xFFFF), Gen: 1}}); err != nil {
+	if _, err := EncodeBatch([]BatchItem{{Key: strings.Repeat("b", 0xFFFF), Gen: 1}}); err != nil {
 		t.Fatalf("boundary key length should succeed: %v", err)
 	}
 }
 
-func TestBulkCorruptHeadersAndLengths(t *testing.T) {
-	enc, err := EncodeBulk([]BulkItem{
+func TestBatchCorruptHeadersAndLengths(t *testing.T) {
+	enc, err := EncodeBatch([]BatchItem{
 		{Key: "k", Gen: 9, Payload: []byte("xyz")},
 	})
 	if err != nil {
-		t.Fatalf("EncodeBulk: %v", err)
+		t.Fatalf("EncodeBatch: %v", err)
 	}
 
 	// bad magic
 	badMagic := append([]byte(nil), enc...)
 	badMagic[0] = 'X'
-	if _, err := DecodeBulk(badMagic); err == nil {
+	if _, err := DecodeBatch(badMagic); err == nil {
 		t.Fatalf("expected error on bad magic")
 	}
 
 	// wrong version
 	badVer := append([]byte(nil), enc...)
 	badVer[4] = version + 1
-	if _, err := DecodeBulk(badVer); err == nil {
+	if _, err := DecodeBatch(badVer); err == nil {
 		t.Fatalf("expected error on bad version")
 	}
 
 	// wrong kind
 	badKind := append([]byte(nil), enc...)
 	badKind[5] = kindSingle
-	if _, err := DecodeBulk(badKind); err == nil {
+	if _, err := DecodeBatch(badKind); err == nil {
 		t.Fatalf("expected error on bad kind")
 	}
 
@@ -260,7 +260,7 @@ func TestBulkCorruptHeadersAndLengths(t *testing.T) {
 	offset := 10 + 2 + klen + 8 // start of vlen
 	badVlen := append([]byte(nil), enc...)
 	binary.BigEndian.PutUint32(badVlen[offset:offset+4], uint32(len("xyz")+1))
-	if _, err := DecodeBulk(badVlen); err == nil {
+	if _, err := DecodeBatch(badVlen); err == nil {
 		t.Fatalf("expected error on vlen beyond buffer")
 	}
 
@@ -268,38 +268,38 @@ func TestBulkCorruptHeadersAndLengths(t *testing.T) {
 	badKlen := append([]byte(nil), enc...)
 	// set klen=5 while only 1 byte of key is present
 	binary.BigEndian.PutUint16(badKlen[10:12], uint16(5))
-	if _, err := DecodeBulk(badKlen); err == nil {
+	if _, err := DecodeBatch(badKlen); err == nil {
 		t.Fatalf("expected error on klen beyond buffer")
 	}
 }
 
-func TestBulkRejectsHighBitVlen(t *testing.T) {
-	enc, err := EncodeBulk([]BulkItem{
+func TestBatchRejectsHighBitVlen(t *testing.T) {
+	enc, err := EncodeBatch([]BatchItem{
 		{Key: "k", Gen: 9, Payload: []byte("xyz")},
 	})
 	if err != nil {
-		t.Fatalf("EncodeBulk: %v", err)
+		t.Fatalf("EncodeBatch: %v", err)
 	}
 
 	klen := 1
 	offset := 10 + 2 + klen + 8
 	badVlen := append([]byte(nil), enc...)
 	binary.BigEndian.PutUint32(badVlen[offset:offset+4], ^uint32(0))
-	if _, err := DecodeBulk(badVlen); err == nil {
+	if _, err := DecodeBatch(badVlen); err == nil {
 		t.Fatalf("expected error on high-bit vlen")
 	}
 }
 
-func TestBulkZeroCopyPayloadSlices(t *testing.T) {
-	items := []BulkItem{
+func TestBatchZeroCopyPayloadSlices(t *testing.T) {
+	items := []BatchItem{
 		{Key: "a", Gen: 1, Payload: []byte("X")},
 		{Key: "b", Gen: 2, Payload: []byte("Y")},
 	}
-	enc, err := EncodeBulk(items)
+	enc, err := EncodeBatch(items)
 	if err != nil {
-		t.Fatalf("EncodeBulk: %v", err)
+		t.Fatalf("EncodeBatch: %v", err)
 	}
-	got := mustDecodeBulk(t, enc)
+	got := mustDecodeBatch(t, enc)
 	if len(got) != 2 || len(got[0].Payload) != 1 {
 		t.Fatalf("unexpected decoded items")
 	}
@@ -308,7 +308,7 @@ func TestBulkZeroCopyPayloadSlices(t *testing.T) {
 	got[0].Payload[0] = 'Q'
 
 	// re-decode from the same enc buffer. change should be visible
-	got2 := mustDecodeBulk(t, enc)
+	got2 := mustDecodeBatch(t, enc)
 	if got2[0].Payload[0] != 'Q' {
 		t.Fatalf("expected zero-copy payload subslices into enc buffer")
 	}

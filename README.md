@@ -1,470 +1,452 @@
 # CasCache
 
-Provider agnostic CAS like (**C**ompare-**A**nd-**S**et or generation-guarded conditional set) cache with pluggable codecs and a pluggable generation store.
-Safe single-key reads (no stale values), optional bulk caching with read-side validation,
-and an opt‑in distributed mode for multi-replica deployments.
-
 > [!WARNING]
-> **Breaking changes in v1.0** - If you are upgrading from v0.x, please read.
->
-> **Storage keys have changed.** The on-disk and Redis key format has been replaced with a versioned, length-framed layout (`cas:v1:val:…`, `cas:v1:gen:…`). This fixes a class of namespace boundary collisions present in earlier releases, but it means that existing cached data will not be read by the new version. Old entries will remain in your backend under their previous keys until they expire or are evicted. They will not conflict with new entries but they will not be reused either. If you run a shared backend such as Redis, deploy all nodes at the same time and expect a cold cache on the first run.
->
-> **`RedisGenStore` no longer accepts a namespace.** The `namespace` parameter has been removed from `NewRedisGenStore`, `NewRedisGenStoreWithTTL`, and `RedisGenStoreOptions`. The cache now constructs canonical keys internally and passes them to the gen store as opaque values. Update your constructor calls accordingly (see [Distributed generations](#distributed-generations-multi-replica) for updated examples).
->
-> **`GenStore` interface uses typed keys.** `Snapshot`, `SnapshotMany`, and `Bump` now receive and return `genstore.CacheKey` instead of plain strings. If you have a custom `GenStore` implementation, update the method signatures to match. `CacheKey` values are opaque - store and compare them "as-is" without parsing.
->
-> **`Hooks` interface update.** `GenBumpError` now receives a `genstore.CacheKey` instead of a `string`. If you implement `Hooks` directly, update this method signature. The `asynchook` and `sloghook` adapters in this module are already updated.
----
+> This README documents `v2`, which is a complete rewrite of CasCache.
+> It is a breaking change to the public API and should be treated as a migration, not a drop-in upgrade from `v1`.
+> If you are running `v1` in production today, stay on `v1` until you have planned, tested, and validated the move to `v2`.
 
-## Contents
-- [Why CasCache](#why-cascache)
-- [Getting started](#getting-started)
-- [Design](#design)
-- [Wire format](#wire-format)
-- [Providers](#providers)
-- [Codecs](#codecs)
-- [Distributed generations (multi-replica)](#distributed-generations-multi-replica)
-- [Read guards](#read-guards)
-- [API](#api)
-- [Notes](#notes)
+`cascache` is a cache library for applications/backends where invalidation is part of correctness, not just best-effort cleanup.
 
----
+Most caches are fine at storing values, but they do not solve one of the hardest cache bugs: a request can read old data, another request can update the source of truth and invalidate the cache, and then the first request can arrive late and put the old value back.
+
+The usual race usually looks like this:
+
+1. one request reads old data from the database
+2. another request updates the database and invalidates the cache
+3. the first request finishes later and writes its old data back into the cache
+
+That race is easy to miss, and a plain `DEL` followed by a later `SET` does not prevent it. The cache has no memory that the key was invalidated after the stale reader started.
+
+CasCache is built around one idea: every logical key has a version. Readers return a cached value only if the stored version still matches the current one. Writers snapshot the version before reading the source of truth, then store only if that version is still current. After a successful write to the source of truth, `Invalidate` bumps the version so any older snapshot loses automatically.
+
+The effect of this is:
+
+- single-key reads do not serve values that have already been invalidated
+- stale writers do not put old data back into the cache
+- version-store trouble degrades to misses or skipped writes instead of "maybe stale"
+- TTL stays an eviction policy, not the thing that makes freshness safe
+
+## Moving from v1 to v2
+
+> [!IMPORTANT]
+> `v2` requires a migration from `v1`.
+> Do not treat this as a drop-in upgrade.
+> Re-check your topology, update caller code to the `v2` API and validate behavior.
+
+`v2` is not a compatibility release. The cache internals, naming, Redis integration shape and the API were completely redesigned.
+
+If you are coming from `v1`, assume you will need to update code, tests, and rollout plans.
+
+What to do:
+
+1. Do not upgrade blindly. Keep production pinned to `v1` until your migration is ready.
+2. Recheck your topology choice. In `v2`, the recommended Redis entry point is `cascache/redis.New(...)`, while `cascache/redis.NewGenStore(...)` is for shared-generation setups where values stay outside Redis.
+3. Rewrite repository load paths around the `v2` CAS flow:
+   `SnapshotVersion` -> read source of truth -> `SetIfVersion` -> `Invalidate` after successful writes.
+4. Update multi-key call sites to the `v2`:
+   `GetMany`, `SnapshotVersions`, and `SetIfVersions`.
+5. Revisit any direct Redis wiring. In `v2`, Redis-specific pieces live under `cascache/redis`.
+
+What not to assume:
+
+- `v1` method names or wiring still exist
+- old Redis integration layout still applies
+- existing hooks, option names, or bulk/batch APIs are unchanged
+- a passing compile is enough to prove the migration is safe
 
 ## Why CasCache
 
-#### TL;DR
-Apps that rely on "delete-then-set" patterns can still surface stale data, especially when multiple replicas race one another. **cascache** gives you this:
+CasCache exists for systems where "usually fresh" is not good enough. That includes data such as permissions, profiles, pricing, feature flags, inventory, or any other record where a successful write should take effect immediately from the cache's point of view.
 
-> **After you invalidate a key, the cache will never serve the previous value.**
-> No additional delete cycles, manual timing coordination, or best-effort TTL tuning.
+Common cache patterns still leave a stale-data window:
 
-It does this with **generation-guarded writes** (CAS) and **read-side validation** using a tiny per-key counter.
+| Pattern | What you do | What still goes wrong |
+| --- | --- | --- |
+| TTL only | store `user:42` for 5 minutes | readers can see stale data until the TTL expires |
+| delete then set | `DEL user:42`, later `SET user:42` | a slower request can repopulate the cache with an older snapshot |
+| write-through | update the database, then update the cache | concurrent readers still need perfect coordination to avoid serving old data |
+| version inside the value | store `{version, payload}` together | you still need a trusted current version somewhere else |
 
----
+CasCache changes the contract. Instead of hoping invalidation reaches every writer in time, it validates freshness on read and requires writes to prove they observed the current version before they store anything.
 
-| Pattern             | What you do                            | What still goes wrong                                                                 |
-|---------------------|----------------------------------------|---------------------------------------------------------------------------------------|
-| **TTL only**        | Set `user:42` for 5m                   | Readers can see **up to 5m stale** after a write. Reducing TTL increases DB load.     |
-| **Delete then set** | `DEL user:42` then `SET user:42`       | Races: a reader between `DEL` and new `SET` repopulates from **old DB snapshot**.     |
-| **Write-through**   | Update DB, then cache                  | Concurrent readers can serve **old data** until invalidation is coordinated perfectly.|
-| **Version in value**| Store `{version, payload}`             | Readers still need **current version**; coordinating that is the same hard problem.   |
+Use it when:
 
----
-- Each key carries a **generation**. Mutations call `Invalidate(key)` to bump the generation. Reads accept a cached value **only if** its stored generation matches the current one, otherwise the entry is **deleted** and treated as a miss.
-- Writers snapshot the generation **before** reading from the backing store. `SetWithGen(k, v, obs)` commits only if the generation is unchanged. If another writer updated the key, the write is **skipped**, preventing stale data from being reintroduced.
-- If the generation store is slow or unavailable, single-key reads **self-heal** by treating results as misses, and CAS writes **skip**. The cache never serves stale data.
-- Bulk entries are checked **member by member** during reads. If any entry is stale, the bulk payload is discarded and CasCache falls back to single-key fetches. Extras in the bulk are ignored during validation and decode; missing members render it invalid.
-- Works with **Ristretto/BigCache/Redis** for storage and **JSON/CBOR/Msgpack/Proto** for payloads. Wire decoding stays tight and zero-copy for payloads.
+- stale data after invalidation is unacceptable
+- several API nodes can race on the same records
+- you prefer a cache miss over serving a value that might be stale
+- you want local in-memory caches on each node, but shared freshness decisions across nodes
 
----
+The mental model is:
 
 ```text
-DB write succeeds  →  Cache.Invalidate(k)       // bump gen; clear single
-Read slow path     →  snap, err := TrySnapshotGen(ctx, k) → load DB → SetWithGen(k, v, snap) if err == nil
-Read fast path     →  Get(k) validates stored gen == current; else self-heals
-Bulk read          →  every member’s gen must match; else drop bulk → singles
-Multi-replica      →  use RedisGenStore so all nodes see the same gen
+DB write succeeds  ->  Invalidate(key)
+Cache miss path    ->  SnapshotVersion -> load source of truth -> SetIfVersion
+Cache hit path     ->  Get validates stored version against the current version
+Batch hit path     ->  GetMany validates each requested member or falls back to singles
+Multi-node setup   ->  share versions in Redis, or keep both values and versions in Redis
 ```
 
----
+## Core idea
 
-## Getting started
-#### 1) Build the cache
+The safe pattern is:
+
+1. call `SnapshotVersion`
+2. read the source of truth
+3. call `SetIfVersion`
+
+After a successful write to the source of truth, call `Invalidate`.
 
 ```go
+version, err := cache.SnapshotVersion(ctx, key)
+if err != nil {
+	return err
+}
+
+value, err := loadFromDB(ctx, key)
+if err != nil {
+	return err
+}
+
+_, _ = cache.SetIfVersion(ctx, key, value, version, 0)
+```
+
+## Choosing right topology
+
+Most confusion looking at this library can come from the Redis related constructors. The short rule is:
+
+- if you are unsure (recommend in multi-pod/container env.), use `cascache/redis.New(...)`
+- use `cascache/redis.NewGenStore(...)` only when values should stay outside Redis
+- treat `cascache/redis.NewProvider(...)` and `cascache/redis.NewKeyMutator(...)` as advanced composition APIs
+
+CasCache supports three real deployment shapes, and choosing the right one matters more than any individual option:
+
+| Use this | Choose it when | What it means |
+| --- | --- | --- |
+| `cascache.New(...)` | your cache is local to one process, or each node keeps its own cache and cross-node invalidation is handled elsewhere | values live in your chosen provider, versions live in the built-in local store |
+| `cascache.New(...)` + `cascache/redis.NewGenStore(...)` | values should stay in a non-Redis provider such as Ristretto or BigCache, but versions must be shared across processes | Redis stores versions only; values still live in your provider |
+| `cascache/redis.New(...)` | both values and versions should live in Redis | the package wires the Redis provider, the Redis version store, and the Redis-native single-key mutation path together |
+
+The important distinction is this:
+
+- `cascache/redis.NewGenStore(...)` gives you shared versions.
+- `cascache/redis.New(...)` gives you shared versions and Redis native, single-key, atomic "compare-and-write" / invalidate.
+
+If both values and versions are in Redis, prefer `cascache/redis.New(...)`.
+
+If values are not in Redis, `cascache/redis.NewGenStore(...)` is the right tool. It keeps versions shared across nodes, but it cannot make a write atomic across Redis and a separate value store. Safety still comes from version checks on read and conditional writes, not from one cross-system transaction.
+
+`cascache/redis.NewProvider(...)` is not the normal starting point. Use it only if you are intentionally composing `cascache.New(...)` by hand around a custom topology, for example:
+
+- values in Redis, but generations in some non-Redis `GenStore`
+- values in Redis, but single-key mutation is handled by custom code
+- migration or framework code that needs the Redis pieces separately
+
+If you manually combine `cascache/redis.NewProvider(...)` and `cascache/redis.NewGenStore(...)` with `cascache.New(...)`, the cache still works correctly, but you do not get the Redis-native single-key atomic path unless you also provide `cascache/redis.NewKeyMutator(...)` as both `KeyWriter` and `KeyInvalidator`. In practice, most callers should use `cascache/redis.New(...)` instead of wiring Redis pieces by hand.
+
+### 1. Local versions
+
+Use plain `cascache.New(...)` when:
+
+- one process owns the cache
+- each process can safely keep its own cache state
+- you want an in-memory value store such as Ristretto or BigCache
+
+This is the simplest setup. It is strict within the process, but it is not a distributed invalidation system by itself.
+
+### 2. Shared versions in Redis
+
+Use `cascache/redis.NewGenStore(...)` with `cascache.New(...)` when:
+
+- several processes need to agree on whether cached values are still fresh
+- values should remain in a non-Redis store
+- you want distributed invalidation without moving the whole cache into Redis
+
+This is a good fit for per-node caches backed by Ristretto or BigCache. Each node keeps its own values, but all nodes consult the same version store.
+
+Choose this over `cascache/redis.New(...)` when:
+
+- you want hot reads to stay in local process memory
+- you want to reduce Redis memory use by keeping only versions there
+- you want per-node caches with shared invalidation, not one shared Redis value store
+
+What you get:
+
+- shared freshness decisions across processes
+- safe read validation against Redis-backed versions
+- generic cache behavior with any provider
+
+What you do not get:
+
+- one atomic operation across Redis and a separate value store
+
+### 3. Strict Redis cache
+
+Use `cascache/redis.New(...)` when:
+
+- Redis is your value store
+- you want one shared cache across processes
+- you want single-key `SetIfVersion` and `Invalidate` to happen inside Redis
+
+This constructor exists for more than convenience. It wires the Redis-native single-key CAS implementation and keeps the single value key and single version key in the same Redis Cluster slot.
+
+What you get:
+
+- shared values
+- shared versions
+- atomic single-key compare-and-write in Redis
+- atomic single-key invalidate in Redis
+
+Batch entries are still validated on read. CasCache does not try to make arbitrary multi-key batch writes globally atomic.
+
+This should be treated as the default Redis entry point. If you are asking "I want CasCache with Redis, which constructor should I use?", this is usually the answer.
+
+### 4. More Advanced Redis composition
+
+Use `cascache/redis.NewProvider(...)`, `cascache/redis.NewGenStore(...)`, and `cascache/redis.NewKeyMutator(...)` directly only when you are intentionally assembling a custom topology with `cascache.New(...)`.
+
+That is an advanced path. Most application code should not start there.
+
+## Quick start
+
+### Generic cache
+
+```go
+package main
+
 import (
-	"context"
 	"time"
 
 	"github.com/unkn0wn-root/cascache"
 	"github.com/unkn0wn-root/cascache/codec"
-	rp "github.com/unkn0wn-root/cascache/provider/ristretto"
+	ristrettoprovider "github.com/unkn0wn-root/cascache/provider/ristretto"
 )
 
-type User struct{ ID, Name string }
+type User struct {
+	ID   string
+	Name string
+}
 
 func newUserCache() (cascache.CAS[User], error) {
-	rist, err := rp.New(rp.Config{
+	provider, err := ristrettoprovider.New(ristrettoprovider.Config{
 		NumCounters: 1_000_000,
-		MaxCost:     64 << 20, // 64 MiB
+		MaxCost:     64 << 20,
 		BufferItems: 64,
-		Metrics:     false,
 	})
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 
-	return cascache.New[User](cascache.Options[User]{
+	return cascache.New(cascache.Options[User]{
 		Namespace:  "user",
-		Provider:   rist,
+		Provider:   provider,
 		Codec:      codec.JSON[User]{},
 		DefaultTTL: 5 * time.Minute,
-		BulkTTL:    5 * time.Minute,
-		// GenStore: nil -> Local (single-process) generations
+		BatchTTL:    5 * time.Minute,
 	})
 }
 ```
 
-#### 2) Safe single read (never stale)
-> **Rule:** Snapshot the generation **before** touching the DB. If you read first, a concurrent invalidation can bump the generation and your later `SetWithGen` may reinsert stale data.
-> Use `TrySnapshotGen` when you want explicit visibility into generation-store failures. `SnapshotGen` is the convenience form and returns `0` on snapshot failure.
+### Safe repository pattern
 
 ```go
 type UserRepo struct {
 	Cache cascache.CAS[User]
-	// db handle...
 }
 
 func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
-	if u, ok, _ := r.Cache.Get(ctx, id); ok {
-		return u, nil
+	if cached, ok, err := r.Cache.Get(ctx, id); err == nil && ok {
+		return cached, nil
 	}
 
-	// CAS snapshot BEFORE reading DB
-	obs, snapErr := r.Cache.TrySnapshotGen(ctx, id)
-
-	u, err := r.dbSelectUser(ctx, id) // your DB load
-	if err != nil { return User{}, err }
-
-	// If snapshot failed, serve from the DB and skip the cache write.
-	if snapErr == nil {
-		_ = r.Cache.SetWithGen(ctx, id, u, obs, 0)
+	version, err := r.Cache.SnapshotVersion(ctx, id)
+	if err != nil {
+		return User{}, err
 	}
-	return u, nil
+
+	user, err := r.dbSelectUser(ctx, id)
+	if err != nil {
+		return User{}, err
+	}
+
+	_, _ = r.Cache.SetIfVersion(ctx, id, user, version, 0)
+	return user, nil
+}
+
+func (r *UserRepo) UpdateName(ctx context.Context, id, name string) error {
+	if err := r.dbUpdateName(ctx, id, name); err != nil {
+		return err
+	}
+	return r.Cache.Invalidate(ctx, id)
 }
 ```
 
-#### 3) Mutations invalidate (one line)
-> Rule: after a successful DB write, call Invalidate(key) to bump the generation.
+## Redis examples
+
+### Shared versions, non-Redis values
+
+This keeps values in an in-memory provider but stores versions in Redis so all nodes agree on invalidation.
 
 ```go
-func (r *UserRepo) UpdateName(ctx context.Context, id, name string) error {
-	if err := r.dbUpdateName(ctx, id, name); err != nil { return err }
-	_ = r.Cache.Invalidate(ctx, id) // bump gen + clear single
-	return nil
+package main
+
+import (
+	"time"
+
+	"github.com/redis/go-redis/v9"
+	"github.com/unkn0wn-root/cascache"
+	"github.com/unkn0wn-root/cascache/codec"
+	ristrettoprovider "github.com/unkn0wn-root/cascache/provider/ristretto"
+	cascacheredis "github.com/unkn0wn-root/cascache/redis"
+)
+
+func newSharedVersionCache() (cascache.CAS[User], error) {
+	client := redis.NewClient(&redis.Options{
+		Addr: "127.0.0.1:6379",
+	})
+	genStore, err := cascacheredis.NewGenStore(client)
+	if err != nil {
+		return nil, err
+	}
+
+	provider, err := ristrettoprovider.New(ristrettoprovider.Config{
+		NumCounters: 1_000_000,
+		MaxCost:     64 << 20,
+		BufferItems: 64,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return cascache.New(cascache.Options[User]{
+		Namespace:  "user",
+		Provider:   provider,
+		Codec:      codec.JSON[User]{},
+		GenStore:   genStore,
+		DefaultTTL: 5 * time.Minute,
+		BatchTTL:    5 * time.Minute,
+	})
 }
 ```
 
-#### 4) Optional bulk (safe set caching)
-> If any member is stale, the bulk is dropped and you fall back to singles. In multi-replica apps, use a shared GenStore (below) or disable bulk.
-> Use `TrySnapshotGens` when you want explicit visibility into generation-store failures. `SnapshotGens` is the convenience form and returns `0` for any failed snapshot.
-> Successful bulk hits are read-only by default. If you want them to warm single-key entries, set `BulkSeed` to `BulkSeedAll` or `BulkSeedIfMissing`.
-> `BulkSeed` affects `GetBulk` hits only.
-> Successful `SetBulkWithGens` writes use `BulkWriteSeed`, which defaults to the stricter checked mode. Set `BulkWriteSeedFast` to reuse validated payloads directly or `BulkWriteSeedOff` to skip success-path single seeding.
-> `BulkSeedIfMissing` requires a provider that can do insert-if-missing with native backend support or provider-level atomic coordination via `Adder`.
+In this setup, you still own the Redis client lifecycle because the genstore leaves shared clients open by default.
+
+### Strict Redis cache
+
+This stores both values and versions in Redis and enables the Redis-native single-key CAS path.
+
+```go
+package main
+
+import (
+	"time"
+
+	"github.com/redis/go-redis/v9"
+	"github.com/unkn0wn-root/cascache"
+	"github.com/unkn0wn-root/cascache/codec"
+	cascacheredis "github.com/unkn0wn-root/cascache/redis"
+)
+
+func newRedisUserCache() (cascache.CAS[User], error) {
+	client := redis.NewClient(&redis.Options{
+		Addr: "127.0.0.1:6379",
+	})
+
+	return cascacheredis.New(cascacheredis.Options[User]{
+		Namespace:   "user",
+		Client:      client,
+		Codec:       codec.JSON[User]{},
+		DefaultTTL:  5 * time.Minute,
+		BatchTTL:     5 * time.Minute,
+		CloseClient: true,
+	})
+}
+```
+
+## Batch caching
+
+Batch support is for validated set caching.
+
+`GetMany` reads one stored batch blob, checks every requested member against the current versions, and serves only the members that are still valid. If the batch entry is stale, corrupt, or missing members, CasCache drops it and falls back to single-key reads.
+
+`SetIfVersions` writes one batch blob when every observed version still matches. A successful batch write may also seed single-key entries, depending on `BatchWriteSeed`.
+
+Batch is intentionally conservative:
+
+- it is not globally atomic across keys
+- it is validated on read
+- successful batch hits are read-only by default
+
+Example:
 
 ```go
 func (r *UserRepo) GetMany(ctx context.Context, ids []string) (map[string]User, error) {
-	values, missing, cacheErr := r.Cache.GetBulk(ctx, ids)
-	if cacheErr != nil {
-		// Optional: record metrics/logs and continue with DB fallback.
+	values, missing, err := r.Cache.GetMany(ctx, ids)
+	if err != nil {
+		return nil, err
 	}
 	if len(missing) == 0 {
 		return values, nil
 	}
 
-	// Snapshot *before* DB read
-	obs, snapErr := r.Cache.TrySnapshotGens(ctx, missing)
-
-	// Load missing from DB in one shot
-	loaded, err := r.dbSelectUsers(ctx, missing)
-	if err != nil { return nil, err }
-
-	// Index for SetBulkWithGens
-	items := make(map[string]User, len(loaded))
-	for _, u := range loaded { items[u.ID] = u }
-
-	// If snapshots succeeded, conditionally write bulk (or seed singles if any gen moved).
-	if snapErr == nil {
-		_ = r.Cache.SetBulkWithGens(ctx, items, obs, 0)
+	versions, err := r.Cache.SnapshotVersions(ctx, missing)
+	if err != nil {
+		return nil, err
 	}
 
-	// Merge and return
-	for k, v := range items { values[k] = v }
+	loaded, err := r.dbSelectUsers(ctx, missing)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]cascache.VersionedValue[User], 0, len(loaded))
+	for _, user := range loaded {
+		items = append(items, cascache.VersionedValue[User]{
+			Key:     user.ID,
+			Value:   user,
+			Version: versions[user.ID],
+		})
+		values[user.ID] = user
+	}
+
+	_, _ = r.Cache.SetIfVersions(ctx, items, 0)
 	return values, nil
 }
 ```
 
----
-
-## Distributed generations (multi-replica)
-
-Local generations are correct within a single process. In multi-replica deployments, share generations to eliminate cross-node windows and keep bulks safe across nodes.
-> LocalGenStore is **single-process only**. In multi-replica setups, both singles and bulks can be stale on nodes that haven’t observed the bump.
-Use a shared GenStore (e.g., Redis) for cross-replica correctness or run a single instance.
-
-
-```go
-import "github.com/redis/go-redis/v9"
-
-func newUserCacheDistributed() (cascache.CAS[User], error) {
-	rist, _ := rp.New(rp.Config{NumCounters:1_000_000, MaxCost:64<<20, BufferItems:64})
-	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})
-	gs  := gen.NewRedisGenStoreWithTTL(rdb, 90*24*time.Hour)
-
-	return cascache.New[User](cascache.Options[User]{
-		Namespace: "user",
-		Provider:  rist,                      // or Redis/BigCache for values
-		Codec:     codec.JSON[User]{},
-		GenStore:  gs,                        // shared generations
-		BulkTTL:   5 * time.Minute,
-	})
-}
-```
-
-You can reuse the same client across caches:
-
-```go
-rdb := redis.NewClusterClient(/* ... */) // or UniversalClient
-
-userCache, _ := cascache.New[user](cascache.Options[user]{
-    Namespace: "app:prod:user",
-    Provider:  myRedisProvider{Client: rdb},               // same client
-    Codec:     c.JSON[user]{},
-    GenStore:  gen.NewRedisGenStoreWithTTL(rdb, 24*time.Hour),
-})
-
-pageCache, _ := cascache.New[page](cascache.Options[page]{
-    Namespace: "app:prod:page",
-    Provider:  myRedisProvider{Client: rdb},               // same client
-    Codec:     c.JSON[page]{},
-    GenStore:  gen.NewRedisGenStoreWithTTL(rdb, 24*time.Hour),
-})
-
-permCache, _ := cascache.New[permission](cascache.Options[permission]{
-    Namespace: "app:prod:perm",
-    Provider:  myRedisProvider{Client: rdb},               // same client
-    Codec:     c.JSON[permission]{},
-    GenStore:  gen.NewRedisGenStoreWithTTL(rdb, 24*time.Hour),
-})
-```
-
-`RedisGenStore` leaves shared clients open by default. If the genstore owns the
-client and should close it, use:
-
-```go
-gs, err := gen.NewRedisGenStoreWithOptions(gen.RedisGenStoreOptions{
-    Client:      rdb,
-    TTL:         24 * time.Hour,
-    CloseClient: true,
-})
-if err != nil { /* handle */ }
-```
-
-If you implement a custom `GenStore`, note that all methods now use `genstore.CacheKey` instead of plain strings. Treat these values as opaque byte identities - store and compare them as-is without attempting to parse or reconstruct them from logical user keys.
-
----
-> **Alternative type name:** You can use `cascache.Cache[V]` instead of `cascache.CAS[V]`. See [Cache Type alias](#cache-type-alias).
----
-
 ## Read guards
 
-Generation checks catch most staleness, but there is a small window where the generation is still valid and the source has already changed. A write landed in the DB, but `Invalidate` hasn't fired yet (or hasn't propagated across replicas). During that window the cache will happily serve the old value because the generation still matches.
-`ReadGuard` closes that gap. You give the cache a function that checks whether a decoded value is still good. The cache calls it on every hit, right after decode and generation validation. If the guard says no (returns `false` or an error), the entry gets deleted and the caller sees a miss.
-This means your guard runs on **every single cache hit**. If your guard does a network call, you are adding that latency to every read that would otherwise have been a local cache hit. Keep it cheap - check a version column or a lightweight flag, don't refetch the full row.
+`ReadGuard` and `BatchReadGuard` let you add one more check after decode and version validation.
 
-#### Single-key guard
+Use them when version matching alone is not enough. Examples include:
 
-`ReadGuard` receives the logical key and the decoded value. Return `true` to serve it, `false` to reject and delete it.
+- a database row version column
+- a soft-delete flag
+- a short-lived business rule that must be checked against the source of truth
 
-```go
-cache, _ := cascache.New[User](cascache.Options[User]{
-    Namespace: "user",
-    Provider:  redisProvider,
-    Codec:     codec.JSON[User]{},
-    GenStore:  gen.NewRedisGenStoreWithTTL(rdb, 24*time.Hour),
-    ReadGuard: func(ctx context.Context, key string, cached User) (bool, error) {
-        ver, err := dbUserVersion(ctx, key)
-        if err != nil {
-            return false, err
-        }
-        return ver == cached.Version, nil
-    },
-})
-```
+If a guard rejects a value, CasCache deletes that cache entry and treats it as a miss.
 
-This is enough for most cases. If you don't set `BulkReadGuard`, bulk reads will call `ReadGuard` once per member, which works fine but does N separate checks.
+## Notes
 
-#### Bulk guard
-
-If you use bulk caching and want to batch verify in one round-trip instead of N individual checks, set `BulkReadGuard`. It receives all decoded members at once and returns the set of keys you want to reject.
-
-```go
-cache, _ := cascache.New[User](cascache.Options[User]{
-    Namespace:  "user",
-    Provider:   redisProvider,
-    Codec:      codec.JSON[User]{},
-    GenStore:   gen.NewRedisGenStoreWithTTL(rdb, 24*time.Hour),
-    BulkReadGuard: func(ctx context.Context, cached map[string]User) (map[string]struct{}, error) {
-        versions, err := dbUserVersions(ctx, maps.Keys(cached))
-        if err != nil {
-            return nil, err
-        }
-        rejected := map[string]struct{}{}
-        for key, user := range cached {
-            if versions[key] != user.Version {
-                rejected[key] = struct{}{}
-            }
-        }
-        return rejected, nil
-    },
-})
-```
-
-One thing to know: the stored bulk blob is all-or-nothing. If any key fails the guard, the entire bulk entry is deleted because bulk entries are stored as a single blob. CasCache may still return non-rejected members from the already-validated payload for that `GetBulk` call to avoid unnecessary per-key reads. Rejected members fall back to single-key reads only when `ReadGuard` is also configured; otherwise they are reported as misses for that call so they cannot be served back from seeded singles. There is no way to partially invalidate a stored bulk entry.
-
-## Design
-
-### Read path (single)
-
-```
-      Get(k)
-        │
-  provider.Get("cas:v1:val:s:<nsLen>:<ns>:"+k) ───► [wire.DecodeSingle]
-        │
-   gen == currentGen("s:<nsLen>:<ns>:"+k) ?
-        │ yes                                 no
-        ▼                                    ┌───────────────┐
-  codec.Decode(payload)                      │ Del(entry)    │
-        │                                    │ return miss   │
-      return v                               └───────────────┘
-```
-
-### Write path (single, CAS)
-
-```
-obs, err := TrySnapshotGen(ctx, k) // BEFORE DB read
-v        := DB.Read(k)
-if err == nil {
-    SetWithGen(k, v, obs)          // write iff currentGen(k) == obs
-}
-```
-
-### Bulk read validation
-
-```
-GetBulk(keys)   -> provider.Get("cas:v1:val:b:<nsLen>:<ns>:sha256-128(sorted(keys))")
-Decode -> [(key,gen,payload)]*n
-for each requested key: gen == currentGen("s:<nsLen>:<ns>:"+key) ?
-if all valid -> decode requested members, return
-else         -> drop bulk, fall back to singles
-```
-
-### Components
-- **Provider** - byte store with TTLs: Ristretto/BigCache/Redis.
-- **Codec[V]** - serialize/deserialize your `V` to/from `[]byte`.
-- **GenStore** - per-key generation counter (Local by default; Redis available).
-
-### Keys
-- Single value: `cas:v1:val:s:<nsLen>:<ns>:<key>`
-- Bulk value:   `cas:v1:val:b:<nsLen>:<ns>:<sha256-128(sorted(keys))>`
-- Gen key:      `cas:v1:gen:s:<nsLen>:<ns>:<key>`
-
-### CAS model
-- Per-key generation is **monotonic**.
-- Reads validate only; no write amplification.
-- Mutations call `Invalidate(key)` -> bump generation and delete the single entry.
-
----
-
-## Wire format
-
-**Single**
-
-```
-+---------+---------+---------+---------------+---------------+-------------------+
-| magic   | version | kind    | gen (u64)     | vlen (u32)    | payload (vlen)    |
-| "CASC"  |   0x01  |  0x01   | 8 bytes       | 4 bytes       | vlen bytes        |
-+---------+---------+---------+---------------+---------------+-------------------+
-```
-
-**Bulk**
-
-```
-+---------+---------+---------+------------------------+
-| magic   | version | kind    | n (u32)                |
-+---------+---------+---------+------------------------+
-repeated n times:
-+----------------+-----------------+----------------+-------------------+------------------+
-| keyLen (u16)   | key (keyLen)    | gen (u64)      | vlen (u32)        | payload (vlen)   |
-+----------------+-----------------+----------------+-------------------+------------------+
-```
-
----
-
-## Providers
-
-```go
-type Provider interface {
-    Get(ctx context.Context, key string) ([]byte, bool, error)
-    Set(ctx context.Context, key string, value []byte, cost int64, ttl time.Duration) (bool, error)
-    Del(ctx context.Context, key string) error
-    Close(ctx context.Context) error
-}
-```
-
-- **Ristretto**: in-process; per-entry TTL; cost-based eviction.
-- **BigCache**: in-process; global life window; per-entry TTL ignored.
-- **Redis**: distributed (optional); per-entry TTL. Pass an existing
-  `goredis.UniversalClient` and reuse it across caches; set
-  `CloseClient: true` in the provider config only when this cache owns the
-  client and should close it on teardown.
-
-Use any provider for values. Generations can be local or distributed independently.
-
----
-
-## Codecs
-
-```go
-type Codec[V any] interface {
-    Encode(V) ([]byte, error)
-    Decode([]byte) (V, error)
-}
-type JSON[V any] struct{}
-```
-
-You can drop in Msgpack/CBOR/Proto or decorators (compression/encryption). CAS is codec-agnostic.
-
----
+- `Get` does not return a single-key value whose stored version is no longer current.
+- `SetIfVersion` stores only when the observed version still matches.
+- `Invalidate` returns an error if the version bump fails.
+- `GetMany` validates requested members against current versions before serving them.
+- built-in strict stores do not recycle versions back to zero
 
 ## API
 
 ```go
 type CAS[V any] interface {
-    Enabled() bool
-    Close(context.Context) error
+	Enabled() bool
+	Close(context.Context) error
 
-    // Single
-    Get(ctx context.Context, key string) (V, bool, error)
-    SetWithGen(ctx context.Context, key string, value V, observedGen uint64, ttl time.Duration) error
-    Invalidate(ctx context.Context, key string) error
+	Get(ctx context.Context, key string) (V, bool, error)
+	SnapshotVersion(ctx context.Context, key string) (Version, error)
+	SetIfVersion(ctx context.Context, key string, value V, version Version, ttl time.Duration) (WriteResult, error)
+	Invalidate(ctx context.Context, key string) error
 
-    // Bulk
-    GetBulk(ctx context.Context, keys []string) (map[string]V, []string, error)
-    SetBulkWithGens(ctx context.Context, items map[string]V, observedGens map[string]uint64, ttl time.Duration) error
-
-    // Error-aware generation snapshots
-    TrySnapshotGen(ctx context.Context, key string) (uint64, error)
-    TrySnapshotGens(ctx context.Context, keys []string) (map[string]uint64, error)
-
-    // Best-effort generation snapshots
-    SnapshotGen(ctx context.Context, key string) uint64
-    SnapshotGens(ctx context.Context, keys []string) map[string]uint64
+	GetMany(ctx context.Context, keys []string) (map[string]V, []string, error)
+	SnapshotVersions(ctx context.Context, keys []string) (map[string]Version, error)
+	SetIfVersions(ctx context.Context, items []VersionedValue[V], ttl time.Duration) (BatchWriteResult, error)
 }
 ```
----
-
-## Notes
-
-- **Time:** O(1) singles; O(n) bulk for n members.
-- **Allocations:** zero-copy wire decode; one `string` alloc per bulk item.
-- **Bulk-hit warming:** disabled by default so valid bulk hits do not fan out into single-entry writes unless you opt in with `BulkSeed`.
-- **Post-bulk-write seeding:** strict by default so successful `SetBulkWithGens` writes recheck each single through CAS before seeding it. Use `BulkWriteSeedFast` or `BulkWriteSeedOff` only when you explicitly want the performance tradeoff.
-```go
-ComputeSetCost: func(key string, raw []byte, isBulk bool, n int) int64 {
-    if isBulk { return int64(n) }
-    return 1
-}
-```
-- **Cleanup (local gens):** periodic prune by last bump time (default retention 30d).
-
----

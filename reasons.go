@@ -16,24 +16,18 @@ const (
 	SelfHealReasonReadGuardError SelfHealReason = "read_guard_error"
 )
 
-// BulkRejectReason classifies why a bulk entry was rejected.
-type BulkRejectReason string
+// BatchRejectReason classifies why a batch entry was rejected.
+type BatchRejectReason string
 
 const (
-	// at least one bulk payload could not be decoded by the codec.
-	BulkRejectReasonValueDecode BulkRejectReason = "value_decode"
-	// bulk entry was missing members or contained stale generations.
-	BulkRejectReasonInvalidOrStale BulkRejectReason = "invalid_or_stale"
-	// bulk wire envelope was invalid.
-	BulkRejectReasonDecodeError BulkRejectReason = "decode_error"
-	// caller omitted at least one observed generation.
-	BulkRejectReasonMissingObservedGen BulkRejectReason = "missing_observed_gen"
-	// current generations could not be loaded.
-	BulkRejectReasonGenSnapshotError BulkRejectReason = "gen_snapshot_error"
-	// one observed generation no longer matched.
-	BulkRejectReasonGenMismatch BulkRejectReason = "gen_mismatch"
+	// at least one batch payload could not be decoded by the codec.
+	BatchRejectReasonValueDecode BatchRejectReason = "value_decode"
+	// batch entry was missing members or contained stale generations.
+	BatchRejectReasonInvalidOrStale BatchRejectReason = "invalid_or_stale"
+	// batch wire envelope was invalid.
+	BatchRejectReasonDecodeError BatchRejectReason = "decode_error"
 	// an authoritative read guard rejected at least one requested member.
-	BulkRejectReasonReadGuardReject BulkRejectReason = "read_guard_reject"
-	// an authoritative read guard failed, so the bulk was conservatively dropped.
-	BulkRejectReasonReadGuardError BulkRejectReason = "read_guard_error"
+	BatchRejectReasonReadGuardReject BatchRejectReason = "read_guard_reject"
+	// an authoritative read guard failed, so the batch was conservatively dropped.
+	BatchRejectReasonReadGuardError BatchRejectReason = "read_guard_error"
 )

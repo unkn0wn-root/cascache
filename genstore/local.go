@@ -71,6 +71,14 @@ func NewLocalGenStore(cleanupInterval, retention time.Duration) *LocalGenStore {
 	return s
 }
 
+// NewStrictLocalGenStore constructs the v2-safe local generation store used by
+// the cache by default. It never prunes generations automatically because
+// removing a previously bumped generation can make stale cache entries appear
+// current again.
+func NewStrictLocalGenStore() *LocalGenStore {
+	return NewLocalGenStore(0, 0)
+}
+
 // Snapshot returns the current generation for key k.
 //
 // Returns 0 if the key has never been bumped (i.e., missing in the map).
