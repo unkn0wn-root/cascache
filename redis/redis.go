@@ -10,7 +10,7 @@ import (
 	c "github.com/unkn0wn-root/cascache/codec"
 )
 
-// Options configures a strict Redis-backed cache.
+// Options configures the full Redis-backed cache.
 // Single-key writes and invalidation use backend-native Redis scripts.
 // Batch entries remain validated-on-read rather than globally atomic.
 type Options[V any] struct {
@@ -32,7 +32,7 @@ type Options[V any] struct {
 	CloseClient    bool
 }
 
-// New constructs a strict Redis-backed cache from one shared client.
+// New constructs the preferred full Redis-backed cache from one shared client.
 func New[V any](opts Options[V]) (cascache.CAS[V], error) {
 	if opts.Client == nil {
 		return nil, ErrNilClient

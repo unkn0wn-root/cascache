@@ -88,13 +88,12 @@ Multi-node setup   ->  share versions in Redis, or keep both values and versions
 
 ## Core idea
 
-The safe pattern is:
+CasCache is built around two rules:
 
-1. call `SnapshotVersion`
-2. read the source of truth
-3. call `SetIfVersion`
+1. On a cache miss, snapshot the current version before reading the source of truth, then store the value only if that version is still current.
+2. After a successful write to the source of truth, invalidate the key.
 
-After a successful write to the source of truth, call `Invalidate`.
+Read-miss fill:
 
 ```go
 version, err := cache.SnapshotVersion(ctx, key)
@@ -108,6 +107,18 @@ if err != nil {
 }
 
 _, _ = cache.SetIfVersion(ctx, key, value, version, 0)
+```
+
+If another request invalidates the key between `SnapshotVersion` and `SetIfVersion`, the write is skipped instead of restoring a stale value.
+
+Write path:
+
+```go
+if err := writeToDB(ctx, key, updatedValue); err != nil {
+	return err
+}
+
+return cache.Invalidate(ctx, key)
 ```
 
 ## Choosing right topology
@@ -179,7 +190,7 @@ What you do not get:
 
 - one atomic operation across Redis and a separate value store
 
-### 3. Strict Redis cache
+### 3. Preferred Redis setup
 
 Use `cascache/redis.New(...)` when:
 
@@ -330,7 +341,7 @@ func newSharedVersionCache() (cascache.CAS[User], error) {
 
 In this setup, you still own the Redis client lifecycle because the genstore leaves shared clients open by default.
 
-### Strict Redis cache
+### Full Redis cache
 
 This stores both values and versions in Redis and enables the Redis-native single-key CAS path.
 
