@@ -41,7 +41,7 @@ What to do:
 
 1. Do not upgrade blindly. Keep production pinned to `v1` until your migration is ready.
 2. Recheck your topology choice. In `v2`, the recommended Redis entry point is `cascache/redis.New(...)`, while `cascache/redis.NewGenStore(...)` is for shared-generation setups where values stay outside Redis.
-3. Rewrite repository load paths around the `v2` CAS flow:
+3. Rewrite cache-backed read and write paths around the `v2` CAS flow:
    `SnapshotVersion` -> read source of truth -> `SetIfVersion` -> `Invalidate` after successful writes.
 4. Update multi-key call sites to the `v2`:
    `GetMany`, `SnapshotVersions`, and `SetIfVersions`.
@@ -257,7 +257,7 @@ func newUserCache() (cascache.CAS[User], error) {
 }
 ```
 
-### Safe repository pattern
+### Read and write example
 
 ```go
 type UserRepo struct {

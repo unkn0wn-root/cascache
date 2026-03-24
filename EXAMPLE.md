@@ -1,6 +1,6 @@
 # Example
 
-This example shows the basic repository pattern with the current v2 API.
+This example shows a basic read and write flow with the current v2 API.
 
 It uses:
 
