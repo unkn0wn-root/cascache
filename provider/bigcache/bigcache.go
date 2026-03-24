@@ -62,7 +62,10 @@ func (p *BigCache) Set(_ context.Context, key string, value []byte, _ int64, _ t
 }
 
 func (p *BigCache) Del(_ context.Context, key string) error {
-	return p.c.Delete(key)
+	if err := p.c.Delete(key); err != nil && err != bc.ErrEntryNotFound {
+		return err
+	}
+	return nil
 }
 
 func (p *BigCache) Close(_ context.Context) error {
