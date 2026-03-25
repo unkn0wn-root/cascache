@@ -78,10 +78,7 @@ func newCache[V any](opts Options[V]) (*cache[V], error) {
 	if opts.GenStore != nil {
 		c.gen = opts.GenStore
 	} else {
-		if opts.CleanupInterval > 0 || opts.GenRetention > 0 {
-			return nil, ErrLocalGenCleanupUnsupported
-		}
-		c.gen = gen.NewStrictLocalGenStore()
+		c.gen = gen.NewLocal()
 	}
 
 	c.readGuard = opts.ReadGuard
@@ -258,9 +255,6 @@ func (c *cache[V]) SetIfVersion(ctx context.Context, key string, value V, versio
 // If we deleted first and the bump then failed, a batch entry could reseed
 // the single with stale data and the gen check would still pass.
 //
-// In strict mode, invalidate returns an error whenever the bump fails
-// because the freshness boundary was not established.
-//
 // Backends keep delete best-effort:
 //
 //   - Bump succeeds, delete fails: readers self-heal on the next read.
@@ -290,8 +284,6 @@ func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 	_, bErr := c.bumpGen(ctx, toGenStoreKey(sk.Cache))
 	delErr := c.provider.Del(ctx, sk.Value.String())
 
-	// A failed bump means invalidate did not establish the freshness boundary,
-	// even if the current single entry was deleted successfully.
 	if bErr != nil {
 		c.hooks.InvalidateOutage(key, bErr, delErr)
 		return &InvalidateError{
@@ -328,9 +320,6 @@ func (c *cache[V]) Invalidate(ctx context.Context, key string) error {
 //
 // When batch mode is disabled (DisableBatch option), step 1 is skipped
 // entirely and we go straight to per-key reads.
-//
-// The missing slice preserves the caller's original order and may contain
-// duplicates if the same missing key was requested more than once.
 func (c *cache[V]) GetMany(ctx context.Context, keys []string) (map[string]V, []string, error) {
 	out := make(map[string]V, len(keys))
 	missing := make([]string, 0, len(keys))

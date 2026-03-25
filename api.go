@@ -11,30 +11,22 @@ import (
 
 // KeyWriter is an optional backend-native fast path for single-key
 // compare-and-write operations.
-//
 // versionKey identifies the canonical generation tracked by the configured
 // GenStore. valueKey identifies the provider storage key for the encoded single
 // value entry. Implementations are responsible for coordinating those two keys
 // so SetIfVersion preserves the same freshness contract as the generic cache
 // path.
-//
-// The core cache still uses Provider and GenStore directly for reads, batch
-// validation, and version snapshots.
 type KeyWriter interface {
 	SetIfVersion(ctx context.Context, versionKey gen.CacheKey, valueKey string, expected uint64, wireValue []byte, ttl time.Duration) (stored bool, err error)
 }
 
 // KeyInvalidator is an optional backend-native fast path for single-key
 // invalidation.
-//
 // versionKey identifies the canonical generation tracked by the configured
 // GenStore. valueKey identifies the provider storage key for the encoded single
 // value entry. Implementations are responsible for coordinating those two keys
 // so Invalidate preserves the same contract as the generic cache
 // path.
-//
-// The core cache still uses Provider and GenStore directly for reads, batch
-// validation, and version snapshots.
 type KeyInvalidator interface {
 	Invalidate(ctx context.Context, versionKey gen.CacheKey, valueKey string) error
 }
@@ -47,7 +39,6 @@ type KeyMutator interface {
 // ReadGuardFunc can veto serving a decoded cache hit for a single logical key.
 // It is intended for critical paths that need an authoritative source check
 // before a cached value may be returned.
-//
 // Return allow=false to reject the entry as stale or unsafe. Any returned error
 // is treated conservatively as a rejection and the caller receives a miss.
 type ReadGuardFunc[V any] func(ctx context.Context, key string, value V) (allow bool, err error)
@@ -64,11 +55,9 @@ type ReadGuardFunc[V any] func(ctx context.Context, key string, value V) (allow 
 type BatchReadGuardFunc[V any] func(ctx context.Context, values map[string]V) (rejected map[string]struct{}, err error)
 
 // SetCostFunc computes the provider cost used for a cache write.
-//
 // The returned value is passed through to Provider.Set (and Adder.Add when
 // applicable). Providers that use admission or weighted eviction can interpret
 // it as entry weight; providers that ignore cost may discard it.
-//
 // key is the provider storage key cascache is writing. raw is the fully encoded
 // wire value that will be stored. isBatch reports whether the write targets the
 // grouped batch-entry path rather than a single-key entry. memberCount is 1 for
@@ -194,36 +183,17 @@ type Options[V any] struct {
 	Provider  pr.Provider
 	Codec     c.Codec[V]
 
-	DefaultTTL time.Duration // singles; 0 => 10m
-	BatchTTL   time.Duration // batches; 0 => 10m
-	// CleanupInterval and GenRetention are not used by the built-in v2 strict
-	// local GenStore. Supplying either without a custom GenStore returns an
-	// error because pruning generations can break CAS correctness.
-	CleanupInterval time.Duration
-	GenRetention    time.Duration
-	Disabled        bool         // default false (enabled)
-	ComputeSetCost  SetCostFunc  // default 1
-	GenStore        gen.GenStore // nil => LocalGenStore (in-process)
-	// KeyWriter is optional. When set, single-key SetIfVersion uses this
-	// backend-native path instead of the generic compare-then-write flow.
-	KeyWriter KeyWriter
-	// KeyInvalidator is optional. When set, single-key Invalidate uses this
-	// backend-native path instead of the generic bump-then-delete flow.
+	DefaultTTL     time.Duration // singles; 0 => 10m
+	BatchTTL       time.Duration // batches; 0 => 10m
+	Disabled       bool          // default false (enabled)
+	ComputeSetCost SetCostFunc   // default 1
+	GenStore       gen.GenStore  // nil => LocalGenStore (in-process)
+	KeyWriter      KeyWriter
 	KeyInvalidator KeyInvalidator
 	DisableBatch   bool // default false => batch enabled
 	ReadGuard      ReadGuardFunc[V]
 	BatchReadGuard BatchReadGuardFunc[V]
-	// BatchReadSeed controls single-entry warming after successful GetMany hits
-	// only. It does not affect how successful SetIfVersions writes seed
-	// singles; that behavior is controlled separately by BatchWriteSeed.
-	// BatchReadSeedIfMissing requires a provider with native or provider-level
-	// atomic add-if-missing support.
-	BatchReadSeed BatchReadSeedMode
-	// BatchWriteSeed controls single-entry materialization after a successful
-	// SetIfVersions batch write only. The default is BatchWriteSeedStrict,
-	// which re-enters SetIfVersion per key to preserve stricter CAS semantics.
-	// It does not affect fallback single seeding when the batch write is
-	// skipped, rejected, or batch mode is disabled.
+	BatchReadSeed  BatchReadSeedMode
 	BatchWriteSeed BatchWriteSeedMode
 	Hooks          Hooks
 }

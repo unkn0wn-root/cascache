@@ -40,12 +40,21 @@ type LocalGenStore struct {
 
 var _ GenStore = (*LocalGenStore)(nil)
 
-// NewLocalGenStore constructs a LocalGenStore.
+// NewLocal constructs the v2-safe local generation store used by the cache by
+// default. It never prunes generations automatically because removing a
+// previously bumped generation can make stale cache entries appear current
+// again.
+func NewLocal() *LocalGenStore {
+	return NewLocalWithCleanup(0, 0)
+}
+
+// NewLocalWithCleanup constructs a LocalGenStore with optional background
+// cleanup.
 //
 // If both cleanupInterval > 0 and retention > 0, a background goroutine is
 // started that calls Cleanup(retention) every cleanupInterval. If either is
 // non-positive, no background cleanup runs and you may call Cleanup manually.
-func NewLocalGenStore(cleanupInterval, retention time.Duration) *LocalGenStore {
+func NewLocalWithCleanup(cleanupInterval, retention time.Duration) *LocalGenStore {
 	s := &LocalGenStore{
 		gens:      make(map[string]localGenEntry),
 		retention: retention,
@@ -71,14 +80,6 @@ func NewLocalGenStore(cleanupInterval, retention time.Duration) *LocalGenStore {
 	return s
 }
 
-// NewStrictLocalGenStore constructs the v2-safe local generation store used by
-// the cache by default. It never prunes generations automatically because
-// removing a previously bumped generation can make stale cache entries appear
-// current again.
-func NewStrictLocalGenStore() *LocalGenStore {
-	return NewLocalGenStore(0, 0)
-}
-
 // Snapshot returns the current generation for key k.
 //
 // Returns 0 if the key has never been bumped (i.e., missing in the map).
@@ -96,9 +97,6 @@ func (s *LocalGenStore) Snapshot(_ context.Context, k CacheKey) (uint64, error) 
 }
 
 // SnapshotMany returns the current generations for all requested keys.
-//
-// acquires the read lock once for the entire batch to avoid per-key
-// lock/unlock overhead. Missing keys map to 0 (zero value).
 func (s *LocalGenStore) SnapshotMany(_ context.Context, ks []CacheKey) (map[CacheKey]uint64, error) {
 	out := make(map[CacheKey]uint64, len(ks))
 	s.mu.RLock()
@@ -111,7 +109,6 @@ func (s *LocalGenStore) SnapshotMany(_ context.Context, ks []CacheKey) (map[Cach
 
 // Bump atomically increments the generation for key k and updates UpdatedAt.
 // If the key does not exist, it is created with Gen=1.
-//
 // Returns the new generation value.
 func (s *LocalGenStore) Bump(_ context.Context, k CacheKey) (uint64, error) {
 	now := time.Now()
@@ -126,10 +123,6 @@ func (s *LocalGenStore) Bump(_ context.Context, k CacheKey) (uint64, error) {
 }
 
 // Cleanup removes keys whose UpdatedAt is older than retention ago.
-//
-// This bounds memory usage of the in-process map for long-inactive keys.
-// Reads remain correct if a key is cleaned up: Snapshot will report 0 until
-// the next bump recreates the entry.
 func (s *LocalGenStore) Cleanup(retention time.Duration) {
 	if retention <= 0 {
 		return
@@ -146,7 +139,6 @@ func (s *LocalGenStore) Cleanup(retention time.Duration) {
 }
 
 // Close stops the optional cleanup goroutine and releases the ticker.
-// Safe to call Close multiple times; subsequent calls are no-ops.
 func (s *LocalGenStore) Close(_ context.Context) error {
 	if s.stopCh == nil {
 		return nil

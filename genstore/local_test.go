@@ -8,7 +8,7 @@ import (
 
 func TestLocalSnapshotManyIncludesAllAndZeroForMissing(t *testing.T) {
 	ctx := context.Background()
-	s := NewLocalGenStore(0, 0)
+	s := NewLocal()
 	t.Cleanup(func() { _ = s.Close(ctx) })
 
 	keys := []CacheKey{NewCacheKey("a"), NewCacheKey("b"), NewCacheKey("c")}
@@ -32,7 +32,7 @@ func TestLocalSnapshotManyIncludesAllAndZeroForMissing(t *testing.T) {
 
 func TestLocalSnapshotManyDoesNotMutateInput(t *testing.T) {
 	ctx := context.Background()
-	s := NewLocalGenStore(0, 0)
+	s := NewLocal()
 	t.Cleanup(func() { _ = s.Close(ctx) })
 
 	in := []CacheKey{NewCacheKey("x"), NewCacheKey("y")}
@@ -47,8 +47,8 @@ func TestLocalSnapshotManyDoesNotMutateInput(t *testing.T) {
 	}
 }
 
-func TestNewStrictLocalGenStoreDisablesAutomaticCleanup(t *testing.T) {
-	s := NewStrictLocalGenStore()
+func TestNewLocalDisablesAutomaticCleanup(t *testing.T) {
+	s := NewLocal()
 	if s.stopCh != nil {
 		t.Fatalf("strict local gen store should not start a cleanup goroutine")
 	}
@@ -59,7 +59,7 @@ func TestNewStrictLocalGenStoreDisablesAutomaticCleanup(t *testing.T) {
 
 func TestLocalCleanupPrunesOld(t *testing.T) {
 	ctx := context.Background()
-	s := NewLocalGenStore(0, time.Second) // retention=1s
+	s := NewLocalWithCleanup(0, time.Second) // retention=1s
 	t.Cleanup(func() { _ = s.Close(ctx) })
 
 	if _, err := s.Bump(ctx, NewCacheKey("old")); err != nil {

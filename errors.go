@@ -10,12 +10,6 @@ import (
 // Adder.
 var ErrBatchReadSeedNeedsAdder = errors.New("BatchReadSeedIfMissing requires Adder")
 
-// ErrLocalGenCleanupUnsupported identifies an invalid v2 configuration where
-// the built-in strict local generation store is asked to prune generations.
-// Generation cleanup can resurrect stale entries, so callers that need custom
-// retention must provide and own a custom GenStore explicitly.
-var ErrLocalGenCleanupUnsupported = errors.New("built-in local GenStore does not support cleanup or retention in v2")
-
 type InvalidateError struct {
 	Key     string
 	BumpErr error

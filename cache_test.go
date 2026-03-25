@@ -545,7 +545,7 @@ func TestGetReadGuardErrorMissesAndDeletesEntry(t *testing.T) {
 func TestSingleKeyNamespaceFramingAvoidsCollisions(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
-	gs := genstore.NewLocalGenStore(time.Hour, time.Hour)
+	gs := genstore.NewLocalWithCleanup(time.Hour, time.Hour)
 
 	left := newTestCache(t, "app:prod", mp, func(o *Options[user]) {
 		o.GenStore = gs
@@ -890,7 +890,7 @@ func TestSelfHealOnCorrupt(t *testing.T) {
 }
 
 func TestLocalGenStoreCloseIdempotent(t *testing.T) {
-	s := genstore.NewLocalGenStore(50*time.Millisecond, time.Second)
+	s := genstore.NewLocalWithCleanup(50*time.Millisecond, time.Second)
 	defer closeTest(t, context.Background(), s)
 
 	// Do some bumps to exercise the map while cleanup may run
@@ -906,7 +906,7 @@ func TestLocalGenStoreCloseIdempotent(t *testing.T) {
 
 func TestLocalGenStoreNoLeakOnClose(t *testing.T) {
 	before := runtime.NumGoroutine()
-	s := genstore.NewLocalGenStore(10*time.Millisecond, time.Second)
+	s := genstore.NewLocalWithCleanup(10*time.Millisecond, time.Second)
 	_ = s.Close(context.Background())
 	time.Sleep(20 * time.Millisecond) // give it a moment to exit
 	after := runtime.NumGoroutine()
@@ -1066,32 +1066,10 @@ func TestNewBatchSeedIfMissingNeedsSupport(t *testing.T) {
 	}
 }
 
-func TestNewRejectsBuiltInLocalGenCleanupSettings(t *testing.T) {
-	_, err := New[user](Options[user]{
-		Namespace:       "user",
-		Provider:        newMemProvider(),
-		Codec:           c.JSON[user]{},
-		CleanupInterval: time.Minute,
-	})
-	if !errors.Is(err, ErrLocalGenCleanupUnsupported) {
-		t.Fatalf("New error mismatch: %v", err)
-	}
-
-	_, err = New[user](Options[user]{
-		Namespace:    "user",
-		Provider:     newMemProvider(),
-		Codec:        c.JSON[user]{},
-		GenRetention: time.Hour,
-	})
-	if !errors.Is(err, ErrLocalGenCleanupUnsupported) {
-		t.Fatalf("New error mismatch: %v", err)
-	}
-}
-
 func TestBatchSeedAllUsesBatchGen(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
-	gs := &countingGenStore{inner: genstore.NewLocalGenStore(time.Hour, time.Hour)}
+	gs := &countingGenStore{inner: genstore.NewLocalWithCleanup(time.Hour, time.Hour)}
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
 		o.GenStore = gs
 		o.BatchReadSeed = BatchReadSeedAll
@@ -1808,7 +1786,7 @@ func TestSetBatchWithGensBatchWriteErrorReturnsOpError(t *testing.T) {
 func TestSetBatchWithGensStrictUsesBatchGenAndPerKeyRechecks(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
-	gs := &countingGenStore{inner: genstore.NewLocalGenStore(time.Hour, time.Hour)}
+	gs := &countingGenStore{inner: genstore.NewLocalWithCleanup(time.Hour, time.Hour)}
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
 		o.GenStore = gs
 	})
@@ -1837,7 +1815,7 @@ func TestSetBatchWithGensStrictUsesBatchGenAndPerKeyRechecks(t *testing.T) {
 func TestSetBatchWithGensFastUsesBatchGenOnly(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
-	gs := &countingGenStore{inner: genstore.NewLocalGenStore(time.Hour, time.Hour)}
+	gs := &countingGenStore{inner: genstore.NewLocalWithCleanup(time.Hour, time.Hour)}
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
 		o.GenStore = gs
 		o.BatchWriteSeed = BatchWriteSeedFast
@@ -1977,7 +1955,7 @@ func TestSetBatchWithGensStrictSkipsSingleAfterBatchValidationRace(t *testing.T)
 	ctx := context.Background()
 	mp := newMemProvider()
 	gs := &bumpAfterSnapshotManyGenStore{
-		inner:      genstore.NewLocalGenStore(time.Hour, time.Hour),
+		inner:      genstore.NewLocalWithCleanup(time.Hour, time.Hour),
 		bumpOnCall: 2,
 	}
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
@@ -2010,7 +1988,7 @@ func TestSetBatchWithGensFastStaleSingleSelfHealsAfterBatchValidationRace(t *tes
 	ctx := context.Background()
 	mp := newMemProvider()
 	gs := &bumpAfterSnapshotManyGenStore{
-		inner:      genstore.NewLocalGenStore(time.Hour, time.Hour),
+		inner:      genstore.NewLocalWithCleanup(time.Hour, time.Hour),
 		bumpOnCall: 2,
 	}
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
