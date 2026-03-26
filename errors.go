@@ -11,18 +11,22 @@ import (
 var ErrBatchReadSeedNeedsAdder = errors.New("BatchReadSeedIfMissing requires Adder")
 
 type InvalidateError struct {
-	Key     string
-	BumpErr error
-	DelErr  error
+	Key        string
+	AdvanceErr error
+	DelErr     error
 }
 
 func (e *InvalidateError) Error() string {
 	switch {
-	case e.BumpErr != nil && e.DelErr != nil:
-		return fmt.Sprintf("invalidate %q failed: gen bump and delete failed: bump=%v; delete=%v",
-			e.Key, e.BumpErr, e.DelErr)
-	case e.BumpErr != nil:
-		return fmt.Sprintf("invalidate %q: gen bump failed: %v", e.Key, e.BumpErr)
+	case e.AdvanceErr != nil && e.DelErr != nil:
+		return fmt.Sprintf(
+			"invalidate %q failed: version advance and delete failed: advance=%v; delete=%v",
+			e.Key,
+			e.AdvanceErr,
+			e.DelErr,
+		)
+	case e.AdvanceErr != nil:
+		return fmt.Sprintf("invalidate %q: version advance failed: %v", e.Key, e.AdvanceErr)
 	case e.DelErr != nil:
 		return fmt.Sprintf("invalidate %q: delete failed: %v", e.Key, e.DelErr)
 	default:
@@ -32,15 +36,15 @@ func (e *InvalidateError) Error() string {
 
 func (e *InvalidateError) Unwrap() []error {
 	switch {
-	case e.BumpErr == nil:
+	case e.AdvanceErr == nil:
 		if e.DelErr == nil {
 			return nil
 		}
 		return []error{e.DelErr}
 	case e.DelErr == nil:
-		return []error{e.BumpErr}
+		return []error{e.AdvanceErr}
 	default:
-		return []error{e.BumpErr, e.DelErr}
+		return []error{e.AdvanceErr, e.DelErr}
 	}
 }
 

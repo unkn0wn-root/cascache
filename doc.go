@@ -1,13 +1,14 @@
 // Package cascache implements a provider-agnostic cache with compare-and-swap (CAS)
-// safety via per-key generations. Single-key reads never return stale values.
+// safety via per-key version fences. Single-key reads never return stale values.
 // Batch results are validated on read (per member) and rejected if any member is stale.
 //
 // Components:
 //   - Provider: byte store with TTL (e.g. Ristretto, BigCache, Redis).
 //   - Codec[V]: (de)serializes V <-> []byte.
-//   - GenStore: generation counter per logical key. Local (in-process) by default,
-//     optional Redis implementation for multi-replica / restart persistence.
-//     Custom implementations receive opaque genstore.CacheKey identities, not
+//   - VersionStore: authoritative version state per logical key. Local (in-process)
+//     by default, optional Redis implementation for multi-replica / restart
+//     persistence.
+//     Custom implementations receive opaque version.CacheKey identities, not
 //     logical user keys.
 //   - KeyWriter / KeyInvalidator: optional backend-native fast paths for
 //     single-key compare-and-write and invalidate. KeyMutator is the
@@ -16,9 +17,9 @@
 //
 // Keys:
 //
-//	cas:v2:val:{<slot>}:s:<nsLen>:<ns>:<key>        - single entries
-//	cas:v2:val:b:<nsLen>:<ns>:<sha256-128>          - set-shaped entries (128-bit SHA-256 over sorted keys)
-//	cas:v2:gen:{<slot>}:s:<nsLen>:<ns>:<key>        - version counters
+//	cas:v3:val:{<slot>}:s:<nsLen>:<ns>:<key>        - single entries
+//	cas:v3:val:b:<nsLen>:<ns>:<sha256-128>          - set-shaped entries (128-bit SHA-256 over sorted keys)
+//	cas:v3:ver:{<slot>}:s:<nsLen>:<ns>:<key>        - authoritative version state
 //
 // CAS pattern:
 //

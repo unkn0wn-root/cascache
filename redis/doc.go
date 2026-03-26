@@ -3,7 +3,7 @@
 // Most callers should use New.
 //
 // The lower-level constructors exist for custom topologies:
-//   - NewGenStore when values stay outside Redis but generations must be shared.
+//   - NewVersionStore when values stay outside Redis but version state must be shared.
 //   - NewProvider when values live in Redis but the cache is wired manually.
 //   - NewKeyMutator when manual wiring still wants the Redis-native single-key
 //     compare-and-write and invalidate path.

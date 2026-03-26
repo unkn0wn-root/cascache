@@ -6,7 +6,7 @@ import (
 
 	bc "github.com/allegro/bigcache/v3"
 
-	pr "github.com/unkn0wn-root/cascache/provider"
+	pr "github.com/unkn0wn-root/cascache/v3/provider"
 )
 
 // Note: BigCache has a global LifeWindow; it ignores per-entry TTLs passed to Set.
@@ -53,7 +53,13 @@ func (p *BigCache) Get(_ context.Context, key string) ([]byte, bool, error) {
 	return b, err == nil, err
 }
 
-func (p *BigCache) Set(_ context.Context, key string, value []byte, _ int64, _ time.Duration) (bool, error) {
+func (p *BigCache) Set(
+	_ context.Context,
+	key string,
+	value []byte,
+	_ int64,
+	_ time.Duration,
+) (bool, error) {
 	// Per-entry TTL not supported; LifeWindow applies.
 	if err := p.c.Set(key, value); err != nil {
 		return false, err

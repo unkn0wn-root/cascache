@@ -1,4 +1,4 @@
-package genstore
+package version
 
 import (
 	"context"
@@ -12,12 +12,19 @@ func TestLocalSnapshotManyIncludesAllAndZeroForMissing(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close(ctx) })
 
 	keys := []CacheKey{NewCacheKey("a"), NewCacheKey("b"), NewCacheKey("c")}
-	// bump b twice -> gen=2
-	if _, err := s.Bump(ctx, NewCacheKey("b")); err != nil {
+	first, err := s.Advance(ctx, NewCacheKey("b"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Bump(ctx, NewCacheKey("b")); err != nil {
+	second, err := s.Advance(ctx, NewCacheKey("b"))
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !first.Exists || !second.Exists {
+		t.Fatalf("expected live snapshots, first=%+v second=%+v", first, second)
+	}
+	if first.Fence.Equal(second.Fence) {
+		t.Fatalf("expected advance to replace fence, first=%s second=%s", first.Fence, second.Fence)
 	}
 
 	got, err := s.SnapshotMany(ctx, keys)
@@ -25,8 +32,10 @@ func TestLocalSnapshotManyIncludesAllAndZeroForMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got[NewCacheKey("a")] != 0 || got[NewCacheKey("b")] != 2 || got[NewCacheKey("c")] != 0 {
-		t.Fatalf("got=%v want a=0,b=2,c=0", got)
+	if got[NewCacheKey("a")].Exists || !got[NewCacheKey("b")].Exists ||
+		!got[NewCacheKey("b")].Fence.Equal(second.Fence) ||
+		got[NewCacheKey("c")].Exists {
+		t.Fatalf("got=%v want a=missing,b=current,c=missing", got)
 	}
 }
 
@@ -50,10 +59,13 @@ func TestLocalSnapshotManyDoesNotMutateInput(t *testing.T) {
 func TestNewLocalDisablesAutomaticCleanup(t *testing.T) {
 	s := NewLocal()
 	if s.stopCh != nil {
-		t.Fatalf("strict local gen store should not start a cleanup goroutine")
+		t.Fatalf("strict local version store should not start a cleanup goroutine")
 	}
 	if s.retention != 0 {
-		t.Fatalf("strict local gen store should not retain cleanup settings, got %v", s.retention)
+		t.Fatalf(
+			"strict local version store should not retain cleanup settings, got %v",
+			s.retention,
+		)
 	}
 }
 
@@ -62,7 +74,7 @@ func TestLocalCleanupPrunesOld(t *testing.T) {
 	s := NewLocalWithCleanup(0, time.Second) // retention=1s
 	t.Cleanup(func() { _ = s.Close(ctx) })
 
-	if _, err := s.Bump(ctx, NewCacheKey("old")); err != nil {
+	if _, err := s.Advance(ctx, NewCacheKey("old")); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(1200 * time.Millisecond)
@@ -72,7 +84,7 @@ func TestLocalCleanupPrunesOld(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if g != 0 {
-		t.Fatalf("expected pruned -> 0, got %d", g)
+	if g.Exists {
+		t.Fatalf("expected pruned -> missing, got %+v", g)
 	}
 }

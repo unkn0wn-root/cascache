@@ -4,31 +4,34 @@ import (
 	"context"
 	"time"
 
-	c "github.com/unkn0wn-root/cascache/codec"
-	gen "github.com/unkn0wn-root/cascache/genstore"
-	pr "github.com/unkn0wn-root/cascache/provider"
+	c "github.com/unkn0wn-root/cascache/v3/codec"
+	pr "github.com/unkn0wn-root/cascache/v3/provider"
+	"github.com/unkn0wn-root/cascache/v3/version"
 )
 
 // KeyWriter is an optional backend-native fast path for single-key
 // compare-and-write operations.
-// versionKey identifies the canonical generation tracked by the configured
-// GenStore. valueKey identifies the provider storage key for the encoded single
+// versionKey identifies the canonical authoritative version state tracked by
+// the configured VersionStore. valueKey identifies the provider storage key for the encoded single
 // value entry. Implementations are responsible for coordinating those two keys
 // so SetIfVersion preserves the same freshness contract as the generic cache
 // path.
 type KeyWriter interface {
-	SetIfVersion(ctx context.Context, versionKey gen.CacheKey, valueKey string, expected uint64, wireValue []byte, ttl time.Duration) (stored bool, err error)
+	// payload is the codec-encoded caller value, not the final wire envelope.
+	// Implementations are responsible for writing a value stamped with the
+	// authoritative fence that actually won the compare/init step.
+	SetIfVersion(ctx context.Context, versionKey version.CacheKey, valueKey string, expected version.Snapshot, payload []byte, ttl time.Duration) (stored bool, err error)
 }
 
 // KeyInvalidator is an optional backend-native fast path for single-key
 // invalidation.
-// versionKey identifies the canonical generation tracked by the configured
-// GenStore. valueKey identifies the provider storage key for the encoded single
+// versionKey identifies the canonical authoritative version state tracked by
+// the configured VersionStore. valueKey identifies the provider storage key for the encoded single
 // value entry. Implementations are responsible for coordinating those two keys
 // so Invalidate preserves the same contract as the generic cache
 // path.
 type KeyInvalidator interface {
-	Invalidate(ctx context.Context, versionKey gen.CacheKey, valueKey string) error
+	Invalidate(ctx context.Context, versionKey version.CacheKey, valueKey string) error
 }
 
 type KeyMutator interface {
@@ -45,7 +48,7 @@ type ReadGuardFunc[V any] func(ctx context.Context, key string, value V) (allow 
 
 // BatchReadGuardFunc is the batch form of ReadGuardFunc for validated GetMany hits.
 // The input map contains only the requested logical keys that survived wire and
-// generation checks. Return the keys that failed validation. Any non-empty
+// fence checks. Return the keys that failed validation. Any non-empty
 // result deletes the stored batch entry because batch values are stored as a
 // single blob.
 //
@@ -68,7 +71,7 @@ type SetCostFunc func(key string, raw []byte, isBatch bool, memberCount int) int
 type Cache[V any] = CAS[V]
 
 // CAS is the provider-agnostic cache interface with compare-and-swap safety
-// via per-key generations. V is the caller's value type
+// via per-key version fences. V is the caller's value type
 // serialization is handled by the configured Codec[V].
 type CAS[V any] interface {
 	Enabled() bool
@@ -89,24 +92,45 @@ type CAS[V any] interface {
 // Version is per-key freshness token returned by the cache.
 // Treat it as a compare-only value and pass it back unchanged
 // to versioned write APIs.
+//
+// The zero value is the missing-version token.
 type Version struct {
-	raw uint64
+	fence  version.Fence
+	exists bool
 }
 
 func (v Version) Equal(other Version) bool {
-	return v.raw == other.raw
+	if v.exists != other.exists {
+		return false
+	}
+	if !v.exists {
+		return true
+	}
+	return v.fence.Equal(other.fence)
 }
 
-func (v Version) IsZero() bool {
-	return v.raw == 0
+func (v Version) IsMissing() bool {
+	return !v.exists
 }
 
-func versionFromUint64(v uint64) Version {
-	return Version{raw: v}
+func versionFromSnapshot(s version.Snapshot) Version {
+	if !s.Exists {
+		return Version{}
+	}
+	return Version{
+		fence:  s.Fence,
+		exists: true,
+	}
 }
 
-func (v Version) uint64() uint64 {
-	return v.raw
+func (v Version) snapshot() version.Snapshot {
+	if !v.exists {
+		return version.Snapshot{}
+	}
+	return version.Snapshot{
+		Fence:  v.fence,
+		Exists: true,
+	}
 }
 
 // WriteOutcome describes what happened during a versioned write attempt.
@@ -187,7 +211,7 @@ type Options[V any] struct {
 	BatchTTL       time.Duration // batches; 0 => 10m
 	Disabled       bool          // default false (enabled)
 	ComputeSetCost SetCostFunc   // default 1
-	GenStore       gen.GenStore  // nil => LocalGenStore (in-process)
+	VersionStore   version.Store // nil => LocalStore (in-process)
 	KeyWriter      KeyWriter
 	KeyInvalidator KeyInvalidator
 	DisableBatch   bool // default false => batch enabled
