@@ -2,7 +2,7 @@
 
 CasCache is a Go cache library where invalidation is part of correctness.
 
-The problem it is built to solve:
+The problem it tries to solve:
 
 1. request A reads old data
 2. request B updates and invalidates the cache
@@ -10,7 +10,7 @@ The problem it is built to solve:
 
 A plain `DEL` followed by a later `SET` does not prevent that race. CasCache does. It snapshots per-key version state before a fill, only stores if that snapshot is still current, and validates cached values again on read before serving them.
 
-## Why use it
+## Why
 
 What CasCache does:
 
@@ -32,12 +32,12 @@ CasCache keeps authoritative version state for every logical key.
 The normal fill path is:
 
 1. `SnapshotVersion`
-2. read from the source of truth
+2. do your service, app, business logic (db, API etc.)
 3. `SetIfVersion`
 
 The normal write path is:
 
-1. write to the source of truth
+1. write where you want
 2. `Invalidate`
 
 That means the cache never trusts a value just because it exists. A value must still match the current version state when it is read.
@@ -156,7 +156,8 @@ func (r *UserWriteRepo) Save(ctx context.Context, user User) error {
 
 ## Choosing a topology
 
-CasCache can be used in a few different shapes. The right choice depends on where values live and whether replicas need shared freshness decisions.
+CasCache can be used in a few different shapes.
+The right choice depends on where values live and whether replicas need shared freshness decisions.
 
 | Constructor | Use it when | Notes |
 | --- | --- | --- |
@@ -217,7 +218,7 @@ func newRedisUserCache() error {
 
 - the Redis value provider
 - the Redis-backed version store
-- the Redis-native single-key compare-and-write path
+- the Redis-native single-key "compare-and-write" path
 - the Redis-native single-key invalidate path
 
 Single-key `SetIfVersion` and `Invalidate` are atomic inside Redis. Batch entries are still validated on read rather than written as one globally atomic multi-key transaction.
@@ -234,7 +235,7 @@ Batch reads are optimistic but conservative:
 
 - the cache first tries the grouped batch entry
 - every requested member is checked against current authoritative version state
-- undecodable, incomplete, or stale batches are rejected
+- undecodable, incomplete or stale batches are rejected
 - the cache falls back to single-key reads when needed
 
 Batch writes are about efficiency, not stronger atomicity. A successful batch write stores one combined value, but freshness is still enforced per member.
@@ -245,35 +246,6 @@ The default seed behavior is:
 - `BatchWriteSeedStrict`
 
 That keeps reads simple by default and preserves per-key CAS checks when singles are materialized after a successful batch write.
-
-## Strict mode and retention
-
-> [!IMPORTANT]
-> The default behavior is strict and safe.
->
-> - `cascache.New(...)` uses `version.NewLocal()`, which does not run cleanup.
-> - `redis.Options.VersionTTL` defaults to `0`, which means authoritative version state does not expire automatically.
->
-> Keep those defaults if you want the strongest CAS semantics.
-
-CasCache can also be configured to bound version metadata growth:
-
-- Redis version expiry via `redis.Options.VersionTTL`
-- local in-process cleanup via `version.NewLocalWithCleanup(...)`
-
-Those options are valid, but they are not free. They turn the version store into a retention-bounded mode rather than a fully strict one.
-
-What changes when version state is allowed to disappear:
-
-- old cached values are still rejected conservatively on read once version state is gone
-- very old `missing` snapshots can become valid again after that key's version state has been removed
-
-In practice:
-
-- use persistent version state for strict correctness
-- treat `VersionTTL` and local cleanup as advanced retention options
-
-If you run several replicas and correctness matters across restarts, use a shared persistent version store such as Redis.
 
 ## Providers
 
@@ -298,9 +270,9 @@ Provider notes:
 - `codec.Bytes`
 - `codec.String`
 
-## Hooks and observability
+## Hooks
 
-CasCache exposes a small hook surface for high-signal operational events such as:
+CasCache exposes a small hook surface for operational events such as:
 
 - self-healed corrupt or stale entries
 - rejected batches
@@ -322,7 +294,7 @@ Hooks should stay cheap and non-blocking. If they can block, wrap them in `hooks
 - If values live in Redis, prefer `redis.New(...)` over manual wiring.
 - If you want per-node hot reads in local memory, keep values in Ristretto or BigCache and share only version state through `redis.NewVersionStore(...)`.
 
-CasCache is for the cases where "cache invalidation is hard" is not a joke but an actual correctness requirement.
+CasCache is for the cases where actual correctness is an requirement.
 
 If you follow the normal flow:
 
