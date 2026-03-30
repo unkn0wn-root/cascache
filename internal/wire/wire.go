@@ -58,7 +58,7 @@ const (
 var (
 	ErrCorrupt = errors.New("corrupt entry")
 
-	// magic4 is the fixed 4-byte magic header ("CASC").
+	// fixed 4-byte magic header ("CASC").
 	casc = [...]byte{'C', 'A', 'S', 'C'}
 )
 

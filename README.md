@@ -172,7 +172,11 @@ func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
 		return User{}, err
 	}
 
-	// A version mismatch here is normal under contention.
+	// SetIfVersion returns (WriteResult, error). A version mismatch is not
+	// an error - it means another request invalidated this key while you were
+	// loading. The cache skips the write and the next reader will fill it
+	// with fresh data. We already have the value from the database, so we
+	// return it either way.
 	_, _ = r.Cache.SetIfVersion(ctx, id, user, version, 0)
 	return user, nil
 }
