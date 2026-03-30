@@ -5,11 +5,12 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/unkn0wn-root/cascache/codec"
-	coregen "github.com/unkn0wn-root/cascache/genstore"
+	"github.com/unkn0wn-root/cascache/v3/codec"
+	"github.com/unkn0wn-root/cascache/v3/version"
 )
 
 type fakeClient struct {
@@ -44,6 +45,21 @@ func TestNewKeyMutatorNilClient(t *testing.T) {
 	}
 }
 
+func TestNewKeyMutatorWithOptionsStoresVersionTTL(t *testing.T) {
+	t.Parallel()
+
+	mutator, err := NewKeyMutatorWithOptions(KeyMutatorOptions{
+		Client:     &fakeClient{},
+		VersionTTL: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewKeyMutatorWithOptions: %v", err)
+	}
+	if mutator.versionTTL != 2*time.Minute {
+		t.Fatalf("versionTTL = %v, want %v", mutator.versionTTL, 2*time.Minute)
+	}
+}
+
 func TestNewProviderNilClient(t *testing.T) {
 	t.Parallel()
 
@@ -52,11 +68,26 @@ func TestNewProviderNilClient(t *testing.T) {
 	}
 }
 
-func TestNewGenStoreNilClient(t *testing.T) {
+func TestNewVersionStoreNilClient(t *testing.T) {
 	t.Parallel()
 
-	if _, err := NewGenStore(nil); !errors.Is(err, ErrNilClient) {
-		t.Fatalf("NewGenStore error = %v, want %v", err, ErrNilClient)
+	if _, err := NewVersionStore(nil); !errors.Is(err, ErrNilClient) {
+		t.Fatalf("NewVersionStore error = %v, want %v", err, ErrNilClient)
+	}
+}
+
+func TestNewVersionStoreWithOptionsStoresVersionTTL(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewVersionStoreWithOptions(VersionStoreOptions{
+		Client:     &fakeClient{},
+		VersionTTL: 90 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewVersionStoreWithOptions: %v", err)
+	}
+	if store.versionTTL != 90*time.Second {
+		t.Fatalf("versionTTL = %v, want %v", store.versionTTL, 90*time.Second)
 	}
 }
 
@@ -129,13 +160,13 @@ func TestCloseClientOwnershipEnabledClosesClientOnce(t *testing.T) {
 	}
 }
 
-func TestGenStoreCloseSharedClientNoop(t *testing.T) {
+func TestVersionStoreCloseSharedClientNoop(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeUniversalClient{}
-	store, err := NewGenStore(client)
+	store, err := NewVersionStore(client)
 	if err != nil {
-		t.Fatalf("NewGenStore: %v", err)
+		t.Fatalf("NewVersionStore: %v", err)
 	}
 
 	if err := store.Close(context.Background()); err != nil {
@@ -146,16 +177,16 @@ func TestGenStoreCloseSharedClientNoop(t *testing.T) {
 	}
 }
 
-func TestGenStoreCloseOwnedClientOnce(t *testing.T) {
+func TestVersionStoreCloseOwnedClientOnce(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeUniversalClient{}
-	store, err := NewGenStoreWithOptions(GenStoreOptions{
+	store, err := NewVersionStoreWithOptions(VersionStoreOptions{
 		Client:      client,
 		CloseClient: true,
 	})
 	if err != nil {
-		t.Fatalf("NewGenStoreWithOptions: %v", err)
+		t.Fatalf("NewVersionStoreWithOptions: %v", err)
 	}
 
 	if err := store.Close(context.Background()); err != nil {
@@ -169,31 +200,62 @@ func TestGenStoreCloseOwnedClientOnce(t *testing.T) {
 	}
 }
 
-func TestGenStoreWithOptionsRejectsNilClient(t *testing.T) {
+func TestVersionStoreWithOptionsRejectsNilClient(t *testing.T) {
 	t.Parallel()
 
-	_, err := NewGenStoreWithOptions(GenStoreOptions{})
+	_, err := NewVersionStoreWithOptions(VersionStoreOptions{})
 	if !errors.Is(err, ErrNilClient) {
-		t.Fatalf("NewGenStoreWithOptions error mismatch: %v", err)
+		t.Fatalf("NewVersionStoreWithOptions error mismatch: %v", err)
 	}
 }
 
-func TestGenStoreNilReceiverReturnsErrNilClient(t *testing.T) {
+func TestVersionStoreNilReceiverReturnsErrNilClient(t *testing.T) {
 	t.Parallel()
 
-	var store *GenStore
-	key := coregen.NewCacheKey("k")
+	var store *VersionStore
+	key := version.NewCacheKey("k")
 
 	if _, err := store.Snapshot(context.Background(), key); !errors.Is(err, ErrNilClient) {
 		t.Fatalf("Snapshot error = %v, want %v", err, ErrNilClient)
 	}
-	if _, err := store.SnapshotMany(context.Background(), []coregen.CacheKey{key}); !errors.Is(err, ErrNilClient) {
+	if _, err := store.SnapshotMany(
+		context.Background(),
+		[]version.CacheKey{key},
+	); !errors.Is(
+		err,
+		ErrNilClient,
+	) {
 		t.Fatalf("SnapshotMany error = %v, want %v", err, ErrNilClient)
 	}
-	if _, err := store.Bump(context.Background(), key); !errors.Is(err, ErrNilClient) {
-		t.Fatalf("Bump error = %v, want %v", err, ErrNilClient)
+	if _, err := store.Advance(context.Background(), key); !errors.Is(err, ErrNilClient) {
+		t.Fatalf("Advance error = %v, want %v", err, ErrNilClient)
 	}
 	if err := store.Close(context.Background()); err != nil {
 		t.Fatalf("Close error = %v, want nil", err)
+	}
+}
+
+func TestParseFenceRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	want, err := version.NewFence()
+	if err != nil {
+		t.Fatalf("NewFence: %v", err)
+	}
+
+	got, err := version.ParseFence(want.String())
+	if err != nil {
+		t.Fatalf("ParseFence: %v", err)
+	}
+	if !got.Equal(want) {
+		t.Fatalf("fence = %s, want %s", got, want)
+	}
+}
+
+func TestParseFenceRejectsLegacyCounter(t *testing.T) {
+	t.Parallel()
+
+	if _, err := version.ParseFence("7"); err == nil {
+		t.Fatal("expected legacy counter format to be rejected")
 	}
 }

@@ -4,11 +4,11 @@
 //
 //	"log/slog"
 //
-//	"github.com/unkn0wn-root/cascache"
-//	"github.com/unkn0wn-root/cascache/codec"
-//	"github.com/unkn0wn-root/cascache/hooks/async"
-//	"github.com/unkn0wn-root/cascache/hooks/slog"
-//	cascacheredis "github.com/unkn0wn-root/cascache/redis"
+//	"github.com/unkn0wn-root/cascache/v3"
+//	"github.com/unkn0wn-root/cascache/v3/codec"
+//	"github.com/unkn0wn-root/cascache/v3/hooks/async"
+//	"github.com/unkn0wn-root/cascache/v3/hooks/slog"
+//	cascacheredis "github.com/unkn0wn-root/cascache/v3/redis"
 //
 // )
 //
@@ -20,13 +20,13 @@
 // hooks := asynchook.New(raw, 1, 1000) // 1 worker; queue 1000 events
 // defer hooks.Close()
 //
-// sharedGenStore, _ := cascacheredis.NewGenStore(rdb)
+// sharedVersionStore, _ := cascacheredis.NewVersionStore(rdb)
 //
 //	cache, _ := cascache.New[User](cascache.Options[User]{
 //	    Namespace: "app:prod:user",
 //	    Provider:  provider,
 //	    Codec:     codec.JSON[User]{},
-//	    GenStore:  sharedGenStore,
+//	    VersionStore:  sharedVersionStore,
 //	    Hooks:     hooks, // or `raw` if you don’t want async
 //	})
 package asynchook
@@ -34,8 +34,8 @@ package asynchook
 import (
 	"sync"
 
-	"github.com/unkn0wn-root/cascache"
-	"github.com/unkn0wn-root/cascache/genstore"
+	"github.com/unkn0wn-root/cascache/v3"
+	"github.com/unkn0wn-root/cascache/v3/version"
 )
 
 type Hooks struct {
@@ -100,12 +100,12 @@ func (h *Hooks) SelfHealSingle(k string, r cascache.SelfHealReason) {
 	h.try(func() { h.inner.SelfHealSingle(k, r) })
 }
 
-func (h *Hooks) GenBumpError(k genstore.CacheKey, err error) {
-	h.try(func() { h.inner.GenBumpError(k, err) })
+func (h *Hooks) VersionAdvanceError(k version.CacheKey, err error) {
+	h.try(func() { h.inner.VersionAdvanceError(k, err) })
 }
 
-func (h *Hooks) LocalGenWithBatch() {
-	h.try(func() { h.inner.LocalGenWithBatch() })
+func (h *Hooks) LocalVersionStoreWithBatch() {
+	h.try(func() { h.inner.LocalVersionStoreWithBatch() })
 }
 
 func (h *Hooks) BatchRejected(ns string, n int, r cascache.BatchRejectReason) {
@@ -116,8 +116,12 @@ func (h *Hooks) ProviderSetRejected(k string, b bool) {
 	h.try(func() { h.inner.ProviderSetRejected(k, b) })
 }
 
-func (h *Hooks) GenSnapshotError(n int, err error) {
-	h.try(func() { h.inner.GenSnapshotError(n, err) })
+func (h *Hooks) VersionSnapshotError(n int, err error) {
+	h.try(func() { h.inner.VersionSnapshotError(n, err) })
+}
+
+func (h *Hooks) VersionCreateError(k version.CacheKey, err error) {
+	h.try(func() { h.inner.VersionCreateError(k, err) })
 }
 
 func (h *Hooks) InvalidateOutage(k string, be, de error) {

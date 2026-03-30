@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"sync/atomic"
 
-	"github.com/unkn0wn-root/cascache"
-	"github.com/unkn0wn-root/cascache/genstore"
+	"github.com/unkn0wn-root/cascache/v3"
+	"github.com/unkn0wn-root/cascache/v3/version"
 )
 
 // Options configures the slog-based Hooks.
@@ -82,20 +82,29 @@ func (h *Hooks) ProviderSetRejected(storageKey string, isBatch bool) {
 		"is_batch", isBatch)
 }
 
-func (h *Hooks) GenSnapshotError(count int, err error) {
+func (h *Hooks) VersionSnapshotError(count int, err error) {
 	if h.l == nil {
 		return
 	}
-	h.l.Warn("cascache.gen_snapshot_error",
+	h.l.Warn("cascache.version_snapshot_error",
 		"count", count,
 		"err", err)
 }
 
-func (h *Hooks) GenBumpError(cacheKey genstore.CacheKey, err error) {
+func (h *Hooks) VersionCreateError(cacheKey version.CacheKey, err error) {
 	if h.l == nil {
 		return
 	}
-	h.l.Warn("cascache.gen_bump_error",
+	h.l.Warn("cascache.version_create_error",
+		"key", h.redact(cacheKey.String()),
+		"err", err)
+}
+
+func (h *Hooks) VersionAdvanceError(cacheKey version.CacheKey, err error) {
+	if h.l == nil {
+		return
+	}
+	h.l.Warn("cascache.version_advance_error",
 		"key", h.redact(cacheKey.String()),
 		"err", err)
 }
@@ -110,10 +119,10 @@ func (h *Hooks) InvalidateOutage(key string, bumpErr, delErr error) {
 		"del_err", delErr)
 }
 
-func (h *Hooks) LocalGenWithBatch() {
+func (h *Hooks) LocalVersionStoreWithBatch() {
 	if h.l == nil {
 		return
 	}
-	h.l.Warn("cascache.local_gen_with_batch",
-		"msg", "batch enabled with local genstore; stale batches possible in multi-replica")
+	h.l.Warn("cascache.local_version_store_with_batch",
+		"msg", "batch enabled with local version store; stale batches possible in multi-replica")
 }

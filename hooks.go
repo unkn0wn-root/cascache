@@ -1,6 +1,6 @@
 package cascache
 
-import "github.com/unkn0wn-root/cascache/genstore"
+import "github.com/unkn0wn-root/cascache/v3/version"
 
 // Hooks are lightweight callbacks for high-signal events.
 // Implementations MUST be cheap and non-blocking; do not perform I/O.
@@ -8,15 +8,16 @@ import "github.com/unkn0wn-root/cascache/genstore"
 //
 // Key-bearing callbacks intentionally expose different key kinds:
 //   - SelfHealSingle / ProviderSetRejected: provider storage keys.
-//   - GenBumpError: canonical genstore.CacheKey identity.
+//   - VersionCreateError / VersionAdvanceError: canonical version.CacheKey identity.
 type Hooks interface {
 	SelfHealSingle(storageKey string, reason SelfHealReason)
 	BatchRejected(namespace string, requested int, reason BatchRejectReason)
 	ProviderSetRejected(storageKey string, isBatch bool)
-	GenSnapshotError(count int, err error)
-	GenBumpError(cacheKey genstore.CacheKey, err error)
+	VersionSnapshotError(count int, err error)
+	VersionCreateError(cacheKey version.CacheKey, err error)
+	VersionAdvanceError(cacheKey version.CacheKey, err error)
 	InvalidateOutage(key string, bumpErr, delErr error)
-	LocalGenWithBatch()
+	LocalVersionStoreWithBatch()
 }
 
 // NopHooks is a default no-op.
@@ -25,10 +26,11 @@ type NopHooks struct{}
 func (NopHooks) SelfHealSingle(string, SelfHealReason)        {}
 func (NopHooks) BatchRejected(string, int, BatchRejectReason) {}
 func (NopHooks) ProviderSetRejected(string, bool)             {}
-func (NopHooks) GenSnapshotError(int, error)                  {}
-func (NopHooks) GenBumpError(genstore.CacheKey, error)        {}
+func (NopHooks) VersionSnapshotError(int, error)              {}
+func (NopHooks) VersionCreateError(version.CacheKey, error)   {}
+func (NopHooks) VersionAdvanceError(version.CacheKey, error)  {}
 func (NopHooks) InvalidateOutage(string, error, error)        {}
-func (NopHooks) LocalGenWithBatch()                           {}
+func (NopHooks) LocalVersionStoreWithBatch()                  {}
 
 // Multi returns a Hooks implementation that fans out to all provided hooks
 // in order. Nil entries are silently skipped. Panics from any hook propagate
@@ -83,15 +85,21 @@ func (m multiHooks) ProviderSetRejected(k string, b bool) {
 	}
 }
 
-func (m multiHooks) GenSnapshotError(n int, err error) {
+func (m multiHooks) VersionSnapshotError(n int, err error) {
 	for _, h := range m {
-		h.GenSnapshotError(n, err)
+		h.VersionSnapshotError(n, err)
 	}
 }
 
-func (m multiHooks) GenBumpError(k genstore.CacheKey, err error) {
+func (m multiHooks) VersionCreateError(k version.CacheKey, err error) {
 	for _, h := range m {
-		h.GenBumpError(k, err)
+		h.VersionCreateError(k, err)
+	}
+}
+
+func (m multiHooks) VersionAdvanceError(k version.CacheKey, err error) {
+	for _, h := range m {
+		h.VersionAdvanceError(k, err)
 	}
 }
 
@@ -101,8 +109,8 @@ func (m multiHooks) InvalidateOutage(k string, be, de error) {
 	}
 }
 
-func (m multiHooks) LocalGenWithBatch() {
+func (m multiHooks) LocalVersionStoreWithBatch() {
 	for _, h := range m {
-		h.LocalGenWithBatch()
+		h.LocalVersionStoreWithBatch()
 	}
 }

@@ -17,8 +17,8 @@ func TestSingleKeysAreInjectiveAcrossNamespaceBoundaries(t *testing.T) {
 	if left.Value == right.Value {
 		t.Fatalf("value keys collided: %q", left.Value)
 	}
-	if GenStorageKey(left.Cache) == GenStorageKey(right.Cache) {
-		t.Fatalf("gen keys collided: %q", GenStorageKey(left.Cache))
+	if VersionStorageKey(left.Cache) == VersionStorageKey(right.Cache) {
+		t.Fatalf("version keys collided: %q", VersionStorageKey(left.Cache))
 	}
 }
 
@@ -28,7 +28,7 @@ func TestBatchValueSortedUsesVersionedPrefixAndDigest(t *testing.T) {
 		t.Fatalf("BatchValueSorted: %v", err)
 	}
 
-	const prefix = "cas:v2:val:b:4:user:"
+	const prefix = "cas:v3:val:b:4:user:"
 	if !strings.HasPrefix(key.String(), prefix) {
 		t.Fatalf("batch key prefix mismatch: %q", key)
 	}
@@ -88,38 +88,46 @@ func TestBatchValueSortedEmptyInputIsDeterministic(t *testing.T) {
 	}
 }
 
-func TestSingleValueAndGenKeysShareRedisHashTag(t *testing.T) {
+func TestSingleValueAndVersionKeysShareRedisHashTag(t *testing.T) {
 	single := NewKeyspace("user").Single("a")
 	valueKey := single.Value.String()
-	genKey := GenStorageKey(single.Cache)
+	versionKey := VersionStorageKey(single.Cache)
 
-	if !strings.HasPrefix(valueKey, "cas:v2:val:{") {
+	if !strings.HasPrefix(valueKey, "cas:v3:val:{") {
 		t.Fatalf("value key prefix mismatch: %q", valueKey)
 	}
-	if !strings.HasPrefix(genKey, "cas:v2:gen:{") {
-		t.Fatalf("gen key prefix mismatch: %q", genKey)
+	if !strings.HasPrefix(versionKey, "cas:v3:ver:{") {
+		t.Fatalf("version key prefix mismatch: %q", versionKey)
 	}
 
 	valueTag := redisHashTag(valueKey)
-	genTag := redisHashTag(genKey)
-	if valueTag == "" || genTag == "" {
-		t.Fatalf("expected both keys to have Redis hash tags: value=%q gen=%q", valueKey, genKey)
+	versionTag := redisHashTag(versionKey)
+	if valueTag == "" || versionTag == "" {
+		t.Fatalf(
+			"expected both keys to have Redis hash tags: value=%q version=%q",
+			valueKey,
+			versionKey,
+		)
 	}
-	if valueTag != genTag {
-		t.Fatalf("hash tag mismatch: value=%q gen=%q", valueTag, genTag)
+	if valueTag != versionTag {
+		t.Fatalf("hash tag mismatch: value=%q version=%q", valueTag, versionTag)
 	}
 }
 
 func TestSingleKeysWithSpecialCharactersKeepStableHashTag(t *testing.T) {
 	single := NewKeyspace("app:{prod}:x").Single("user:{42}:name")
 	valueTag := redisHashTag(single.Value.String())
-	genTag := redisHashTag(GenStorageKey(single.Cache))
+	versionTag := redisHashTag(VersionStorageKey(single.Cache))
 
-	if valueTag == "" || genTag == "" {
-		t.Fatalf("expected both keys to have Redis hash tags: value=%q gen=%q", single.Value, GenStorageKey(single.Cache))
+	if valueTag == "" || versionTag == "" {
+		t.Fatalf(
+			"expected both keys to have Redis hash tags: value=%q version=%q",
+			single.Value,
+			VersionStorageKey(single.Cache),
+		)
 	}
-	if valueTag != genTag {
-		t.Fatalf("hash tag mismatch: value=%q gen=%q", valueTag, genTag)
+	if valueTag != versionTag {
+		t.Fatalf("hash tag mismatch: value=%q version=%q", valueTag, versionTag)
 	}
 }
 

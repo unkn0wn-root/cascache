@@ -6,8 +6,8 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/unkn0wn-root/cascache"
-	c "github.com/unkn0wn-root/cascache/codec"
+	"github.com/unkn0wn-root/cascache/v3"
+	c "github.com/unkn0wn-root/cascache/v3/codec"
 )
 
 // Options configures the full Redis-backed cache.
@@ -20,6 +20,7 @@ type Options[V any] struct {
 
 	DefaultTTL time.Duration
 	BatchTTL   time.Duration
+	VersionTTL time.Duration // 0 keeps authoritative version state indefinitely
 	Disabled   bool
 
 	ComputeSetCost cascache.SetCostFunc
@@ -46,13 +47,19 @@ func New[V any](opts Options[V]) (cascache.CAS[V], error) {
 		return nil, err
 	}
 
-	ver, err := NewGenStore(opts.Client)
+	ver, err := NewVersionStoreWithOptions(VersionStoreOptions{
+		Client:     opts.Client,
+		VersionTTL: opts.VersionTTL,
+	})
 	if err != nil {
 		_ = pr.Close(context.Background())
 		return nil, err
 	}
 
-	mutator, err := NewKeyMutator(opts.Client)
+	mutator, err := NewKeyMutatorWithOptions(KeyMutatorOptions{
+		Client:     opts.Client,
+		VersionTTL: opts.VersionTTL,
+	})
 	if err != nil {
 		_ = ver.Close(context.Background())
 		_ = pr.Close(context.Background())
@@ -69,7 +76,7 @@ func New[V any](opts Options[V]) (cascache.CAS[V], error) {
 		BatchTTL:       opts.BatchTTL,
 		Disabled:       opts.Disabled,
 		ComputeSetCost: opts.ComputeSetCost,
-		GenStore:       ver,
+		VersionStore:   ver,
 		KeyWriter:      mutator,
 		KeyInvalidator: mutator,
 		DisableBatch:   opts.DisableBatch,

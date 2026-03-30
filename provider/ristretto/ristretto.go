@@ -7,7 +7,7 @@ import (
 
 	rc "github.com/dgraph-io/ristretto"
 
-	pr "github.com/unkn0wn-root/cascache/provider"
+	pr "github.com/unkn0wn-root/cascache/v3/provider"
 )
 
 type Ristretto struct {
@@ -54,7 +54,13 @@ func (p *Ristretto) Get(_ context.Context, key string) ([]byte, bool, error) {
 	return b, true, nil
 }
 
-func (p *Ristretto) Set(_ context.Context, key string, value []byte, cost int64, ttl time.Duration) (bool, error) {
+func (p *Ristretto) Set(
+	_ context.Context,
+	key string,
+	value []byte,
+	cost int64,
+	ttl time.Duration,
+) (bool, error) {
 	// Ristretto can reject writes under pressure -> ok=false, err=nil.
 	return p.c.SetWithTTL(key, value, cost, ttl), nil
 }

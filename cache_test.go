@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	c "github.com/unkn0wn-root/cascache/codec"
-	"github.com/unkn0wn-root/cascache/genstore"
-	"github.com/unkn0wn-root/cascache/internal/wire"
-	pr "github.com/unkn0wn-root/cascache/provider"
+	c "github.com/unkn0wn-root/cascache/v3/codec"
+	"github.com/unkn0wn-root/cascache/v3/internal/wire"
+	pr "github.com/unkn0wn-root/cascache/v3/provider"
+	"github.com/unkn0wn-root/cascache/v3/version"
 )
 
 type memEntry struct {
@@ -23,7 +23,7 @@ type memEntry struct {
 	exp time.Time // zero => no TTL
 }
 
-const batchValueRoot = "cas:v2:val:b:"
+const batchValueRoot = "cas:v3:val:b:"
 
 type memProvider struct {
 	m map[string]memEntry
@@ -48,7 +48,13 @@ func (p *memProvider) Get(_ context.Context, key string) ([]byte, bool, error) {
 	return e.v, true, nil
 }
 
-func (p *memProvider) Set(_ context.Context, key string, value []byte, _ int64, ttl time.Duration) (bool, error) {
+func (p *memProvider) Set(
+	_ context.Context,
+	key string,
+	value []byte,
+	_ int64,
+	ttl time.Duration,
+) (bool, error) {
 	var exp time.Time
 	if ttl > 0 {
 		exp = time.Now().Add(ttl)
@@ -57,7 +63,13 @@ func (p *memProvider) Set(_ context.Context, key string, value []byte, _ int64, 
 	return true, nil
 }
 
-func (p *memProvider) Add(_ context.Context, key string, value []byte, _ int64, ttl time.Duration) (bool, error) {
+func (p *memProvider) Add(
+	_ context.Context,
+	key string,
+	value []byte,
+	_ int64,
+	ttl time.Duration,
+) (bool, error) {
 	if _, ok := p.m[key]; ok {
 		return false, nil
 	}
@@ -123,7 +135,13 @@ type setErrProvider struct {
 
 var _ pr.Provider = (*setErrProvider)(nil)
 
-func (p *setErrProvider) Set(_ context.Context, key string, value []byte, _ int64, ttl time.Duration) (bool, error) {
+func (p *setErrProvider) Set(
+	_ context.Context,
+	key string,
+	value []byte,
+	_ int64,
+	ttl time.Duration,
+) (bool, error) {
 	return false, p.err
 }
 
@@ -137,7 +155,13 @@ func (p *plainProvider) Get(ctx context.Context, key string) ([]byte, bool, erro
 	return p.inner.Get(ctx, key)
 }
 
-func (p *plainProvider) Set(ctx context.Context, key string, value []byte, cost int64, ttl time.Duration) (bool, error) {
+func (p *plainProvider) Set(
+	ctx context.Context,
+	key string,
+	value []byte,
+	cost int64,
+	ttl time.Duration,
+) (bool, error) {
 	return p.inner.Set(ctx, key, value, cost, ttl)
 }
 
@@ -156,7 +180,13 @@ type batchRejectSingleErrProvider struct {
 
 var _ pr.Provider = (*batchRejectSingleErrProvider)(nil)
 
-func (p *batchRejectSingleErrProvider) Set(_ context.Context, key string, value []byte, _ int64, ttl time.Duration) (bool, error) {
+func (p *batchRejectSingleErrProvider) Set(
+	_ context.Context,
+	key string,
+	value []byte,
+	_ int64,
+	ttl time.Duration,
+) (bool, error) {
 	if strings.HasPrefix(key, batchValueRoot) {
 		return false, nil
 	}
@@ -169,7 +199,13 @@ type batchRejectProvider struct {
 
 var _ pr.Provider = (*batchRejectProvider)(nil)
 
-func (p *batchRejectProvider) Set(ctx context.Context, key string, value []byte, cost int64, ttl time.Duration) (bool, error) {
+func (p *batchRejectProvider) Set(
+	ctx context.Context,
+	key string,
+	value []byte,
+	cost int64,
+	ttl time.Duration,
+) (bool, error) {
 	if strings.HasPrefix(key, batchValueRoot) {
 		return false, nil
 	}
@@ -188,12 +224,24 @@ var (
 	_ pr.Adder    = (*countingAdderProvider)(nil)
 )
 
-func (p *countingAdderProvider) Set(ctx context.Context, key string, value []byte, cost int64, ttl time.Duration) (bool, error) {
+func (p *countingAdderProvider) Set(
+	ctx context.Context,
+	key string,
+	value []byte,
+	cost int64,
+	ttl time.Duration,
+) (bool, error) {
 	p.setCalls++
 	return p.memProvider.Set(ctx, key, value, cost, ttl)
 }
 
-func (p *countingAdderProvider) Add(ctx context.Context, key string, value []byte, cost int64, ttl time.Duration) (bool, error) {
+func (p *countingAdderProvider) Add(
+	ctx context.Context,
+	key string,
+	value []byte,
+	cost int64,
+	ttl time.Duration,
+) (bool, error) {
 	p.addCalls++
 	stored, err := p.memProvider.Add(ctx, key, value, cost, ttl)
 	if stored {
@@ -202,72 +250,105 @@ func (p *countingAdderProvider) Add(ctx context.Context, key string, value []byt
 	return stored, err
 }
 
-type countingGenStore struct {
-	inner             genstore.GenStore
+type countingVersionStore struct {
+	inner             version.Store
 	snapshotCalls     int
 	snapshotManyCalls int
 }
 
-var _ genstore.GenStore = (*countingGenStore)(nil)
+var _ version.Store = (*countingVersionStore)(nil)
 
-func (s *countingGenStore) Snapshot(ctx context.Context, k genstore.CacheKey) (uint64, error) {
+func (s *countingVersionStore) Snapshot(
+	ctx context.Context,
+	k version.CacheKey,
+) (version.Snapshot, error) {
 	s.snapshotCalls++
 	return s.inner.Snapshot(ctx, k)
 }
 
-func (s *countingGenStore) SnapshotMany(ctx context.Context, ks []genstore.CacheKey) (map[genstore.CacheKey]uint64, error) {
+func (s *countingVersionStore) SnapshotMany(
+	ctx context.Context,
+	ks []version.CacheKey,
+) (map[version.CacheKey]version.Snapshot, error) {
 	s.snapshotManyCalls++
 	return s.inner.SnapshotMany(ctx, ks)
 }
 
-func (s *countingGenStore) Bump(ctx context.Context, k genstore.CacheKey) (uint64, error) {
-	return s.inner.Bump(ctx, k)
+func (s *countingVersionStore) CreateIfMissing(
+	ctx context.Context,
+	k version.CacheKey,
+) (version.Snapshot, bool, error) {
+	return s.inner.CreateIfMissing(ctx, k)
 }
 
-func (s *countingGenStore) Cleanup(retention time.Duration) {
+func (s *countingVersionStore) Advance(
+	ctx context.Context,
+	k version.CacheKey,
+) (version.Snapshot, error) {
+	return s.inner.Advance(ctx, k)
+}
+
+func (s *countingVersionStore) Cleanup(retention time.Duration) {
 	s.inner.Cleanup(retention)
 }
 
-func (s *countingGenStore) Close(ctx context.Context) error {
+func (s *countingVersionStore) Close(ctx context.Context) error {
 	return s.inner.Close(ctx)
 }
 
-type bumpAfterSnapshotManyGenStore struct {
-	inner            genstore.GenStore
-	bumpKey          genstore.CacheKey
-	bumpOnCall       int
+type advanceAfterSnapshotManyVersionStore struct {
+	inner            version.Store
+	advanceKey       version.CacheKey
+	advanceOnCall    int
 	snapshotManyCall int
-	bumped           bool
+	advanced         bool
 }
 
-var _ genstore.GenStore = (*bumpAfterSnapshotManyGenStore)(nil)
+var _ version.Store = (*advanceAfterSnapshotManyVersionStore)(nil)
 
-func (s *bumpAfterSnapshotManyGenStore) Snapshot(ctx context.Context, k genstore.CacheKey) (uint64, error) {
+func (s *advanceAfterSnapshotManyVersionStore) Snapshot(
+	ctx context.Context,
+	k version.CacheKey,
+) (version.Snapshot, error) {
 	return s.inner.Snapshot(ctx, k)
 }
 
-func (s *bumpAfterSnapshotManyGenStore) SnapshotMany(ctx context.Context, ks []genstore.CacheKey) (map[genstore.CacheKey]uint64, error) {
+func (s *advanceAfterSnapshotManyVersionStore) SnapshotMany(
+	ctx context.Context,
+	ks []version.CacheKey,
+) (map[version.CacheKey]version.Snapshot, error) {
 	got, err := s.inner.SnapshotMany(ctx, ks)
 	s.snapshotManyCall++
-	if err != nil || s.bumped || s.bumpKey == (genstore.CacheKey{}) || s.snapshotManyCall != s.bumpOnCall {
+	if err != nil || s.advanced || s.advanceKey == (version.CacheKey{}) ||
+		s.snapshotManyCall != s.advanceOnCall {
 		return got, err
 	}
-	s.bumped = true
-	if _, bumpErr := s.inner.Bump(ctx, s.bumpKey); bumpErr != nil {
-		return nil, bumpErr
+	s.advanced = true
+	if _, advanceErr := s.inner.Advance(ctx, s.advanceKey); advanceErr != nil {
+		return nil, advanceErr
 	}
 	return got, nil
 }
 
-func (s *bumpAfterSnapshotManyGenStore) Bump(ctx context.Context, k genstore.CacheKey) (uint64, error) {
-	return s.inner.Bump(ctx, k)
+func (s *advanceAfterSnapshotManyVersionStore) CreateIfMissing(
+	ctx context.Context,
+	k version.CacheKey,
+) (version.Snapshot, bool, error) {
+	return s.inner.CreateIfMissing(ctx, k)
 }
 
-func (s *bumpAfterSnapshotManyGenStore) Cleanup(retention time.Duration) {
+func (s *advanceAfterSnapshotManyVersionStore) Advance(
+	ctx context.Context,
+	k version.CacheKey,
+) (version.Snapshot, error) {
+	return s.inner.Advance(ctx, k)
+}
+
+func (s *advanceAfterSnapshotManyVersionStore) Cleanup(retention time.Duration) {
 	s.inner.Cleanup(retention)
 }
 
-func (s *bumpAfterSnapshotManyGenStore) Close(ctx context.Context) error {
+func (s *advanceAfterSnapshotManyVersionStore) Close(ctx context.Context) error {
 	return s.inner.Close(ctx)
 }
 
@@ -277,26 +358,37 @@ type recordingKeyAdapter struct {
 	invalidateErr   error
 	setCalls        int
 	invalidateCalls int
-	lastVersionKey  genstore.CacheKey
+	lastVersionKey  version.CacheKey
 	lastValueKey    string
-	lastExpected    uint64
-	lastWireValue   []byte
+	lastExpected    version.Snapshot
+	lastPayload     []byte
 	lastTTL         time.Duration
 }
 
 var _ KeyMutator = (*recordingKeyAdapter)(nil)
 
-func (s *recordingKeyAdapter) SetIfVersion(_ context.Context, versionKey genstore.CacheKey, valueKey string, expected uint64, wireValue []byte, ttl time.Duration) (bool, error) {
+func (s *recordingKeyAdapter) SetIfVersion(
+	_ context.Context,
+	versionKey version.CacheKey,
+	valueKey string,
+	expected version.Snapshot,
+	payload []byte,
+	ttl time.Duration,
+) (bool, error) {
 	s.setCalls++
 	s.lastVersionKey = versionKey
 	s.lastValueKey = valueKey
 	s.lastExpected = expected
-	s.lastWireValue = append([]byte(nil), wireValue...)
+	s.lastPayload = append([]byte(nil), payload...)
 	s.lastTTL = ttl
 	return s.setStored, s.setErr
 }
 
-func (s *recordingKeyAdapter) Invalidate(_ context.Context, versionKey genstore.CacheKey, valueKey string) error {
+func (s *recordingKeyAdapter) Invalidate(
+	_ context.Context,
+	versionKey version.CacheKey,
+	valueKey string,
+) error {
 	s.invalidateCalls++
 	s.lastVersionKey = versionKey
 	s.lastValueKey = valueKey
@@ -308,70 +400,16 @@ type user struct {
 	Name string `json:"name"`
 }
 
-type legacyTestCache[V any] struct {
+type testCache[V any] struct {
 	CAS[V]
 }
 
-func (c *legacyTestCache[V]) SnapshotGen(ctx context.Context, key string) uint64 {
-	v, err := c.CAS.SnapshotVersion(ctx, key)
-	if err != nil {
-		return 0
-	}
-	return v.uint64()
-}
-
-func (c *legacyTestCache[V]) SnapshotGens(ctx context.Context, keys []string) map[string]uint64 {
-	versions, err := c.CAS.SnapshotVersions(ctx, keys)
-	if err != nil {
-		out := make(map[string]uint64, len(keys))
-		for _, key := range uniqSorted(keys) {
-			out[key] = 0
-		}
-		return out
-	}
-	out := make(map[string]uint64, len(versions))
-	for k, v := range versions {
-		out[k] = v.uint64()
-	}
-	return out
-}
-
-func (c *legacyTestCache[V]) TrySnapshotGen(ctx context.Context, key string) (uint64, error) {
-	v, err := c.CAS.SnapshotVersion(ctx, key)
-	return v.uint64(), err
-}
-
-func (c *legacyTestCache[V]) TrySnapshotGens(ctx context.Context, keys []string) (map[string]uint64, error) {
-	versions, err := c.CAS.SnapshotVersions(ctx, keys)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]uint64, len(versions))
-	for k, v := range versions {
-		out[k] = v.uint64()
-	}
-	return out, nil
-}
-
-func (c *legacyTestCache[V]) SetWithGen(ctx context.Context, key string, value V, observedGen uint64, ttl time.Duration) error {
-	_, err := c.CAS.SetIfVersion(ctx, key, value, versionFromUint64(observedGen), ttl)
-	return err
-}
-
-func (c *legacyTestCache[V]) SetBatchWithGens(ctx context.Context, items map[string]V, observedGens map[string]uint64, ttl time.Duration) error {
-	vs := make([]VersionedValue[V], 0, len(items))
-	for key, value := range items {
-		vs = append(vs, VersionedValue[V]{
-			Key:     key,
-			Value:   value,
-			Version: versionFromUint64(observedGens[key]),
-		})
-	}
-	_, err := c.CAS.SetIfVersions(ctx, vs, ttl)
-	return err
-}
-
-func newTestCache(t *testing.T, ns string, mp pr.Provider, optsOpt func(*Options[user])) *legacyTestCache[user] {
+func newTestCache(
+	t *testing.T,
+	ns string,
+	mp pr.Provider,
+	optsOpt func(*Options[user]),
+) *testCache[user] {
 	t.Helper()
 	opts := Options[user]{
 		Namespace: ns,
@@ -385,7 +423,93 @@ func newTestCache(t *testing.T, ns string, mp pr.Provider, optsOpt func(*Options
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return &legacyTestCache[user]{CAS: cc}
+	return &testCache[user]{
+		CAS: cc,
+	}
+}
+
+func mustSnapshotVersion[V any](t *testing.T, ctx context.Context, c CAS[V], key string) Version {
+	t.Helper()
+	version, err := c.SnapshotVersion(ctx, key)
+	if err != nil {
+		t.Fatalf("SnapshotVersion(%q): %v", key, err)
+	}
+	return version
+}
+
+func mustSnapshotVersions[V any](
+	t *testing.T,
+	ctx context.Context,
+	c CAS[V],
+	keys []string,
+) map[string]Version {
+	t.Helper()
+	versions, err := c.SnapshotVersions(ctx, keys)
+	if err != nil {
+		t.Fatalf("SnapshotVersions(%v): %v", keys, err)
+	}
+	return versions
+}
+
+func setIfVersionsMap[V any](
+	ctx context.Context,
+	c CAS[V],
+	items map[string]V,
+	observed map[string]Version,
+	ttl time.Duration,
+) error {
+	_, err := c.SetIfVersions(ctx, versionedValues(items, observed), ttl)
+	return err
+}
+
+func versionedValues[V any](items map[string]V, observed map[string]Version) []VersionedValue[V] {
+	keys := make([]string, 0, len(items))
+	for key := range items {
+		keys = append(keys, key)
+	}
+	keys = sortedUnique(keys)
+
+	values := make([]VersionedValue[V], 0, len(keys))
+	for _, key := range keys {
+		values = append(values, VersionedValue[V]{
+			Key:     key,
+			Value:   items[key],
+			Version: observed[key],
+		})
+	}
+	return values
+}
+
+func missingVersions(keys []string) map[string]Version {
+	out := make(map[string]Version, len(keys))
+	for _, key := range sortedUnique(keys) {
+		out[key] = Version{}
+	}
+	return out
+}
+
+func testFence(id uint64) version.Fence {
+	var token [16]byte
+	token[0] = 0xA5
+	binary.BigEndian.PutUint64(token[8:], id)
+	fence, err := version.ParseFenceBinary(token[:])
+	if err != nil {
+		panic(err)
+	}
+	return fence
+}
+
+func mutateFence(f version.Fence, mutate func([]byte)) version.Fence {
+	b, err := f.MarshalBinary()
+	if err != nil {
+		panic(err)
+	}
+	mutate(b)
+	mutated, err := version.ParseFenceBinary(b)
+	if err != nil {
+		panic(err)
+	}
+	return mutated
 }
 
 func closeTest(t *testing.T, ctx context.Context, c interface{ Close(context.Context) error }) {
@@ -395,7 +519,13 @@ func closeTest(t *testing.T, ctx context.Context, c interface{ Close(context.Con
 	}
 }
 
-func assertExpiryBefore(t *testing.T, got time.Time, before time.Time, limit time.Duration, label string) {
+func assertExpiryBefore(
+	t *testing.T,
+	got time.Time,
+	before time.Time,
+	limit time.Duration,
+	label string,
+) {
 	t.Helper()
 	if got.IsZero() {
 		t.Fatalf("%s should have a TTL", label)
@@ -410,7 +540,7 @@ func mustImpl(t *testing.T, c interface{}) *cache[user] {
 	switch cc := c.(type) {
 	case *cache[user]:
 		return cc
-	case *legacyTestCache[user]:
+	case *testCache[user]:
 		impl, ok := cc.CAS.(*cache[user])
 		if !ok {
 			t.Fatalf("unexpected concrete type for CAS")
@@ -426,6 +556,26 @@ func mustImpl(t *testing.T, c interface{}) *cache[user] {
 
 func batchValuePrefix(namespace string) string {
 	return fmt.Sprintf("%s%d:%s:", batchValueRoot, len(namespace), namespace)
+}
+
+func loadSnapshotsByKey[V any](
+	t *testing.T,
+	ctx context.Context,
+	c *cache[V],
+	keys []string,
+) map[string]version.Snapshot {
+	t.Helper()
+
+	ss, err := c.loadSnapshots(ctx, keys)
+	if err != nil {
+		t.Fatalf("loadSnapshots: %v", err)
+	}
+
+	out := make(map[string]version.Snapshot, len(keys))
+	for i, key := range keys {
+		out[key] = ss[i]
+	}
+	return out
 }
 
 // ==============================
@@ -447,13 +597,17 @@ func TestSingleCASFlow(t *testing.T) {
 		t.Fatalf("Get miss expected, got ok=%v err=%v val=%v", ok, err, got)
 	}
 
-	// CAS write with observed gen 0.
-	obs := cc.SnapshotGen(ctx, k)
-	if obs != 0 {
-		t.Fatalf("SnapshotGen expected 0, got %d", obs)
+	// CAS write with an observed missing version.
+	obs := mustSnapshotVersion(t, ctx, cc, k)
+	if !obs.IsMissing() {
+		t.Fatalf("SnapshotVersion should be missing before first write, got %+v", obs)
 	}
-	if err := cc.SetWithGen(ctx, k, v, obs, 0); err != nil {
-		t.Fatalf("SetWithGen: %v", err)
+	result, err := cc.SetIfVersion(ctx, k, v, obs, 0)
+	if err != nil {
+		t.Fatalf("SetIfVersion: %v", err)
+	}
+	if result.Outcome != WriteOutcomeStored {
+		t.Fatalf("SetIfVersion outcome=%q want %q", result.Outcome, WriteOutcomeStored)
 	}
 
 	// Read back.
@@ -461,7 +615,7 @@ func TestSingleCASFlow(t *testing.T) {
 		t.Fatalf("Get after set: ok=%v err=%v got=%v", ok, err, got)
 	}
 
-	// Invalidate -> bump gen & delete single.
+	// Invalidate -> advance version and delete single.
 	if err := cc.Invalidate(ctx, k); err != nil {
 		t.Fatalf("Invalidate: %v", err)
 	}
@@ -471,18 +625,26 @@ func TestSingleCASFlow(t *testing.T) {
 		t.Fatalf("Get after invalidate should miss, ok=%v err=%v", ok, err)
 	}
 
-	// Stale write (using old observed gen 0) should be skipped.
-	if err := cc.SetWithGen(ctx, k, v, 0, 0); err != nil {
-		t.Fatalf("SetWithGen stale: %v", err)
+	// Stale write using the original observed version should be skipped.
+	result, err = cc.SetIfVersion(ctx, k, v, obs, 0)
+	if err != nil {
+		t.Fatalf("SetIfVersion stale: %v", err)
+	}
+	if result.Outcome != WriteOutcomeVersionMismatch {
+		t.Fatalf("SetIfVersion stale outcome=%q want %q", result.Outcome, WriteOutcomeVersionMismatch)
 	}
 	if _, ok, _ := cc.Get(ctx, k); ok {
 		t.Fatalf("stale write should not populate cache")
 	}
 
-	// Fresh write with observed current gen should succeed.
-	obs2 := cc.SnapshotGen(ctx, k)
-	if err := cc.SetWithGen(ctx, k, v, obs2, 0); err != nil {
-		t.Fatalf("SetWithGen (fresh): %v", err)
+	// Fresh write with the current observed version should succeed.
+	obs2 := mustSnapshotVersion(t, ctx, cc, k)
+	result, err = cc.SetIfVersion(ctx, k, v, obs2, 0)
+	if err != nil {
+		t.Fatalf("SetIfVersion(fresh): %v", err)
+	}
+	if result.Outcome != WriteOutcomeStored {
+		t.Fatalf("SetIfVersion(fresh) outcome=%q want %q", result.Outcome, WriteOutcomeStored)
 	}
 	if got, ok, err := cc.Get(ctx, k); err != nil || !ok || got != v {
 		t.Fatalf("Get after fresh set: ok=%v err=%v got=%v", ok, err, got)
@@ -499,8 +661,8 @@ func TestGetReadGuardRejectsAndDeletesEntry(t *testing.T) {
 
 	k := "u:guard"
 	v := user{ID: "guard", Name: "Ada"}
-	if err := cc.SetWithGen(ctx, k, v, cc.SnapshotGen(ctx, k), 0); err != nil {
-		t.Fatalf("SetWithGen: %v", err)
+	if _, err := cc.SetIfVersion(ctx, k, v, mustSnapshotVersion(t, ctx, cc, k), 0); err != nil {
+		t.Fatalf("SetIfVersion: %v", err)
 	}
 
 	got, ok, err := cc.Get(ctx, k)
@@ -526,8 +688,8 @@ func TestGetReadGuardErrorMissesAndDeletesEntry(t *testing.T) {
 
 	k := "u:guard-error"
 	v := user{ID: "guard-error", Name: "Ada"}
-	if err := cc.SetWithGen(ctx, k, v, cc.SnapshotGen(ctx, k), 0); err != nil {
-		t.Fatalf("SetWithGen: %v", err)
+	if _, err := cc.SetIfVersion(ctx, k, v, mustSnapshotVersion(t, ctx, cc, k), 0); err != nil {
+		t.Fatalf("SetIfVersion: %v", err)
 	}
 
 	got, ok, err := cc.Get(ctx, k)
@@ -545,15 +707,15 @@ func TestGetReadGuardErrorMissesAndDeletesEntry(t *testing.T) {
 func TestSingleKeyNamespaceFramingAvoidsCollisions(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
-	gs := genstore.NewLocalWithCleanup(time.Hour, time.Hour)
+	gs := version.NewLocalWithCleanup(time.Hour, time.Hour)
 
 	left := newTestCache(t, "app:prod", mp, func(o *Options[user]) {
-		o.GenStore = gs
+		o.VersionStore = gs
 	})
 	defer closeTest(t, ctx, left)
 
 	right := newTestCache(t, "app", mp, func(o *Options[user]) {
-		o.GenStore = gs
+		o.VersionStore = gs
 	})
 	defer closeTest(t, ctx, right)
 
@@ -571,11 +733,23 @@ func TestSingleKeyNamespaceFramingAvoidsCollisions(t *testing.T) {
 
 	leftVal := user{ID: "left", Name: "Left"}
 	rightVal := user{ID: "right", Name: "Right"}
-	if err := left.SetWithGen(ctx, "users:42", leftVal, 0, time.Minute); err != nil {
-		t.Fatalf("left SetWithGen: %v", err)
+	if _, err := left.SetIfVersion(
+		ctx,
+		"users:42",
+		leftVal,
+		mustSnapshotVersion(t, ctx, left, "users:42"),
+		time.Minute,
+	); err != nil {
+		t.Fatalf("left SetIfVersion: %v", err)
 	}
-	if err := right.SetWithGen(ctx, "prod:users:42", rightVal, 0, time.Minute); err != nil {
-		t.Fatalf("right SetWithGen: %v", err)
+	if _, err := right.SetIfVersion(
+		ctx,
+		"prod:users:42",
+		rightVal,
+		mustSnapshotVersion(t, ctx, right, "prod:users:42"),
+		time.Minute,
+	); err != nil {
+		t.Fatalf("right SetIfVersion: %v", err)
 	}
 
 	if len(mp.m) != 2 {
@@ -614,7 +788,7 @@ func TestSetIfVersionSnapshotErrorReturnsErrorAndSkipsWrite(t *testing.T) {
 	sentinel := errors.New("snapshot failed")
 
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.GenStore = &failingGenStore{snapshotErr: sentinel}
+		o.VersionStore = &failingVersionStore{snapshotErr: sentinel}
 	})
 	defer closeTest(t, ctx, cc)
 
@@ -635,12 +809,12 @@ func TestSetIfVersionSnapshotErrorReturnsErrorAndSkipsWrite(t *testing.T) {
 	}
 }
 
-func TestGetSnapshotErrorTreatsGenZeroEntryAsMiss(t *testing.T) {
+func TestGetSnapshotErrorTreatsInjectedEntryAsMiss(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.GenStore = &failingGenStore{snapshotErr: errors.New("snapshot failed")}
+		o.VersionStore = &failingVersionStore{snapshotErr: errors.New("snapshot failed")}
 	})
 	defer closeTest(t, ctx, cc)
 
@@ -650,11 +824,18 @@ func TestGetSnapshotErrorTreatsGenZeroEntryAsMiss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	wireEntry, err := wire.EncodeSingle(0, payload)
+	wireEntry, err := wire.EncodeSingle(testFence(0), payload)
 	if err != nil {
 		t.Fatalf("EncodeSingle: %v", err)
 	}
-	if ok, err := impl.provider.Set(ctx, impl.singleKeys(k).Value.String(), wireEntry, 1, time.Minute); err != nil || !ok {
+	if ok, err := impl.provider.Set(
+		ctx,
+		impl.singleKeys(k).Value.String(),
+		wireEntry,
+		1,
+		time.Minute,
+	); err != nil ||
+		!ok {
 		t.Fatalf("inject single: ok=%v err=%v", ok, err)
 	}
 
@@ -666,7 +847,12 @@ func TestGetSnapshotErrorTreatsGenZeroEntryAsMiss(t *testing.T) {
 func TestGetProviderErrorReturnsOpError(t *testing.T) {
 	ctx := context.Background()
 	sentinel := errors.New("get failed")
-	cc := newTestCache(t, "user", &getErrProvider{memProvider: newMemProvider(), err: sentinel}, nil)
+	cc := newTestCache(
+		t,
+		"user",
+		&getErrProvider{memProvider: newMemProvider(), err: sentinel},
+		nil,
+	)
 	defer closeTest(t, ctx, cc)
 
 	_, ok, err := cc.Get(ctx, "u:1")
@@ -691,22 +877,27 @@ func TestGetProviderErrorReturnsOpError(t *testing.T) {
 	}
 }
 
-func TestSetWithGenProviderErrorReturnsOpError(t *testing.T) {
+func TestSetIfVersionProviderErrorReturnsOpError(t *testing.T) {
 	ctx := context.Background()
 	sentinel := errors.New("set failed")
-	cc := newTestCache(t, "user", &setErrProvider{memProvider: newMemProvider(), err: sentinel}, nil)
+	cc := newTestCache(
+		t,
+		"user",
+		&setErrProvider{memProvider: newMemProvider(), err: sentinel},
+		nil,
+	)
 	defer closeTest(t, ctx, cc)
 
-	err := cc.SetWithGen(ctx, "u:1", user{ID: "1", Name: "Ada"}, 0, time.Minute)
+	_, err := cc.SetIfVersion(ctx, "u:1", user{ID: "1", Name: "Ada"}, Version{}, time.Minute)
 	if err == nil {
-		t.Fatalf("SetWithGen should return an error")
+		t.Fatalf("SetIfVersion should return an error")
 	}
 	if !errors.Is(err, sentinel) {
-		t.Fatalf("SetWithGen error mismatch: %v", err)
+		t.Fatalf("SetIfVersion error mismatch: %v", err)
 	}
 	var oe *OpError
 	if !errors.As(err, &oe) {
-		t.Fatalf("SetWithGen error should be *OpError, got %T", err)
+		t.Fatalf("SetIfVersion error should be *OpError, got %T", err)
 	}
 	if oe.Op != OpSet {
 		t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpSet)
@@ -716,36 +907,33 @@ func TestSetWithGenProviderErrorReturnsOpError(t *testing.T) {
 	}
 }
 
-func TestTrySnapshotGenReturnsError(t *testing.T) {
+func TestSnapshotVersionReturnsOpError(t *testing.T) {
 	ctx := context.Background()
 	snapshotSentinel := errors.New("snapshot failed")
 	cc := newTestCache(t, "user", newMemProvider(), func(o *Options[user]) {
-		o.GenStore = &failingGenStore{snapshotErr: snapshotSentinel}
+		o.VersionStore = &failingVersionStore{snapshotErr: snapshotSentinel}
 	})
 	defer closeTest(t, ctx, cc)
 
-	got, err := cc.TrySnapshotGen(ctx, "u:1")
+	got, err := cc.SnapshotVersion(ctx, "u:1")
 	if err == nil {
-		t.Fatalf("TrySnapshotGen should return an error")
+		t.Fatalf("SnapshotVersion should return an error")
 	}
-	if got != 0 {
-		t.Fatalf("TrySnapshotGen got=%d want=0", got)
+	if !got.IsMissing() {
+		t.Fatalf("SnapshotVersion should return a missing version on error, got %+v", got)
 	}
 	if !errors.Is(err, snapshotSentinel) {
-		t.Fatalf("TrySnapshotGen error mismatch: %v", err)
+		t.Fatalf("SnapshotVersion error mismatch: %v", err)
 	}
 	var oe *OpError
 	if !errors.As(err, &oe) {
-		t.Fatalf("TrySnapshotGen error should be *OpError, got %T", err)
+		t.Fatalf("SnapshotVersion error should be *OpError, got %T", err)
 	}
 	if oe.Op != OpSnapshot {
 		t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpSnapshot)
 	}
 	if oe.Key != "u:1" {
 		t.Fatalf("OpError.Key = %q, want %q", oe.Key, "u:1")
-	}
-	if got := cc.SnapshotGen(ctx, "u:1"); got != 0 {
-		t.Fatalf("SnapshotGen got=%d want=0", got)
 	}
 }
 
@@ -781,45 +969,45 @@ func TestOpErrorErrorContract(t *testing.T) {
 	})
 }
 
-func TestTrySnapshotGensFallbackAndStrictBehavior(t *testing.T) {
+func TestSnapshotVersionsFallbackAndStrictBehavior(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("fallback_to_single_snapshots", func(t *testing.T) {
 		cc := newTestCache(t, "user", newMemProvider(), func(o *Options[user]) {
-			o.GenStore = &failingGenStore{snapshotManyErr: errors.New("snapshot many failed")}
+			o.VersionStore = &failingVersionStore{snapshotManyErr: errors.New("snapshot many failed")}
 		})
 		defer closeTest(t, ctx, cc)
 
-		got, err := cc.TrySnapshotGens(ctx, []string{"b", "a", "a"})
+		got, err := cc.SnapshotVersions(ctx, []string{"b", "a", "a"})
 		if err != nil {
-			t.Fatalf("TrySnapshotGens: %v", err)
+			t.Fatalf("SnapshotVersions: %v", err)
 		}
-		want := map[string]uint64{"a": 0, "b": 0}
-		if !equalU64(got, want) {
-			t.Fatalf("TrySnapshotGens got=%v want=%v", got, want)
+		want := missingVersions([]string{"a", "b"})
+		if !equalVersions(got, want) {
+			t.Fatalf("SnapshotVersions got=%v want=%v", got, want)
 		}
 	})
 
 	t.Run("returns_error_when_single_snapshot_fails", func(t *testing.T) {
 		snapshotSentinel := errors.New("snapshot failed")
 		cc := newTestCache(t, "user", newMemProvider(), func(o *Options[user]) {
-			o.GenStore = &failingGenStore{
+			o.VersionStore = &failingVersionStore{
 				snapshotManyErr: errors.New("snapshot many failed"),
 				snapshotErr:     snapshotSentinel,
 			}
 		})
 		defer closeTest(t, ctx, cc)
 
-		got, err := cc.TrySnapshotGens(ctx, []string{"a", "b"})
+		got, err := cc.SnapshotVersions(ctx, []string{"a", "b"})
 		if err == nil {
-			t.Fatalf("TrySnapshotGens should return an error")
+			t.Fatalf("SnapshotVersions should return an error")
 		}
 		if got != nil {
-			t.Fatalf("TrySnapshotGens should not return partial results on error, got=%v", got)
+			t.Fatalf("SnapshotVersions should not return partial results on error, got=%v", got)
 		}
 		var oe *OpError
 		if !errors.As(err, &oe) {
-			t.Fatalf("TrySnapshotGens error should be *OpError, got %T", err)
+			t.Fatalf("SnapshotVersions error should be *OpError, got %T", err)
 		}
 		if oe.Op != OpSnapshot {
 			t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpSnapshot)
@@ -828,15 +1016,18 @@ func TestTrySnapshotGensFallbackAndStrictBehavior(t *testing.T) {
 			t.Fatalf("OpError should wrap snapshot sentinel")
 		}
 
-		want := map[string]uint64{"a": 0, "b": 0}
-		if got := cc.SnapshotGens(ctx, []string{"a", "b"}); !equalU64(got, want) {
-			t.Fatalf("SnapshotGens got=%v want=%v", got, want)
+		got, err = cc.CAS.SnapshotVersions(ctx, []string{"a", "b"})
+		if err == nil {
+			t.Fatalf("SnapshotVersions should keep returning an error while single snapshots fail")
+		}
+		if got != nil {
+			t.Fatalf("SnapshotVersions should not return partial results on error, got=%v", got)
 		}
 	})
 }
 
 // ==============================
-// Self-heal tests (corruption/gen mismatch)
+// Self-heal tests (corruption/version mismatch)
 // ==============================
 
 // TestSelfHealOnCorrupt ensures corrupt provider bytes are deleted and missed,
@@ -853,7 +1044,14 @@ func TestSelfHealOnCorrupt(t *testing.T) {
 	sk := impl.singleKeys(k)
 
 	// Inject corrupt bytes directly into provider.
-	if ok, err := impl.provider.Set(ctx, sk.Value.String(), []byte("not-wire-format"), 1, time.Minute); err != nil || !ok {
+	if ok, err := impl.provider.Set(
+		ctx,
+		sk.Value.String(),
+		[]byte("not-wire-format"),
+		1,
+		time.Minute,
+	); err != nil ||
+		!ok {
 		t.Fatalf("inject corrupt: ok=%v err=%v", ok, err)
 	}
 
@@ -866,20 +1064,27 @@ func TestSelfHealOnCorrupt(t *testing.T) {
 		t.Fatalf("corrupt entry was not deleted by self-heal")
 	}
 
-	// Now inject a valid single with gen=0, then bump generation to make it stale.
+	// Now inject a valid single, then advance the authoritative fence to make it stale.
 	val := user{ID: "x", Name: "X"}
 	payload, err := c.JSON[user]{}.Encode(val)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	wireEntry, err := wire.EncodeSingle(0, payload)
+	wireEntry, err := wire.EncodeSingle(testFence(0), payload)
 	if err != nil {
 		t.Fatalf("EncodeSingle: %v", err)
 	}
-	if ok, err := impl.provider.Set(ctx, sk.Value.String(), wireEntry, 1, time.Minute); err != nil || !ok {
+	if ok, err := impl.provider.Set(
+		ctx,
+		sk.Value.String(),
+		wireEntry,
+		1,
+		time.Minute,
+	); err != nil ||
+		!ok {
 		t.Fatalf("inject valid stale: ok=%v err=%v", ok, err)
 	}
-	_, _ = impl.bumpGen(context.Background(), toGenStoreKey(sk.Cache)) // make it stale
+	_, _ = impl.advanceVersion(context.Background(), toVersionCacheKey(sk.Cache)) // make it stale
 
 	if _, ok, err := cc.Get(ctx, k); err != nil || ok {
 		t.Fatalf("Get on stale single should miss, ok=%v err=%v", ok, err)
@@ -889,13 +1094,13 @@ func TestSelfHealOnCorrupt(t *testing.T) {
 	}
 }
 
-func TestLocalGenStoreCloseIdempotent(t *testing.T) {
-	s := genstore.NewLocalWithCleanup(50*time.Millisecond, time.Second)
+func TestLocalVersionStoreCloseIdempotent(t *testing.T) {
+	s := version.NewLocalWithCleanup(50*time.Millisecond, time.Second)
 	defer closeTest(t, context.Background(), s)
 
-	// Do some bumps to exercise the map while cleanup may run
+	// Do some advances to exercise the map while cleanup may run
 	for i := range 100 {
-		_, _ = s.Bump(context.Background(), genstore.NewCacheKey(fmt.Sprintf("k%d", i)))
+		_, _ = s.Advance(context.Background(), version.NewCacheKey(fmt.Sprintf("k%d", i)))
 	}
 
 	// Close many times
@@ -904,9 +1109,9 @@ func TestLocalGenStoreCloseIdempotent(t *testing.T) {
 	}
 }
 
-func TestLocalGenStoreNoLeakOnClose(t *testing.T) {
+func TestLocalVersionStoreNoLeakOnClose(t *testing.T) {
 	before := runtime.NumGoroutine()
-	s := genstore.NewLocalWithCleanup(10*time.Millisecond, time.Second)
+	s := version.NewLocalWithCleanup(10*time.Millisecond, time.Second)
 	_ = s.Close(context.Background())
 	time.Sleep(20 * time.Millisecond) // give it a moment to exit
 	after := runtime.NumGoroutine()
@@ -934,12 +1139,12 @@ func TestBatchHappyAndStale(t *testing.T) {
 		"c": {ID: "c", Name: "C"},
 	}
 
-	// Snapshot gens (all zero).
-	snap := cc.SnapshotGens(ctx, keys)
+	// Snapshot versions (all missing).
+	snap := mustSnapshotVersions(t, ctx, cc, keys)
 
-	// Write batch with gens.
-	if err := cc.SetBatchWithGens(ctx, items, snap, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	// Write the batch using the observed versions.
+	if err := setIfVersionsMap(ctx, cc, items, snap, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	// First GetMany: all present, no missing.
@@ -951,7 +1156,7 @@ func TestBatchHappyAndStale(t *testing.T) {
 		t.Fatalf("GetMany expected all hit, missing=%v got=%v", missing, got)
 	}
 
-	// Invalidate "b": removes its single and bumps gen. Batch should be rejected on next read.
+	// Invalidate "b": removes its single and advances its fence. The batch should be rejected.
 	if err := cc.Invalidate(ctx, "b"); err != nil {
 		t.Fatalf("Invalidate: %v", err)
 	}
@@ -994,11 +1199,11 @@ func TestBatchDisabled(t *testing.T) {
 		"x": {ID: "x", Name: "X"},
 		"y": {ID: "y", Name: "Y"},
 	}
-	snap := cc.SnapshotGens(ctx, keys)
+	snap := mustSnapshotVersions(t, ctx, cc, keys)
 
-	// Set batch with gens -> should seed singles only (no batch key).
-	if err := cc.SetBatchWithGens(ctx, items, snap, 0); err != nil {
-		t.Fatalf("SetBatchWithGens (batch disabled): %v", err)
+	// SetIfVersions should seed singles only when batch writes are disabled.
+	if err := setIfVersionsMap(ctx, cc, items, snap, 0); err != nil {
+		t.Fatalf("SetIfVersions (batch disabled): %v", err)
 	}
 
 	// GetMany should return both via singles path.
@@ -1030,9 +1235,9 @@ func TestBatchDefaultNoSeed(t *testing.T) {
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
 	}
-	snap := cc.SnapshotGens(ctx, keys)
-	if err := cc.SetBatchWithGens(ctx, items, snap, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	snap := mustSnapshotVersions(t, ctx, cc, keys)
+	if err := setIfVersionsMap(ctx, cc, items, snap, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	for _, k := range keys {
@@ -1066,12 +1271,12 @@ func TestNewBatchSeedIfMissingNeedsSupport(t *testing.T) {
 	}
 }
 
-func TestBatchSeedAllUsesBatchGen(t *testing.T) {
+func TestBatchSeedAllUsesBatchSnapshot(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
-	gs := &countingGenStore{inner: genstore.NewLocalWithCleanup(time.Hour, time.Hour)}
+	gs := &countingVersionStore{inner: version.NewLocalWithCleanup(time.Hour, time.Hour)}
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.GenStore = gs
+		o.VersionStore = gs
 		o.BatchReadSeed = BatchReadSeedAll
 	})
 	defer closeTest(t, ctx, cc)
@@ -1083,9 +1288,9 @@ func TestBatchSeedAllUsesBatchGen(t *testing.T) {
 		"b": {ID: "b", Name: "B"},
 		"c": {ID: "c", Name: "C"},
 	}
-	snap := cc.SnapshotGens(ctx, keys)
-	if err := cc.SetBatchWithGens(ctx, items, snap, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	snap := mustSnapshotVersions(t, ctx, cc, keys)
+	if err := setIfVersionsMap(ctx, cc, items, snap, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	for _, k := range keys {
@@ -1105,7 +1310,10 @@ func TestBatchSeedAllUsesBatchGen(t *testing.T) {
 		t.Fatalf("batch-hit warming should not do per-key Snapshot calls, got %d", gs.snapshotCalls)
 	}
 	if gs.snapshotManyCalls != 1 {
-		t.Fatalf("batch-hit validation should use one SnapshotMany call, got %d", gs.snapshotManyCalls)
+		t.Fatalf(
+			"batch-hit validation should use one SnapshotMany call, got %d",
+			gs.snapshotManyCalls,
+		)
 	}
 
 	for _, k := range keys {
@@ -1115,7 +1323,7 @@ func TestBatchSeedAllUsesBatchGen(t *testing.T) {
 	}
 }
 
-func TestSetBatchWithGensSeedsSinglesWhenBatchSeedOff(t *testing.T) {
+func TestSetIfVersionsSeedsSinglesWhenBatchReadSeedOff(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
@@ -1129,10 +1337,10 @@ func TestSetBatchWithGensSeedsSinglesWhenBatchSeedOff(t *testing.T) {
 		"b": {ID: "b", Name: "B"},
 	}
 	keys := []string{"a", "b"}
-	observed := cc.SnapshotGens(ctx, keys)
+	observed := mustSnapshotVersions(t, ctx, cc, keys)
 
-	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	if err := setIfVersionsMap(ctx, cc, items, observed, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 	for _, k := range keys {
 		if _, ok, _ := mp.Get(ctx, impl.singleKeys(k).Value.String()); !ok {
@@ -1155,9 +1363,9 @@ func TestBatchSeedIfMissing(t *testing.T) {
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
 	}
-	snap := cc.SnapshotGens(ctx, keys)
-	if err := cc.SetBatchWithGens(ctx, items, snap, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	snap := mustSnapshotVersions(t, ctx, cc, keys)
+	if err := setIfVersionsMap(ctx, cc, items, snap, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	for _, k := range keys {
@@ -1200,9 +1408,9 @@ func TestGetBatchReadGuardRejectsBatchAndMissesRejectedKeysWithoutReadGuard(t *t
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
 	}
-	observed := cc.SnapshotGens(ctx, keys)
-	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	observed := mustSnapshotVersions(t, ctx, cc, keys)
+	if err := setIfVersionsMap(ctx, cc, items, observed, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	got, missing, err := cc.GetMany(ctx, keys)
@@ -1225,7 +1433,11 @@ func TestGetBatchReadGuardRejectsBatchAndMissesRejectedKeysWithoutReadGuard(t *t
 		t.Fatalf("batchKeySorted: %v", err)
 	}
 	if _, found, err := mp.Get(ctx, bk.String()); err != nil || found {
-		t.Fatalf("batch read-guard rejection should delete stored batch, found=%v err=%v", found, err)
+		t.Fatalf(
+			"batch read-guard rejection should delete stored batch, found=%v err=%v",
+			found,
+			err,
+		)
 	}
 }
 
@@ -1244,9 +1456,9 @@ func TestGetBatchReadGuardRejectWithoutReadGuardPreservesDuplicateMissing(t *tes
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
 	}
-	observed := cc.SnapshotGens(ctx, []string{"a", "b"})
-	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	observed := mustSnapshotVersions(t, ctx, cc, []string{"a", "b"})
+	if err := setIfVersionsMap(ctx, cc, items, observed, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	got, missing, err := cc.GetMany(ctx, keys)
@@ -1285,14 +1497,20 @@ func TestGetBatchReadGuardRejectFallsBackToSinglesWithReadGuard(t *testing.T) {
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "stale"},
 	}
-	observed := cc.SnapshotGens(ctx, keys)
-	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	observed := mustSnapshotVersions(t, ctx, cc, keys)
+	if err := setIfVersionsMap(ctx, cc, items, observed, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	freshB := user{ID: "b", Name: "fresh"}
-	if err := cc.SetWithGen(ctx, "b", freshB, cc.SnapshotGen(ctx, "b"), 0); err != nil {
-		t.Fatalf("SetWithGen fresh single: %v", err)
+	if _, err := cc.SetIfVersion(
+		ctx,
+		"b",
+		freshB,
+		mustSnapshotVersion(t, ctx, cc, "b"),
+		0,
+	); err != nil {
+		t.Fatalf("SetIfVersion fresh single: %v", err)
 	}
 
 	got, missing, err := cc.GetMany(ctx, keys)
@@ -1316,7 +1534,11 @@ func TestGetBatchReadGuardRejectFallsBackToSinglesWithReadGuard(t *testing.T) {
 		t.Fatalf("batchKeySorted: %v", err)
 	}
 	if _, found, err := mp.Get(ctx, bk.String()); err != nil || found {
-		t.Fatalf("batch read-guard rejection should delete stored batch, found=%v err=%v", found, err)
+		t.Fatalf(
+			"batch read-guard rejection should delete stored batch, found=%v err=%v",
+			found,
+			err,
+		)
 	}
 }
 
@@ -1336,9 +1558,9 @@ func TestGetBatchReadGuardErrorFailsClosedWithoutReadGuard(t *testing.T) {
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
 	}
-	observed := cc.SnapshotGens(ctx, keys)
-	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	observed := mustSnapshotVersions(t, ctx, cc, keys)
+	if err := setIfVersionsMap(ctx, cc, items, observed, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	got, missing, err := cc.GetMany(ctx, keys)
@@ -1377,9 +1599,9 @@ func TestGetBatchReadGuardInvalidRejectedKeyFailsClosedWithoutReadGuard(t *testi
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
 	}
-	observed := cc.SnapshotGens(ctx, keys)
-	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	observed := mustSnapshotVersions(t, ctx, cc, keys)
+	if err := setIfVersionsMap(ctx, cc, items, observed, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	got, missing, err := cc.GetMany(ctx, keys)
@@ -1399,7 +1621,11 @@ func TestGetBatchReadGuardInvalidRejectedKeyFailsClosedWithoutReadGuard(t *testi
 		t.Fatalf("batchKeySorted: %v", err)
 	}
 	if _, found, err := mp.Get(ctx, bk.String()); err != nil || found {
-		t.Fatalf("invalid batch read-guard result should delete stored batch, found=%v err=%v", found, err)
+		t.Fatalf(
+			"invalid batch read-guard result should delete stored batch, found=%v err=%v",
+			found,
+			err,
+		)
 	}
 }
 
@@ -1420,9 +1646,9 @@ func TestGetBatchReadGuardErrorFallsBackToSinglesWithReadGuard(t *testing.T) {
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
 	}
-	observed := cc.SnapshotGens(ctx, keys)
-	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	observed := mustSnapshotVersions(t, ctx, cc, keys)
+	if err := setIfVersionsMap(ctx, cc, items, observed, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	got, missing, err := cc.GetMany(ctx, keys)
@@ -1489,9 +1715,9 @@ func TestGetBatchBatchReadErrorReturnsOpError(t *testing.T) {
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
 	}
-	observed := cc.SnapshotGens(ctx, []string{"a", "b"})
-	if err := cc.SetBatchWithGens(ctx, items, observed, time.Minute); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	observed := mustSnapshotVersions(t, ctx, cc, []string{"a", "b"})
+	if err := setIfVersionsMap(ctx, cc, items, observed, time.Minute); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	got, missing, err := cc.GetMany(ctx, []string{"a", "b"})
@@ -1518,7 +1744,10 @@ func TestGetBatchBatchReadErrorReturnsOpError(t *testing.T) {
 		t.Fatalf("GetMany missing should stay empty on batch read failure, got %v", missing)
 	}
 	if mp.singleGetCalls != 0 {
-		t.Fatalf("GetMany should not fall back to singles on batch read failure, got %d single reads", mp.singleGetCalls)
+		t.Fatalf(
+			"GetMany should not fall back to singles on batch read failure, got %d single reads",
+			mp.singleGetCalls,
+		)
 	}
 }
 
@@ -1532,12 +1761,12 @@ func TestBatchValueDecodeFallsBackToSinglesAndDeletesBatch(t *testing.T) {
 	items := map[string]user{
 		"a": {ID: "a", Name: "A"},
 	}
-	snap := cc.SnapshotGens(ctx, []string{"a"})
-	if err := cc.SetBatchWithGens(ctx, items, snap, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	snap := mustSnapshotVersions(t, ctx, cc, []string{"a"})
+	if err := setIfVersionsMap(ctx, cc, items, snap, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
-	batchKey, err := impl.batchKeySorted(uniqSorted([]string{"a"}))
+	batchKey, err := impl.batchKeySorted(sortedUnique([]string{"a"}))
 	if err != nil {
 		t.Fatalf("batchKeySorted: %v", err)
 	}
@@ -1577,12 +1806,12 @@ func TestBatchFallbackPropagatesSingleErrors(t *testing.T) {
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
 	}
-	observed := cc.SnapshotGens(ctx, []string{"a", "b"})
-	if err := cc.SetBatchWithGens(ctx, items, observed, time.Minute); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	observed := mustSnapshotVersions(t, ctx, cc, []string{"a", "b"})
+	if err := setIfVersionsMap(ctx, cc, items, observed, time.Minute); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
-	batchKey, err := impl.batchKeySorted(uniqSorted([]string{"a", "b"}))
+	batchKey, err := impl.batchKeySorted(sortedUnique([]string{"a", "b"}))
 	if err != nil {
 		t.Fatalf("batchKeySorted: %v", err)
 	}
@@ -1620,7 +1849,10 @@ func TestBatchSnapshotManyFallbackPreservesBatchPath(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.GenStore = &failingGenStore{snapshotManyErr: errors.New("snapshot many failed")}
+		o.VersionStore = &failingVersionStore{
+			inner:           version.NewLocalWithCleanup(time.Hour, time.Hour),
+			snapshotManyErr: errors.New("snapshot many failed"),
+		}
 	})
 	defer closeTest(t, ctx, cc)
 
@@ -1629,9 +1861,9 @@ func TestBatchSnapshotManyFallbackPreservesBatchPath(t *testing.T) {
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
 	}
-	observed := cc.SnapshotGens(ctx, []string{"a", "b"})
-	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	observed := mustSnapshotVersions(t, ctx, cc, []string{"a", "b"})
+	if err := setIfVersionsMap(ctx, cc, items, observed, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	batchKey, err := impl.batchKeySorted([]string{"a", "b"})
@@ -1668,13 +1900,20 @@ func TestBatchIgnoresUndecodableExtras(t *testing.T) {
 	defer closeTest(t, ctx, cc)
 
 	impl := mustImpl(t, cc)
+	snap, created, err := impl.createSnapshot(ctx, impl.versionKey("a"))
+	if err != nil {
+		t.Fatalf("createSnapshot: %v", err)
+	}
+	if !created {
+		t.Fatalf("expected createSnapshot to create authoritative state")
+	}
 	payload, err := c.JSON[user]{}.Encode(user{ID: "a", Name: "A"})
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
 	wireEntry, err := wire.EncodeBatch([]wire.BatchItem{
-		{Key: "a", Gen: 0, Payload: payload},
-		{Key: "z", Gen: 0, Payload: []byte{0xFF}},
+		{Key: "a", Fence: snap.Fence, Payload: payload},
+		{Key: "z", Fence: testFence(0), Payload: []byte{0xFF}},
 	})
 	if err != nil {
 		t.Fatalf("EncodeBatch: %v", err)
@@ -1684,7 +1923,14 @@ func TestBatchIgnoresUndecodableExtras(t *testing.T) {
 	if err != nil {
 		t.Fatalf("batchKeySorted: %v", err)
 	}
-	if ok, err := impl.provider.Set(ctx, batchKey.String(), wireEntry, 1, time.Minute); err != nil || !ok {
+	if ok, err := impl.provider.Set(
+		ctx,
+		batchKey.String(),
+		wireEntry,
+		1,
+		time.Minute,
+	); err != nil ||
+		!ok {
 		t.Fatalf("inject batch: ok=%v err=%v", ok, err)
 	}
 
@@ -1703,7 +1949,7 @@ func TestBatchIgnoresUndecodableExtras(t *testing.T) {
 	}
 }
 
-func TestSetBatchIfVersionsRejectsDuplicateKeys(t *testing.T) {
+func TestSetIfVersionsRejectsDuplicateKeys(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 
@@ -1722,7 +1968,7 @@ func TestSetBatchIfVersionsRejectsDuplicateKeys(t *testing.T) {
 	}
 }
 
-func TestSetBatchWithGensFallbackPropagatesSingleErrors(t *testing.T) {
+func TestSetIfVersionsFallbackPropagatesSingleErrors(t *testing.T) {
 	ctx := context.Background()
 	sentinel := errors.New("set failed")
 	mp := &batchRejectSingleErrProvider{memProvider: newMemProvider(), err: sentinel}
@@ -1734,46 +1980,45 @@ func TestSetBatchWithGensFallbackPropagatesSingleErrors(t *testing.T) {
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
 	}
-	observed := map[string]uint64{
-		"a": 0,
-		"b": 0,
-	}
+	observed := missingVersions([]string{"a", "b"})
 
-	err := cc.SetBatchWithGens(ctx, items, observed, time.Minute)
+	err := setIfVersionsMap(ctx, cc, items, observed, time.Minute)
 	if !errors.Is(err, sentinel) {
-		t.Fatalf("SetBatchWithGens error mismatch: %v", err)
+		t.Fatalf("SetIfVersions error mismatch: %v", err)
 	}
 	var oe *OpError
 	if !errors.As(err, &oe) {
-		t.Fatalf("SetBatchWithGens error should be *OpError, got %T", err)
+		t.Fatalf("SetIfVersions error should be *OpError, got %T", err)
 	}
 	if oe.Op != OpSet {
 		t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpSet)
 	}
 }
 
-func TestSetBatchWithGensBatchWriteErrorReturnsOpError(t *testing.T) {
+func TestSetIfVersionsBatchWriteErrorReturnsOpError(t *testing.T) {
 	ctx := context.Background()
 	sentinel := errors.New("batch set failed")
-	cc := newTestCache(t, "user", &setErrProvider{memProvider: newMemProvider(), err: sentinel}, nil)
+	cc := newTestCache(
+		t,
+		"user",
+		&setErrProvider{memProvider: newMemProvider(), err: sentinel},
+		nil,
+	)
 	defer closeTest(t, ctx, cc)
 
-	err := cc.SetBatchWithGens(ctx, map[string]user{
+	err := setIfVersionsMap(ctx, cc, map[string]user{
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
-	}, map[string]uint64{
-		"a": 0,
-		"b": 0,
-	}, time.Minute)
+	}, missingVersions([]string{"a", "b"}), time.Minute)
 	if err == nil {
-		t.Fatalf("SetBatchWithGens should return an error")
+		t.Fatalf("SetIfVersions should return an error")
 	}
 	if !errors.Is(err, sentinel) {
-		t.Fatalf("SetBatchWithGens error mismatch: %v", err)
+		t.Fatalf("SetIfVersions error mismatch: %v", err)
 	}
 	var oe *OpError
 	if !errors.As(err, &oe) {
-		t.Fatalf("SetBatchWithGens error should be *OpError, got %T", err)
+		t.Fatalf("SetIfVersions error should be *OpError, got %T", err)
 	}
 	if oe.Op != OpSetIfVersions {
 		t.Fatalf("OpError.Op = %q, want %q", oe.Op, OpSetIfVersions)
@@ -1783,12 +2028,12 @@ func TestSetBatchWithGensBatchWriteErrorReturnsOpError(t *testing.T) {
 	}
 }
 
-func TestSetBatchWithGensStrictUsesBatchGenAndPerKeyRechecks(t *testing.T) {
+func TestSetIfVersionsStrictUsesBatchSnapshotAndPerKeyRechecks(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
-	gs := &countingGenStore{inner: genstore.NewLocalWithCleanup(time.Hour, time.Hour)}
+	gs := &countingVersionStore{inner: version.NewLocalWithCleanup(time.Hour, time.Hour)}
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.GenStore = gs
+		o.VersionStore = gs
 	})
 	defer closeTest(t, ctx, cc)
 
@@ -1797,27 +2042,33 @@ func TestSetBatchWithGensStrictUsesBatchGenAndPerKeyRechecks(t *testing.T) {
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
 	}
-	observed := cc.SnapshotGens(ctx, keys)
+	observed := mustSnapshotVersions(t, ctx, cc, keys)
 	gs.snapshotCalls = 0
 	gs.snapshotManyCalls = 0
 
-	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	if err := setIfVersionsMap(ctx, cc, items, observed, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 	if gs.snapshotCalls != len(keys) {
-		t.Fatalf("strict batch-write seeding should recheck each key once, got %d", gs.snapshotCalls)
+		t.Fatalf(
+			"strict batch-write seeding should recheck each key once, got %d",
+			gs.snapshotCalls,
+		)
 	}
 	if gs.snapshotManyCalls != 1 {
-		t.Fatalf("validated batch write should use one SnapshotMany call, got %d", gs.snapshotManyCalls)
+		t.Fatalf(
+			"validated batch write should use one SnapshotMany call, got %d",
+			gs.snapshotManyCalls,
+		)
 	}
 }
 
-func TestSetBatchWithGensFastUsesBatchGenOnly(t *testing.T) {
+func TestSetIfVersionsFastUsesBatchSnapshotOnly(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
-	gs := &countingGenStore{inner: genstore.NewLocalWithCleanup(time.Hour, time.Hour)}
+	gs := &countingVersionStore{inner: version.NewLocalWithCleanup(time.Hour, time.Hour)}
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.GenStore = gs
+		o.VersionStore = gs
 		o.BatchWriteSeed = BatchWriteSeedFast
 	})
 	defer closeTest(t, ctx, cc)
@@ -1827,22 +2078,28 @@ func TestSetBatchWithGensFastUsesBatchGenOnly(t *testing.T) {
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
 	}
-	observed := cc.SnapshotGens(ctx, keys)
+	observed := mustSnapshotVersions(t, ctx, cc, keys)
 	gs.snapshotCalls = 0
 	gs.snapshotManyCalls = 0
 
-	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	if err := setIfVersionsMap(ctx, cc, items, observed, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 	if gs.snapshotCalls != 0 {
-		t.Fatalf("fast batch-write seeding should not do per-key Snapshot calls, got %d", gs.snapshotCalls)
+		t.Fatalf(
+			"fast batch-write seeding should not do per-key Snapshot calls, got %d",
+			gs.snapshotCalls,
+		)
 	}
 	if gs.snapshotManyCalls != 1 {
-		t.Fatalf("validated batch write should use one SnapshotMany call, got %d", gs.snapshotManyCalls)
+		t.Fatalf(
+			"validated batch write should use one SnapshotMany call, got %d",
+			gs.snapshotManyCalls,
+		)
 	}
 }
 
-func TestSetBatchWithGensTTLOverrideAppliesToSeededSingles(t *testing.T) {
+func TestSetIfVersionsTTLOverrideAppliesToSeededSingles(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
@@ -1857,12 +2114,12 @@ func TestSetBatchWithGensTTLOverrideAppliesToSeededSingles(t *testing.T) {
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
 	}
-	observed := cc.SnapshotGens(ctx, keys)
+	observed := mustSnapshotVersions(t, ctx, cc, keys)
 	override := 50 * time.Millisecond
 	before := time.Now()
 
-	if err := cc.SetBatchWithGens(ctx, items, observed, override); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	if err := setIfVersionsMap(ctx, cc, items, observed, override); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	batchKey, err := impl.batchKeySorted(keys)
@@ -1884,7 +2141,7 @@ func TestSetBatchWithGensTTLOverrideAppliesToSeededSingles(t *testing.T) {
 	}
 }
 
-func TestSetBatchWithGensTTLOverrideAppliesToFallbackSingles(t *testing.T) {
+func TestSetIfVersionsTTLOverrideAppliesToFallbackSingles(t *testing.T) {
 	ctx := context.Background()
 	mp := &batchRejectProvider{memProvider: newMemProvider()}
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
@@ -1899,12 +2156,12 @@ func TestSetBatchWithGensTTLOverrideAppliesToFallbackSingles(t *testing.T) {
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
 	}
-	observed := cc.SnapshotGens(ctx, keys)
+	observed := mustSnapshotVersions(t, ctx, cc, keys)
 	override := 50 * time.Millisecond
 	before := time.Now()
 
-	if err := cc.SetBatchWithGens(ctx, items, observed, override); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	if err := setIfVersionsMap(ctx, cc, items, observed, override); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	for _, k := range keys {
@@ -1912,11 +2169,17 @@ func TestSetBatchWithGensTTLOverrideAppliesToFallbackSingles(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected fallback single entry for %q", k)
 		}
-		assertExpiryBefore(t, entry.exp, before, 5*time.Second, fmt.Sprintf("fallback single %q", k))
+		assertExpiryBefore(
+			t,
+			entry.exp,
+			before,
+			5*time.Second,
+			fmt.Sprintf("fallback single %q", k),
+		)
 	}
 }
 
-func TestSetBatchWithGensOffSkipsSinglesAfterSuccessfulBatchWrite(t *testing.T) {
+func TestSetIfVersionsOffSkipsSinglesAfterSuccessfulBatchWrite(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
@@ -1930,15 +2193,18 @@ func TestSetBatchWithGensOffSkipsSinglesAfterSuccessfulBatchWrite(t *testing.T) 
 		"a": {ID: "a", Name: "A"},
 		"b": {ID: "b", Name: "B"},
 	}
-	observed := cc.SnapshotGens(ctx, keys)
+	observed := mustSnapshotVersions(t, ctx, cc, keys)
 
-	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	if err := setIfVersionsMap(ctx, cc, items, observed, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	for _, k := range keys {
 		if _, ok, _ := mp.Get(ctx, impl.singleKeys(k).Value.String()); ok {
-			t.Fatalf("BatchWriteSeedOff should not materialize single %q on successful batch write", k)
+			t.Fatalf(
+				"BatchWriteSeedOff should not materialize single %q on successful batch write",
+				k,
+			)
 		}
 	}
 
@@ -1951,29 +2217,29 @@ func TestSetBatchWithGensOffSkipsSinglesAfterSuccessfulBatchWrite(t *testing.T) 
 	}
 }
 
-func TestSetBatchWithGensStrictSkipsSingleAfterBatchValidationRace(t *testing.T) {
+func TestSetIfVersionsStrictSkipsSingleAfterBatchValidationRace(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
-	gs := &bumpAfterSnapshotManyGenStore{
-		inner:      genstore.NewLocalWithCleanup(time.Hour, time.Hour),
-		bumpOnCall: 2,
+	gs := &advanceAfterSnapshotManyVersionStore{
+		inner:         version.NewLocalWithCleanup(time.Hour, time.Hour),
+		advanceOnCall: 2,
 	}
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.GenStore = gs
+		o.VersionStore = gs
 	})
 	defer closeTest(t, ctx, cc)
 
 	impl := mustImpl(t, cc)
 	key := "a"
-	gs.bumpKey = toGenStoreKey(impl.singleKeys(key).Cache)
+	gs.advanceKey = toVersionCacheKey(impl.singleKeys(key).Cache)
 
 	items := map[string]user{
 		key: {ID: key, Name: "A"},
 	}
-	observed := cc.SnapshotGens(ctx, []string{key})
+	observed := mustSnapshotVersions(t, ctx, cc, []string{key})
 
-	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	if err := setIfVersionsMap(ctx, cc, items, observed, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	if _, ok, _ := mp.Get(ctx, impl.singleKeys(key).Value.String()); ok {
@@ -1984,49 +2250,37 @@ func TestSetBatchWithGensStrictSkipsSingleAfterBatchValidationRace(t *testing.T)
 	}
 }
 
-func TestSetBatchWithGensFastStaleSingleSelfHealsAfterBatchValidationRace(t *testing.T) {
+func TestSetIfVersionsFastRejectsFirstWriteAfterBatchValidationRace(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
-	gs := &bumpAfterSnapshotManyGenStore{
-		inner:      genstore.NewLocalWithCleanup(time.Hour, time.Hour),
-		bumpOnCall: 2,
+	gs := &advanceAfterSnapshotManyVersionStore{
+		inner:         version.NewLocalWithCleanup(time.Hour, time.Hour),
+		advanceOnCall: 2,
 	}
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.GenStore = gs
+		o.VersionStore = gs
 		o.BatchWriteSeed = BatchWriteSeedFast
 	})
 	defer closeTest(t, ctx, cc)
 
 	impl := mustImpl(t, cc)
 	key := "a"
-	gs.bumpKey = toGenStoreKey(impl.singleKeys(key).Cache)
+	gs.advanceKey = toVersionCacheKey(impl.singleKeys(key).Cache)
 
 	items := map[string]user{
 		key: {ID: key, Name: "A"},
 	}
-	observed := cc.SnapshotGens(ctx, []string{key})
+	observed := mustSnapshotVersions(t, ctx, cc, []string{key})
 
-	if err := cc.SetBatchWithGens(ctx, items, observed, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
-	}
-
-	raw, ok, err := mp.Get(ctx, impl.singleKeys(key).Value.String())
-	if err != nil || !ok {
-		t.Fatalf("expected stale single to land, ok=%v err=%v", ok, err)
-	}
-	gotGen, _, err := wire.DecodeSingle(raw)
-	if err != nil {
-		t.Fatalf("DecodeSingle: %v", err)
-	}
-	if gotGen != observed[key] {
-		t.Fatalf("stale single gen=%d want observed=%d", gotGen, observed[key])
+	if err := setIfVersionsMap(ctx, cc, items, observed, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
+	if _, ok, err := mp.Get(ctx, impl.singleKeys(key).Value.String()); err != nil || ok {
+		t.Fatalf("first-write race should prevent stale single from landing, ok=%v err=%v", ok, err)
+	}
 	if _, ok, err := cc.Get(ctx, key); err != nil || ok {
-		t.Fatalf("Get should reject stale single, ok=%v err=%v", ok, err)
-	}
-	if _, ok, _ := mp.Get(ctx, impl.singleKeys(key).Value.String()); ok {
-		t.Fatalf("stale single should be deleted by self-heal")
+		t.Fatalf("Get should miss after first-write race rejection, ok=%v err=%v", ok, err)
 	}
 }
 
@@ -2045,9 +2299,9 @@ func TestBatchOrderInsensitiveHit(t *testing.T) {
 		"u3": {ID: "u3", Name: "B"},
 		"u4": {ID: "u4", Name: "C"},
 	}
-	snap := cc.SnapshotGens(ctx, []string{"u1", "u3", "u4"})
-	if err := cc.SetBatchWithGens(ctx, items, snap, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	snap := mustSnapshotVersions(t, ctx, cc, []string{"u1", "u3", "u4"})
+	if err := setIfVersionsMap(ctx, cc, items, snap, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	// Remove singles so GetMany must rely on the batch entry
@@ -2095,9 +2349,9 @@ func TestBatchDuplicateRequestHit(t *testing.T) {
 		"u3": {ID: "u3", Name: "B"},
 		"u4": {ID: "u4", Name: "C"},
 	}
-	snap := cc.SnapshotGens(ctx, []string{"u1", "u3", "u4"})
-	if err := cc.SetBatchWithGens(ctx, items, snap, 0); err != nil {
-		t.Fatalf("SetBatchWithGens: %v", err)
+	snap := mustSnapshotVersions(t, ctx, cc, []string{"u1", "u3", "u4"})
+	if err := setIfVersionsMap(ctx, cc, items, snap, 0); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
 	}
 
 	// Remove singles so GetMany must rely on the batch entry
@@ -2128,11 +2382,11 @@ func TestBatchKeyCanonicalization(t *testing.T) {
 
 	impl := mustImpl(t, cc)
 
-	k1, err := impl.batchKeySorted(uniqSorted([]string{"u3", "u1", "u4"}))
+	k1, err := impl.batchKeySorted(sortedUnique([]string{"u3", "u1", "u4"}))
 	if err != nil {
 		t.Fatalf("batchKeySorted k1: %v", err)
 	}
-	k2, err := impl.batchKeySorted(uniqSorted([]string{"u1", "u3", "u3", "u4"}))
+	k2, err := impl.batchKeySorted(sortedUnique([]string{"u1", "u3", "u3", "u4"}))
 	if err != nil {
 		t.Fatalf("batchKeySorted k2: %v", err)
 	}
@@ -2147,7 +2401,7 @@ func TestBatchKeyCanonicalization(t *testing.T) {
 
 // DecodeSingle must reject trailing bytes (strict framing).
 func TestWireDecodeSingleRejectsTrailing(t *testing.T) {
-	b, err := wire.EncodeSingle(7, []byte("x"))
+	b, err := wire.EncodeSingle(testFence(7), []byte("x"))
 	if err != nil {
 		t.Fatalf("EncodeSingle: %v", err)
 	}
@@ -2160,7 +2414,7 @@ func TestWireDecodeSingleRejectsTrailing(t *testing.T) {
 // DecodeBatch must reject trailing bytes (strict framing).
 func TestWireDecodeBatchRejectsTrailing(t *testing.T) {
 	enc, err := wire.EncodeBatch([]wire.BatchItem{
-		{Key: "k", Gen: 1, Payload: []byte("v")},
+		{Key: "k", Fence: testFence(1), Payload: []byte("v")},
 	})
 	if err != nil {
 		t.Fatalf("EncodeBatch: %v", err)
@@ -2176,7 +2430,7 @@ func TestWireDecodeBatchRejectsTrailing(t *testing.T) {
 func TestEncodeBatchKeyLengthValidation(t *testing.T) {
 	// Empty key -> error
 	if _, err := wire.EncodeBatch([]wire.BatchItem{
-		{Key: "", Gen: 1, Payload: []byte("x")},
+		{Key: "", Fence: testFence(1), Payload: []byte("x")},
 	}); err == nil {
 		t.Fatalf("EncodeBatch should error on empty key")
 	}
@@ -2184,7 +2438,7 @@ func TestEncodeBatchKeyLengthValidation(t *testing.T) {
 	// Too long key (65536) -> error
 	longKey := strings.Repeat("a", 0x10000)
 	if _, err := wire.EncodeBatch([]wire.BatchItem{
-		{Key: longKey, Gen: 1, Payload: []byte("x")},
+		{Key: longKey, Fence: testFence(1), Payload: []byte("x")},
 	}); err == nil {
 		t.Fatalf("EncodeBatch should error on key length > 0xFFFF")
 	}
@@ -2192,7 +2446,7 @@ func TestEncodeBatchKeyLengthValidation(t *testing.T) {
 	// Boundary (65535) -> ok
 	boundaryKey := strings.Repeat("b", 0xFFFF)
 	if _, err := wire.EncodeBatch([]wire.BatchItem{
-		{Key: boundaryKey, Gen: 1, Payload: []byte("x")},
+		{Key: boundaryKey, Fence: testFence(1), Payload: []byte("x")},
 	}); err != nil {
 		t.Fatalf("EncodeBatch should succeed at 0xFFFF key length, got err: %v", err)
 	}
@@ -2219,44 +2473,101 @@ func TestDecodeBatchFakeNNotPrealloc(t *testing.T) {
 }
 
 // ==============================
-// Snapshot gens tests
+// Wire and version-validation tests
 // ==============================
 
 // Self-heal when a valid single has trailing bytes appended in the provider.
-func TestSelfHealOnGenMismatchSingle(t *testing.T) {
+func TestSelfHealOnVersionMismatchSingle(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, nil)
 	defer closeTest(t, ctx, cc)
 
 	impl := mustImpl(t, cc)
-	k := "gen-mismatch"
+	k := "version-mismatch"
 	storageKey := impl.singleKeys(k).Value
 
-	// GenStore has never been bumped for this key -> snapshot is 0.
+	// VersionStore has never been initialized for this key, so any live fence is stale.
 	val := user{ID: "u1", Name: "Mismatch"}
 	payload, err := c.JSON[user]{}.Encode(val)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
 
-	// Write a valid frame with gen=1 (mismatches snapshot=0).
-	b, err := wire.EncodeSingle(1, payload)
+	// Write a valid frame with a fence that does not match authoritative state.
+	b, err := wire.EncodeSingle(testFence(1), payload)
 	if err != nil {
 		t.Fatalf("EncodeSingle: %v", err)
 	}
-	if ok, err := impl.provider.Set(ctx, storageKey.String(), b, 1, time.Minute); err != nil || !ok {
+	if ok, err := impl.provider.Set(
+		ctx,
+		storageKey.String(),
+		b,
+		1,
+		time.Minute,
+	); err != nil ||
+		!ok {
 		t.Fatalf("inject single: ok=%v err=%v", ok, err)
 	}
 
-	// Get should detect gen mismatch, delete, and miss.
+	// Get should detect the version mismatch, delete, and miss.
 	if _, ok, err := cc.Get(ctx, k); err != nil || ok {
-		t.Fatalf("expected miss on gen mismatch, ok=%v err=%v", ok, err)
+		t.Fatalf("expected miss on version mismatch, ok=%v err=%v", ok, err)
 	}
 
 	// Ensure self-heal actually deleted the bad entry.
 	if _, ok, _ := mp.Get(ctx, storageKey.String()); ok {
-		t.Fatalf("gen-mismatch single was not deleted by self-heal")
+		t.Fatalf("version-mismatch single was not deleted by self-heal")
+	}
+}
+
+func TestSelfHealOnEpochMismatchSingle(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	cc := newTestCache(t, "user", mp, nil)
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	k := "epoch-mismatch"
+	storageKey := impl.singleKeys(k).Value
+
+	snap, created, err := impl.createSnapshot(ctx, impl.versionKey(k))
+	if err != nil {
+		t.Fatalf("createSnapshot: %v", err)
+	}
+	if !created {
+		t.Fatal("expected createSnapshot to create authoritative state")
+	}
+
+	val := user{ID: "u2", Name: "EpochMismatch"}
+	payload, err := c.JSON[user]{}.Encode(val)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	staleFence := mutateFence(snap.Fence, func(b []byte) {
+		b[0] ^= 0xFF
+	})
+	b, err := wire.EncodeSingle(staleFence, payload)
+	if err != nil {
+		t.Fatalf("EncodeSingle: %v", err)
+	}
+	if ok, err := impl.provider.Set(
+		ctx,
+		storageKey.String(),
+		b,
+		1,
+		time.Minute,
+	); err != nil ||
+		!ok {
+		t.Fatalf("inject single: ok=%v err=%v", ok, err)
+	}
+
+	if _, ok, err := cc.Get(ctx, k); err != nil || ok {
+		t.Fatalf("expected miss on epoch mismatch, ok=%v err=%v", ok, err)
+	}
+	if _, ok, _ := mp.Get(ctx, storageKey.String()); ok {
+		t.Fatalf("epoch-mismatch single was not deleted by self-heal")
 	}
 }
 
@@ -2271,11 +2582,11 @@ func TestBatchRejectReasonFreshnessChecks(t *testing.T) {
 		return mustImpl(t, cc)
 	}
 
-	// helper: bump to exactly 'n'
+	// helper: advance to exactly 'n'
 	bumpTo := func(impl *cache[user], ukey string, n uint64) {
 		sk := impl.singleKeys(ukey).Cache
 		for range n {
-			_, _ = impl.bumpGen(ctx, toGenStoreKey(sk))
+			_, _ = impl.advanceVersion(ctx, toVersionCacheKey(sk))
 		}
 	}
 
@@ -2283,17 +2594,22 @@ func TestBatchRejectReasonFreshnessChecks(t *testing.T) {
 		impl := newImpl(t)
 		keys := []string{"a", "b", "c"} // already sorted
 
-		// current gens: a=1, b=1, c=1
+		// Advance each key once so every member has live authoritative state.
 		for _, k := range keys {
 			bumpTo(impl, k, 1)
 		}
+		snaps := loadSnapshotsByKey(t, ctx, impl, keys)
 
 		items := []wire.BatchItem{
-			{Key: "a", Gen: 1, Payload: nil},
-			{Key: "b", Gen: 1, Payload: nil},
-			{Key: "c", Gen: 1, Payload: nil},
+			{Key: "a", Fence: snaps["a"].Fence, Payload: nil},
+			{Key: "b", Fence: snaps["b"].Fence, Payload: nil},
+			{Key: "c", Fence: snaps["c"].Fence, Payload: nil},
 		}
-		if reason := impl.batchRejectReason(ctx, keys, items); reason != "" {
+		reason, err := impl.batchRejectReason(ctx, keys, items)
+		if err != nil {
+			t.Fatalf("batchRejectReason: %v", err)
+		}
+		if reason != "" {
 			t.Fatalf("batchRejectReason = %q, want empty for fresh members", reason)
 		}
 	})
@@ -2302,38 +2618,58 @@ func TestBatchRejectReasonFreshnessChecks(t *testing.T) {
 		impl := newImpl(t)
 		keys := []string{"a", "b", "c"}
 
-		// current gens: a=1, b=1, c=1
+		// Advance each key once so every member has live authoritative state.
 		for _, k := range keys {
 			bumpTo(impl, k, 1)
 		}
+		snaps := loadSnapshotsByKey(t, ctx, impl, keys)
 
 		// omit "b" from items
 		items := []wire.BatchItem{
-			{Key: "a", Gen: 1, Payload: nil},
-			{Key: "c", Gen: 1, Payload: nil},
+			{Key: "a", Fence: snaps["a"].Fence, Payload: nil},
+			{Key: "c", Fence: snaps["c"].Fence, Payload: nil},
 		}
-		if reason := impl.batchRejectReason(ctx, keys, items); reason != BatchRejectReasonInvalidOrStale {
-			t.Fatalf("batchRejectReason = %q, want %q when a requested member is missing", reason, BatchRejectReasonInvalidOrStale)
+		reason, err := impl.batchRejectReason(ctx, keys, items)
+		if err != nil {
+			t.Fatalf("batchRejectReason: %v", err)
+		}
+		if reason != BatchRejectReasonIncompleteBatch {
+			t.Fatalf(
+				"batchRejectReason = %q, want %q when a requested member is missing",
+				reason,
+				BatchRejectReasonIncompleteBatch,
+			)
 		}
 	})
 
-	t.Run("stale_member_gen_mismatch", func(t *testing.T) {
+	t.Run("stale_member_version_mismatch", func(t *testing.T) {
 		impl := newImpl(t)
 		keys := []string{"a", "b", "c"}
 
-		// current gens: a=1, b=1, c=1
+		// Advance each key once so every member has live authoritative state.
 		for _, k := range keys {
 			bumpTo(impl, k, 1)
 		}
+		snaps := loadSnapshotsByKey(t, ctx, impl, keys)
 
-		// Make "b" stale by putting Gen=0 (current is 1)
+		staleFence := mutateFence(snaps["b"].Fence, func(b []byte) {
+			b[len(b)-1] ^= 0x01
+		})
 		items := []wire.BatchItem{
-			{Key: "a", Gen: 1, Payload: nil},
-			{Key: "b", Gen: 0, Payload: nil}, // stale
-			{Key: "c", Gen: 1, Payload: nil},
+			{Key: "a", Fence: snaps["a"].Fence, Payload: nil},
+			{Key: "b", Fence: staleFence, Payload: nil}, // stale
+			{Key: "c", Fence: snaps["c"].Fence, Payload: nil},
 		}
-		if reason := impl.batchRejectReason(ctx, keys, items); reason != BatchRejectReasonInvalidOrStale {
-			t.Fatalf("batchRejectReason = %q, want %q when any member is stale", reason, BatchRejectReasonInvalidOrStale)
+		reason, err := impl.batchRejectReason(ctx, keys, items)
+		if err != nil {
+			t.Fatalf("batchRejectReason: %v", err)
+		}
+		if reason != BatchRejectReasonVersionMismatch {
+			t.Fatalf(
+				"batchRejectReason = %q, want %q when any member is stale",
+				reason,
+				BatchRejectReasonVersionMismatch,
+			)
 		}
 	})
 
@@ -2341,37 +2677,162 @@ func TestBatchRejectReasonFreshnessChecks(t *testing.T) {
 		impl := newImpl(t)
 		keys := []string{"a", "b"}
 
-		// current gens: a=1, b=1
+		// Advance each key once so every member has live authoritative state.
 		for _, k := range keys {
 			bumpTo(impl, k, 1)
 		}
+		snaps := loadSnapshotsByKey(t, ctx, impl, keys)
 
 		// Include an extra "z" that isn't requested. Should be ignored.
 		items := []wire.BatchItem{
-			{Key: "a", Gen: 1, Payload: nil},
-			{Key: "b", Gen: 1, Payload: nil},
-			{Key: "z", Gen: 999, Payload: nil}, // extra
+			{Key: "a", Fence: snaps["a"].Fence, Payload: nil},
+			{Key: "b", Fence: snaps["b"].Fence, Payload: nil},
+			{Key: "z", Fence: testFence(999), Payload: nil}, // extra
 		}
-		if reason := impl.batchRejectReason(ctx, keys, items); reason != "" {
+		reason, err := impl.batchRejectReason(ctx, keys, items)
+		if err != nil {
+			t.Fatalf("batchRejectReason: %v", err)
+		}
+		if reason != "" {
 			t.Fatalf("batchRejectReason = %q, want empty when extras are ignored", reason)
 		}
 	})
 }
 
-func equalU64(a, b map[string]uint64) bool {
+func TestGetManyRejectsEpochMismatchBatch(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	cc := newTestCache(t, "user", mp, nil)
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	keys := []string{"a", "b"}
+
+	snapA, created, err := impl.createSnapshot(ctx, impl.versionKey("a"))
+	if err != nil {
+		t.Fatalf("createSnapshot a: %v", err)
+	}
+	if !created {
+		t.Fatal("expected createSnapshot to create a")
+	}
+	snapB, created, err := impl.createSnapshot(ctx, impl.versionKey("b"))
+	if err != nil {
+		t.Fatalf("createSnapshot b: %v", err)
+	}
+	if !created {
+		t.Fatal("expected createSnapshot to create b")
+	}
+
+	payloadA, err := c.JSON[user]{}.Encode(user{ID: "a", Name: "A"})
+	if err != nil {
+		t.Fatalf("encode a: %v", err)
+	}
+	payloadB, err := c.JSON[user]{}.Encode(user{ID: "b", Name: "B"})
+	if err != nil {
+		t.Fatalf("encode b: %v", err)
+	}
+
+	staleFence := mutateFence(snapB.Fence, func(b []byte) {
+		b[0] ^= 0xFF
+	})
+	batchWire, err := wire.EncodeBatch([]wire.BatchItem{
+		{Key: "a", Fence: snapA.Fence, Payload: payloadA},
+		{Key: "b", Fence: staleFence, Payload: payloadB},
+	})
+	if err != nil {
+		t.Fatalf("EncodeBatch: %v", err)
+	}
+
+	batchKey, err := impl.batchKeySorted(keys)
+	if err != nil {
+		t.Fatalf("batchKeySorted: %v", err)
+	}
+	if ok, err := impl.provider.Set(
+		ctx,
+		batchKey.String(),
+		batchWire,
+		1,
+		time.Minute,
+	); err != nil ||
+		!ok {
+		t.Fatalf("inject batch: ok=%v err=%v", ok, err)
+	}
+
+	got, missing, err := cc.GetMany(ctx, keys)
+	if err != nil {
+		t.Fatalf("GetMany: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("GetMany should not serve mismatched batch, got=%v", got)
+	}
+	if len(missing) != 2 || missing[0] != "a" || missing[1] != "b" {
+		t.Fatalf("missing = %v, want [a b]", missing)
+	}
+	if _, ok, _ := mp.Get(ctx, batchKey.String()); ok {
+		t.Fatalf("epoch-mismatch batch was not deleted")
+	}
+}
+
+func TestBatchValidationSnapshotErrorLeavesBatchEntry(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	gs := &failingVersionStore{inner: version.NewLocalWithCleanup(time.Hour, time.Hour)}
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.VersionStore = gs
+	})
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	items := map[string]user{
+		"a": {ID: "a", Name: "A"},
+		"b": {ID: "b", Name: "B"},
+	}
+	observed := mustSnapshotVersions(t, ctx, cc, []string{"a", "b"})
+	if err := setIfVersionsMap(ctx, cc, items, observed, time.Minute); err != nil {
+		t.Fatalf("SetIfVersions: %v", err)
+	}
+
+	batchKey, err := impl.batchKeySorted([]string{"a", "b"})
+	if err != nil {
+		t.Fatalf("batchKeySorted: %v", err)
+	}
+	for k := range items {
+		_ = impl.provider.Del(ctx, impl.singleKeys(k).Value.String())
+	}
+
+	gs.snapshotManyErr = errors.New("snapshot many failed")
+	gs.snapshotErr = errors.New("snapshot failed")
+
+	got, missing, err := cc.GetMany(ctx, []string{"a", "b"})
+	if err != nil {
+		t.Fatalf("GetMany: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("GetMany should not serve values during snapshot outage, got=%v", got)
+	}
+	if len(missing) != 2 || missing[0] != "a" || missing[1] != "b" {
+		t.Fatalf("missing = %v, want [a b]", missing)
+	}
+	if _, ok, _ := mp.Get(ctx, batchKey.String()); !ok {
+		t.Fatalf("batch entry should remain when version validation is unavailable")
+	}
+}
+
+func equalVersions(a, b map[string]Version) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for k, v := range a {
-		if b[k] != v {
+		other, ok := b[k]
+		if !ok || !v.Equal(other) {
 			return false
 		}
 	}
 	return true
 }
 
-// Covers: empty input, duplicates, missing (0), and mixed bumped gens.
-func TestSnapshotGensBehavior(t *testing.T) {
+// Covers: empty input, duplicates, missing versions, and mixed live snapshots.
+func TestSnapshotVersionsBehavior(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	cc := newTestCache(t, "user", mp, nil)
@@ -2379,33 +2840,32 @@ func TestSnapshotGensBehavior(t *testing.T) {
 	impl := mustImpl(t, cc)
 
 	t.Run("empty", func(t *testing.T) {
-		got := cc.SnapshotGens(ctx, nil)
+		got := mustSnapshotVersions(t, ctx, cc, nil)
 		if len(got) != 0 {
 			t.Fatalf("empty: expected empty map, got %v", got)
 		}
 	})
 
-	t.Run("duplicates_and_zero_missing", func(t *testing.T) {
-		// No bumps yet → everything is 0
+	t.Run("duplicates_and_missing", func(t *testing.T) {
+		// No authoritative state exists yet, so every key is missing.
 		keys := []string{"dupa", "dupa", "other"}
-		got := cc.SnapshotGens(ctx, keys)
-		want := map[string]uint64{"dupa": 0, "other": 0}
-		if !equalU64(got, want) {
-			t.Fatalf("dups/zeros: got %v want %v", got, want)
+		got := mustSnapshotVersions(t, ctx, cc, keys)
+		want := missingVersions(keys)
+		if !equalVersions(got, want) {
+			t.Fatalf("duplicates/missing: got %v want %v", got, want)
 		}
 	})
 
 	t.Run("mixed", func(t *testing.T) {
-		// m1 -> 1, m3 -> 3, m2 -> 0
-		_, _ = impl.bumpGen(ctx, toGenStoreKey(impl.singleKeys("m1").Cache))
+		// m1 and m3 should be live; m2 should still be missing.
+		_, _ = impl.advanceVersion(ctx, toVersionCacheKey(impl.singleKeys("m1").Cache))
 		for range 3 {
-			_, _ = impl.bumpGen(ctx, toGenStoreKey(impl.singleKeys("m3").Cache))
+			_, _ = impl.advanceVersion(ctx, toVersionCacheKey(impl.singleKeys("m3").Cache))
 		}
 		keys := []string{"m1", "m2", "m3", "m1"} // include duplicate
-		got := cc.SnapshotGens(ctx, keys)
-		want := map[string]uint64{"m1": 1, "m2": 0, "m3": 3}
-		if !equalU64(got, want) {
-			t.Fatalf("mixed: got %v want %v", got, want)
+		got := mustSnapshotVersions(t, ctx, cc, keys)
+		if got["m1"].IsMissing() || !got["m2"].IsMissing() || got["m3"].IsMissing() {
+			t.Fatalf("mixed: got %v, want m1/live m2/missing m3/live", got)
 		}
 	})
 }
@@ -2423,7 +2883,7 @@ func TestNewUsesConfiguredKeyWriterForSetIfVersion(t *testing.T) {
 
 	key := "u:1"
 	value := user{ID: "1", Name: "Ada"}
-	result, err := cc.CAS.SetIfVersion(ctx, key, value, versionFromUint64(0), 5*time.Second)
+	result, err := cc.CAS.SetIfVersion(ctx, key, value, Version{}, 5*time.Second)
 	if err != nil {
 		t.Fatalf("SetIfVersion: %v", err)
 	}
@@ -2439,17 +2899,21 @@ func TestNewUsesConfiguredKeyWriterForSetIfVersion(t *testing.T) {
 
 	impl := mustImpl(t, cc)
 	sk := impl.singleKeys(key)
-	if keyAdapter.lastVersionKey != toGenStoreKey(sk.Cache) {
-		t.Fatalf("version key mismatch: got %q want %q", keyAdapter.lastVersionKey, toGenStoreKey(sk.Cache))
+	if keyAdapter.lastVersionKey != toVersionCacheKey(sk.Cache) {
+		t.Fatalf(
+			"version key mismatch: got %q want %q",
+			keyAdapter.lastVersionKey,
+			toVersionCacheKey(sk.Cache),
+		)
 	}
 	if keyAdapter.lastValueKey != sk.Value.String() {
 		t.Fatalf("value key mismatch: got %q want %q", keyAdapter.lastValueKey, sk.Value.String())
 	}
-	if keyAdapter.lastExpected != 0 {
-		t.Fatalf("expected observed version 0, got %d", keyAdapter.lastExpected)
+	if keyAdapter.lastExpected.Exists {
+		t.Fatalf("expected missing observed version, got %+v", keyAdapter.lastExpected)
 	}
-	if len(keyAdapter.lastWireValue) == 0 {
-		t.Fatalf("expected encoded wire payload to be passed to KeyWriter")
+	if len(keyAdapter.lastPayload) == 0 {
+		t.Fatalf("expected encoded payload to be passed to KeyWriter")
 	}
 }
 
@@ -2477,13 +2941,20 @@ func TestNewUsesConfiguredKeyInvalidatorForInvalidate(t *testing.T) {
 		t.Fatalf("Invalidate error should wrap configured KeyInvalidator error, got %v", err)
 	}
 	if keyAdapter.invalidateCalls != 1 {
-		t.Fatalf("Invalidate should call configured KeyInvalidator once, got %d", keyAdapter.invalidateCalls)
+		t.Fatalf(
+			"Invalidate should call configured KeyInvalidator once, got %d",
+			keyAdapter.invalidateCalls,
+		)
 	}
 
 	impl := mustImpl(t, cc)
 	sk := impl.singleKeys(key)
-	if keyAdapter.lastVersionKey != toGenStoreKey(sk.Cache) {
-		t.Fatalf("version key mismatch: got %q want %q", keyAdapter.lastVersionKey, toGenStoreKey(sk.Cache))
+	if keyAdapter.lastVersionKey != toVersionCacheKey(sk.Cache) {
+		t.Fatalf(
+			"version key mismatch: got %q want %q",
+			keyAdapter.lastVersionKey,
+			toVersionCacheKey(sk.Cache),
+		)
 	}
 	if keyAdapter.lastValueKey != sk.Value.String() {
 		t.Fatalf("value key mismatch: got %q want %q", keyAdapter.lastValueKey, sk.Value.String())
@@ -2494,31 +2965,71 @@ func TestNewUsesConfiguredKeyInvalidatorForInvalidate(t *testing.T) {
 // Invalidate edge-case behavior (cluster down etc.)
 // ==============================
 
-type failingGenStore struct {
+type failingVersionStore struct {
+	inner           version.Store
 	snapshotErr     error
 	snapshotManyErr error
-	bumpErr         error
+	advanceErr      error
 }
 
-func (s *failingGenStore) Snapshot(context.Context, genstore.CacheKey) (uint64, error) {
+func (s *failingVersionStore) Snapshot(
+	ctx context.Context,
+	key version.CacheKey,
+) (version.Snapshot, error) {
 	if s.snapshotErr != nil {
-		return 0, s.snapshotErr
+		return version.Snapshot{}, s.snapshotErr
 	}
-	return 0, nil
+	if s.inner != nil {
+		return s.inner.Snapshot(ctx, key)
+	}
+	return version.Snapshot{}, nil
 }
 
-func (s *failingGenStore) SnapshotMany(context.Context, []genstore.CacheKey) (map[genstore.CacheKey]uint64, error) {
+func (s *failingVersionStore) SnapshotMany(
+	ctx context.Context,
+	keys []version.CacheKey,
+) (map[version.CacheKey]version.Snapshot, error) {
 	if s.snapshotManyErr != nil {
 		return nil, s.snapshotManyErr
 	}
-	return map[genstore.CacheKey]uint64{}, nil
+	if s.inner != nil {
+		return s.inner.SnapshotMany(ctx, keys)
+	}
+	return map[version.CacheKey]version.Snapshot{}, nil
 }
 
-func (s *failingGenStore) Bump(context.Context, genstore.CacheKey) (uint64, error) {
-	return 0, s.bumpErr
+func (s *failingVersionStore) CreateIfMissing(
+	ctx context.Context,
+	key version.CacheKey,
+) (version.Snapshot, bool, error) {
+	if s.snapshotErr != nil {
+		return version.Snapshot{}, false, s.snapshotErr
+	}
+	if s.inner != nil {
+		return s.inner.CreateIfMissing(ctx, key)
+	}
+	return version.Snapshot{}, true, nil
 }
-func (s *failingGenStore) Cleanup(time.Duration)       {}
-func (s *failingGenStore) Close(context.Context) error { return nil }
+
+func (s *failingVersionStore) Advance(
+	ctx context.Context,
+	key version.CacheKey,
+) (version.Snapshot, error) {
+	if s.advanceErr != nil {
+		return version.Snapshot{}, s.advanceErr
+	}
+	if s.inner != nil {
+		return s.inner.Advance(ctx, key)
+	}
+	return version.Snapshot{}, nil
+}
+func (s *failingVersionStore) Cleanup(time.Duration) {}
+func (s *failingVersionStore) Close(ctx context.Context) error {
+	if s.inner != nil {
+		return s.inner.Close(ctx)
+	}
+	return nil
+}
 
 type delErrProvider struct {
 	*memProvider
@@ -2533,27 +3044,32 @@ func TestInvalidateBothFailReturnsError(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
 	sentinelDelErr := errors.New("del failed")
-	bumpFail := errors.New("bump failed")
+	advanceFail := errors.New("advance failed")
 
-	cc := newTestCache(t, "user", &delErrProvider{memProvider: mp, err: sentinelDelErr}, func(o *Options[user]) {
-		o.GenStore = &failingGenStore{bumpErr: bumpFail}
-	})
+	cc := newTestCache(
+		t,
+		"user",
+		&delErrProvider{memProvider: mp, err: sentinelDelErr},
+		func(o *Options[user]) {
+			o.VersionStore = &failingVersionStore{advanceErr: advanceFail}
+		},
+	)
 	defer closeTest(t, ctx, cc)
 
 	err := cc.Invalidate(ctx, "k1")
 	if err == nil {
-		t.Fatalf("expected error when both bump and delete fail")
+		t.Fatalf("expected error when both advance and delete fail")
 	}
 	var ie *InvalidateError
 	if !errors.As(err, &ie) {
 		t.Fatalf("expected InvalidateError, got %T: %v", err, err)
 	}
-	var bumpOpErr *OpError
-	if !errors.As(ie.BumpErr, &bumpOpErr) {
-		t.Fatalf("expected bump error to be *OpError, got %T", ie.BumpErr)
+	var advanceOpErr *OpError
+	if !errors.As(ie.AdvanceErr, &advanceOpErr) {
+		t.Fatalf("expected advance error to be *OpError, got %T", ie.AdvanceErr)
 	}
-	if bumpOpErr.Op != OpInvalidate || bumpOpErr.Key != "k1" {
-		t.Fatalf("unexpected bump OpError: %+v", bumpOpErr)
+	if advanceOpErr.Op != OpInvalidate || advanceOpErr.Key != "k1" {
+		t.Fatalf("unexpected advance OpError: %+v", advanceOpErr)
 	}
 	var delOpErr *OpError
 	if !errors.As(ie.DelErr, &delOpErr) {
@@ -2566,24 +3082,24 @@ func TestInvalidateBothFailReturnsError(t *testing.T) {
 	if !errors.Is(err, sentinelDelErr) {
 		t.Fatalf("expected errors.Is(err, delErr) to be true")
 	}
-	if !errors.Is(err, bumpFail) {
-		t.Fatalf("expected errors.Is(err, bumpErr) to be true")
+	if !errors.Is(err, advanceFail) {
+		t.Fatalf("expected errors.Is(err, advanceErr) to be true")
 	}
 }
 
-func TestInvalidateBumpFailDeleteOKReturnsError(t *testing.T) {
+func TestInvalidateAdvanceFailDeleteOKReturnsError(t *testing.T) {
 	ctx := context.Background()
 	mp := newMemProvider()
-	sentinel := errors.New("bump failed")
+	sentinel := errors.New("advance failed")
 
 	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
-		o.GenStore = &failingGenStore{bumpErr: sentinel}
+		o.VersionStore = &failingVersionStore{advanceErr: sentinel}
 	})
 	defer closeTest(t, ctx, cc)
 
 	err := cc.Invalidate(ctx, "k2")
 	if err == nil {
-		t.Fatalf("expected error when bump fails, even if delete succeeds")
+		t.Fatalf("expected error when advance fails, even if delete succeeds")
 	}
 	var ie *InvalidateError
 	if !errors.As(err, &ie) {
@@ -2593,24 +3109,24 @@ func TestInvalidateBumpFailDeleteOKReturnsError(t *testing.T) {
 		t.Fatalf("expected delete error to be nil, got %v", ie.DelErr)
 	}
 	if !errors.Is(err, sentinel) {
-		t.Fatalf("expected errors.Is(err, bumpErr) to be true")
+		t.Fatalf("expected errors.Is(err, advanceErr) to be true")
 	}
 }
 
-func TestInvalidateBumpOKDeleteFailNoError(t *testing.T) {
+func TestInvalidateAdvanceOKDeleteFailNoError(t *testing.T) {
 	ctx := context.Background()
 	sentinelDelErr := errors.New("del failed")
-	// normal genstore (local), provider delete fails
+	// normal version store (local), provider delete fails
 	mp := &delErrProvider{memProvider: newMemProvider(), err: sentinelDelErr}
 
 	cc := newTestCache(t, "user", mp, nil)
 	defer closeTest(t, ctx, cc)
 
-	// Warm a gen so bump definitely succeeds.
+	// Warm a version so advance definitely succeeds.
 	impl := mustImpl(t, cc)
-	_, _ = impl.bumpGen(ctx, toGenStoreKey(impl.singleKeys("k3").Cache))
+	_, _ = impl.advanceVersion(ctx, toVersionCacheKey(impl.singleKeys("k3").Cache))
 
 	if err := cc.Invalidate(ctx, "k3"); err != nil {
-		t.Fatalf("expected no error when delete fails but bump succeeds; got %v", err)
+		t.Fatalf("expected no error when delete fails but advance succeeds; got %v", err)
 	}
 }

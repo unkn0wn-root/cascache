@@ -7,7 +7,7 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	pr "github.com/unkn0wn-root/cascache/provider"
+	pr "github.com/unkn0wn-root/cascache/v3/provider"
 )
 
 // Provider implements cascache/provider.Provider on top of go-redis.
@@ -16,8 +16,10 @@ type Provider struct {
 	closeClient bool
 }
 
-var _ pr.Provider = (*Provider)(nil)
-var _ pr.Adder = (*Provider)(nil)
+var (
+	_ pr.Provider = (*Provider)(nil)
+	_ pr.Adder    = (*Provider)(nil)
+)
 
 type ProviderOptions struct {
 	Client      goredis.UniversalClient

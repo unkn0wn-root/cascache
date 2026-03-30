@@ -1,6 +1,6 @@
 # Example
 
-This example shows a basic read and write flow with the current v2 API.
+This example shows a basic read and write flow with the current v3 API.
 
 It uses:
 
@@ -17,9 +17,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/unkn0wn-root/cascache"
-	"github.com/unkn0wn-root/cascache/codec"
-	ristrettoprovider "github.com/unkn0wn-root/cascache/provider/ristretto"
+	"github.com/unkn0wn-root/cascache/v3"
+	"github.com/unkn0wn-root/cascache/v3/codec"
+	ristrettoprovider "github.com/unkn0wn-root/cascache/v3/provider/ristretto"
 )
 
 type User struct {

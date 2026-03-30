@@ -12,11 +12,11 @@
 //     writes or torn values.
 //
 // Keyspace ownership:
-//   - The keyspace root "cas:v2:val:" is owned by cascache. External code
+//   - The keyspace root "cas:v3:val:" is owned by cascache. External code
 //     MUST NOT write under that root. Strict wire-format validation may treat
 //     foreign writes as corruption and delete them.
 //   - Other packages in this repository may reserve additional roots
-//     (e.g., "cas:v2:gen:" used by the generation store); external code
+//     (e.g., "cas:v3:ver:" used by the version store); external code
 //     should avoid those as well.
 //
 // Back-pressure/error:
