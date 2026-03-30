@@ -69,6 +69,7 @@ What it does not try to do:
 
 - make arbitrary multi-key writes globally atomic
 - recover from a source-of-truth write that succeeded when `Invalidate` did not
+- prove that a fill read came from a fully up-to-date source
 - turn a local in-process version store into a distributed invalidation system
 
 ## How it works
@@ -89,6 +90,59 @@ The normal write path is:
 2. `Invalidate`
 
 That means the cache never trusts a value just because it exists. A value must still match the current version state when it is read.
+
+### About stale source reads
+
+CasCache guarantees cache freshness against its authoritative version state. It does not guarantee that the value you just loaded from a database or API was the newest value that existed anywhere.
+
+If a fill reads from a lagging database replica or an "eventually consistent" API, that request can still observe old data from the source. What CasCache prevents is that old data being accepted back into the cache after the key has moved to a new fence. Once version state changes, old cache entries stop validating on read and stale refill attempts are rejected on write.
+
+So the guarantee is closer to "no stale cache refill after a successful invalidate" than "the cache can prove your source read was globally current." If a path needs that stronger guarantee, the fill has to read from an authority that is fresh enough for your consistency model, or use `ReadGuard` / `BatchReadGuard` on critical read paths.
+
+### Read guards
+
+Most paths do **not** need a read guard. The normal version check already guarantees that once a key is invalidated, older cached bytes stop being valid.
+
+Use `ReadGuard` when a cache hit still needs one more authority check before it may be served. Typical cases:
+
+- fills may come from a lagging database replica or API etc., but one endpoint must only serve values confirmed by a primary or another authoritative source
+- the cached value carries a revision, timestamp, or some business state field that must still match source state before use
+
+Example:
+
+```go
+type User struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type UserMetaStore interface {
+	CurrentUpdatedAt(ctx context.Context, id string) (time.Time, error)
+}
+
+var meta UserMetaStore
+
+cache, err := cascache.New(cascache.Options[User]{
+	Namespace: "user",
+	Provider:  provider,
+	Codec:     codec.JSON[User]{},
+	ReadGuard: func(ctx context.Context, key string, cached User) (bool, error) {
+		current, err := meta.CurrentUpdatedAt(ctx, key)
+		if err != nil {
+			return false, err
+		}
+		return cached.UpdatedAt.Equal(current), nil
+	},
+})
+```
+
+Tradeoffs:
+
+- every guarded cache hit does extra work
+- guard errors fail closed to a miss instead of serving a maybe-stale value
+- use `BatchReadGuard` for batch endpoints when one source call can validate many keys
+- keep guards for paths where source freshness matters more than raw cache-hit latency
 
 ## Installation
 
