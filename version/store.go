@@ -32,7 +32,9 @@ func (f Fence) Equal(other Fence) bool {
 }
 
 func (f Fence) String() string {
-	return string(f.AppendText(nil))
+	// encode into a fixed size stack buffer so String avoids the extra []byte alloc.
+	var buf [tokenSize * 2]byte
+	return string(f.AppendText(buf[:0]))
 }
 
 // AppendBinary appends the canonical fixed-width binary form of f to dst.
