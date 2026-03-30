@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,6 +36,26 @@ type fakeUniversalClient struct {
 func (c *fakeUniversalClient) Close() error {
 	c.closeCalls.Add(1)
 	return nil
+}
+
+type snapshotCmdClient struct {
+	goredis.UniversalClient
+	getFn  func(context.Context, string) *goredis.StringCmd
+	mgetFn func(context.Context, ...string) *goredis.SliceCmd
+}
+
+func (c *snapshotCmdClient) Get(ctx context.Context, key string) *goredis.StringCmd {
+	if c.getFn != nil {
+		return c.getFn(ctx, key)
+	}
+	return goredis.NewStringResult("", nil)
+}
+
+func (c *snapshotCmdClient) MGet(ctx context.Context, keys ...string) *goredis.SliceCmd {
+	if c.mgetFn != nil {
+		return c.mgetFn(ctx, keys...)
+	}
+	return goredis.NewSliceResult(nil, nil)
 }
 
 func TestNewKeyMutatorNilClient(t *testing.T) {
@@ -257,5 +278,49 @@ func TestParseFenceRejectsLegacyCounter(t *testing.T) {
 
 	if _, err := version.ParseFence("7"); err == nil {
 		t.Fatal("expected legacy counter format to be rejected")
+	}
+}
+
+func TestVersionStoreSnapshotCorruptFenceReturnsErrFenceParse(t *testing.T) {
+	t.Parallel()
+
+	key := version.NewCacheKey("k")
+	store, err := NewVersionStore(&snapshotCmdClient{
+		getFn: func(context.Context, string) *goredis.StringCmd {
+			return goredis.NewStringResult("7", nil)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewVersionStore: %v", err)
+	}
+
+	_, err = store.Snapshot(context.Background(), key)
+	if !errors.Is(err, ErrFenceParse) {
+		t.Fatalf("Snapshot error = %v, want errors.Is(_, %v)", err, ErrFenceParse)
+	}
+	if !strings.Contains(err.Error(), key.String()) {
+		t.Fatalf("Snapshot error = %q, want key %q in message", err, key)
+	}
+}
+
+func TestVersionStoreSnapshotManyCorruptFenceReturnsErrFenceParse(t *testing.T) {
+	t.Parallel()
+
+	key := version.NewCacheKey("k")
+	store, err := NewVersionStore(&snapshotCmdClient{
+		mgetFn: func(context.Context, ...string) *goredis.SliceCmd {
+			return goredis.NewSliceResult([]interface{}{"7"}, nil)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewVersionStore: %v", err)
+	}
+
+	_, err = store.SnapshotMany(context.Background(), []version.CacheKey{key})
+	if !errors.Is(err, ErrFenceParse) {
+		t.Fatalf("SnapshotMany error = %v, want errors.Is(_, %v)", err, ErrFenceParse)
+	}
+	if !strings.Contains(err.Error(), key.String()) {
+		t.Fatalf("SnapshotMany error = %q, want key %q in message", err, key)
 	}
 }

@@ -20,7 +20,7 @@ type Options[V any] struct {
 
 	DefaultTTL time.Duration
 	BatchTTL   time.Duration
-	VersionTTL time.Duration // 0 keeps authoritative version state indefinitely
+	VersionTTL time.Duration
 	Disabled   bool
 
 	ComputeSetCost cascache.SetCostFunc

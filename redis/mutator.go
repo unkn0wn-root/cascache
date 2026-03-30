@@ -75,11 +75,10 @@ return 1
 
 type KeyMutatorOptions struct {
 	Client     goredis.UniversalClient
-	VersionTTL time.Duration // 0 keeps authoritative version state indefinitely
+	VersionTTL time.Duration
 }
 
-// NewKeyMutator constructs the Redis-backed single-key mutation capability used
-// by this package's New constructor.
+// NewKeyMutator constructs the Redis-backed single-key mutatator.
 func NewKeyMutator(client goredis.UniversalClient) (*KeyMutator, error) {
 	return NewKeyMutatorWithOptions(KeyMutatorOptions{Client: client})
 }
