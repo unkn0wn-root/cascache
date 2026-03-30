@@ -281,7 +281,7 @@ func TestParseFenceRejectsLegacyCounter(t *testing.T) {
 	}
 }
 
-func TestVersionStoreSnapshotCorruptFenceReturnsErrFenceParse(t *testing.T) {
+func TestVersionStoreSnapshotBadFence(t *testing.T) {
 	t.Parallel()
 
 	key := version.NewCacheKey("k")
@@ -303,13 +303,13 @@ func TestVersionStoreSnapshotCorruptFenceReturnsErrFenceParse(t *testing.T) {
 	}
 }
 
-func TestVersionStoreSnapshotManyCorruptFenceReturnsErrFenceParse(t *testing.T) {
+func TestVersionStoreSnapshotManyBadFence(t *testing.T) {
 	t.Parallel()
 
 	key := version.NewCacheKey("k")
 	store, err := NewVersionStore(&snapshotCmdClient{
 		mgetFn: func(context.Context, ...string) *goredis.SliceCmd {
-			return goredis.NewSliceResult([]interface{}{"7"}, nil)
+			return goredis.NewSliceResult([]any{"7"}, nil)
 		},
 	})
 	if err != nil {
