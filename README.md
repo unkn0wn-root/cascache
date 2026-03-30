@@ -81,6 +81,8 @@ The normal fill path is:
 2. do your service, app, business logic (db, API etc.)
 3. `SetIfVersion`
 
+Use `SetIfVersionWithTTL` only when you need to override the cache's default TTL for that write.
+
 The normal write path is:
 
 1. write where you want
@@ -177,7 +179,7 @@ func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
 	// loading. The cache skips the write and the next reader will fill it
 	// with fresh data. We already have the value from the database, so we
 	// return it either way.
-	_, _ = r.Cache.SetIfVersion(ctx, id, user, version, 0)
+	_, _ = r.Cache.SetIfVersion(ctx, id, user, version)
 	return user, nil
 }
 ```
@@ -280,6 +282,7 @@ CasCache also supports grouped batch entries:
 - `GetMany`
 - `SnapshotVersions`
 - `SetIfVersions`
+- `SetIfVersionsWithTTL` when you need a per-call TTL override
 
 On read, the cache tries the batch entry first but checks every member against current version state before serving it. If any member is stale, undecodable, or missing, the whole batch is rejected and the cache falls back to single-key reads.
 

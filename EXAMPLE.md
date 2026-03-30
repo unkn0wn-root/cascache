@@ -67,7 +67,7 @@ func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
 		return User{}, err
 	}
 
-	_, _ = r.Cache.SetIfVersion(ctx, id, user, version, 0)
+	_, _ = r.Cache.SetIfVersion(ctx, id, user, version)
 	return user, nil
 }
 
@@ -166,7 +166,7 @@ func (r *UserRepo) GetMany(ctx context.Context, ids []string) (map[string]User, 
 		values[user.ID] = user
 	}
 
-	_, _ = r.Cache.SetIfVersions(ctx, items, 0)
+	_, _ = r.Cache.SetIfVersions(ctx, items)
 	return values, nil
 }
 ```

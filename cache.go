@@ -190,10 +190,22 @@ func (c *cache[V]) SnapshotVersion(ctx context.Context, key string) (Version, er
 }
 
 // SetIfVersion writes a value only when the current version still matches the
-// caller's observed version. Generic backends perform a final version read
-// immediately before the provider write. When KeyWriter is configured, the
-// backend-native implementation collapses compare and write into one operation.
+// caller's observed version using the cache's configured default TTL.
 func (c *cache[V]) SetIfVersion(
+	ctx context.Context,
+	key string,
+	value V,
+	version Version,
+) (WriteResult, error) {
+	return c.SetIfVersionWithTTL(ctx, key, value, version, c.defaultTTL)
+}
+
+// SetIfVersionWithTTL writes a value only when the current version still
+// matches the caller's observed version. Generic backends perform a final
+// version read immediately before the provider write. When KeyWriter is
+// configured, the backend-native implementation collapses compare and write
+// into one operation.
+func (c *cache[V]) SetIfVersionWithTTL(
 	ctx context.Context,
 	key string,
 	value V,
@@ -381,10 +393,19 @@ func (c *cache[V]) SnapshotVersions(ctx context.Context, keys []string) (map[str
 	return out, nil
 }
 
-// SetIfVersions writes one batch entry when every version still matches.
-// If the batch write is skipped or rejected, the cache falls back to checked
-// single writes and reports that through the result.
+// SetIfVersions writes one batch entry when every version still matches using
+// the cache's configured default single and batch TTLs.
 func (c *cache[V]) SetIfVersions(
+	ctx context.Context,
+	items []VersionedValue[V],
+) (BatchWriteResult, error) {
+	return c.SetIfVersionsWithTTL(ctx, items, 0)
+}
+
+// SetIfVersionsWithTTL writes one batch entry when every version still
+// matches. If the batch write is skipped or rejected, the cache falls back to
+// checked single writes and reports that through the result.
+func (c *cache[V]) SetIfVersionsWithTTL(
 	ctx context.Context,
 	items []VersionedValue[V],
 	ttl time.Duration,
@@ -1225,7 +1246,7 @@ func (c *cache[V]) addSingle(
 //     rejection, version-store error), it ensures that non-stale keys can still
 //     be cached individually.
 //
-// Each call to SetIfVersion performs its own version check, so a stale
+// Each call to SetIfVersionWithTTL performs its own version check, so a stale
 // item in the slice is simply skipped without writing bad data.
 func (c *cache[V]) seedSingles(
 	ctx context.Context,
@@ -1234,7 +1255,7 @@ func (c *cache[V]) seedSingles(
 ) error {
 	var errs []error
 	for _, it := range items {
-		if _, err := c.SetIfVersion(ctx, it.key, it.val, it.obs, ttl); err != nil {
+		if _, err := c.SetIfVersionWithTTL(ctx, it.key, it.val, it.obs, ttl); err != nil {
 			errs = append(errs, err)
 		}
 	}

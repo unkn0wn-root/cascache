@@ -80,13 +80,15 @@ type CAS[V any] interface {
 	// Single
 	Get(ctx context.Context, key string) (v V, ok bool, err error)
 	SnapshotVersion(ctx context.Context, key string) (Version, error)
-	SetIfVersion(ctx context.Context, key string, value V, version Version, ttl time.Duration) (WriteResult, error)
+	SetIfVersion(ctx context.Context, key string, value V, version Version) (WriteResult, error)
+	SetIfVersionWithTTL(ctx context.Context, key string, value V, version Version, ttl time.Duration) (WriteResult, error)
 	Invalidate(ctx context.Context, key string) error
 
 	// Batch (order-agnostic return. Use your own ordering by keys slice)
 	GetMany(ctx context.Context, keys []string) (values map[string]V, missing []string, err error)
 	SnapshotVersions(ctx context.Context, keys []string) (map[string]Version, error)
-	SetIfVersions(ctx context.Context, items []VersionedValue[V], ttl time.Duration) (BatchWriteResult, error)
+	SetIfVersions(ctx context.Context, items []VersionedValue[V]) (BatchWriteResult, error)
+	SetIfVersionsWithTTL(ctx context.Context, items []VersionedValue[V], ttl time.Duration) (BatchWriteResult, error)
 }
 
 // Version is per-key freshness token returned by the cache.
