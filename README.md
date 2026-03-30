@@ -21,6 +21,41 @@ The main change: CAS validation moved from generation counters (a monotonic uint
 
 A fence is an opaque random token assigned to a key every time its state changes. Validation is a simple equality check - does the fence embedded in the cached value still match the authoritative fence? If yes, the value is fresh. If not, it is stale. There is no numeric comparison or ordering involved.
 
+## Performance
+
+CasCache does more work than a plain cache. Here is what that costs, measured against plain Redis with the same codec and payload.
+
+### Single-key Redis operations
+
+| Operation | Plain Redis | CasCache | Extra cost | Redis round trips |
+| --- | --- | --- | --- | --- |
+| Single read (`Get`) | ~17µs | ~33µs | +16µs | 2 (value + fence check) |
+| Snapshot then set (full fill) | ~16µs | ~36µs | +20µs | 3 (miss + snapshot + Lua conditional set) |
+| Single write (`SetIfVersion`) | ~16µs | ~23µs | +7µs | 1 (Lua script, atomic) |
+| Invalidate | ~15µs | ~16µs | +1µs | 1 (Lua script, atomic) |
+
+Single-key reads are the most expensive path because every `Get` needs two round trips: one for the value and one for the authoritative fence. Writes and invalidates use Lua scripts to stay atomic in a single round trip. The extra cost per operation is in the low tens of microseconds.
+
+### Batch operations
+
+| Operation | Extra cost vs plain Redis | Redis round trips |
+| --- | --- | --- |
+| Batch get (32 small keys) | ~4% | 2 (batch blob + `MGET` all fences) |
+| Batch get (32 medium keys) | ~1% | 2 (batch blob + `MGET` all fences) |
+
+Batch reads amortize the fence-check cost across all keys with a single `MGET`, so the overhead nearly disappears.
+
+### E2E comparison at 800 req/s (mixed workload, 60 seconds)
+
+| Metric | CasCache | Naive (plain SET/GET/DEL) |
+| --- | --- | --- |
+| p50 | 13.8ms | 11.8ms |
+| p95 | 217.8ms | 218.7ms |
+| p99 | 612.0ms | 614.1ms |
+| Stale reads | 0 | 6,339 |
+
+At p50 cascache is about 18% slower. At p95 and p99 the difference disappears because tail latency is dominated by network, Redis, and the database.
+
 ## Why
 
 What CasCache does:
@@ -242,14 +277,9 @@ CasCache also supports grouped batch entries:
 - `SnapshotVersions`
 - `SetIfVersions`
 
-Batch reads are optimistic but conservative:
+On read, the cache tries the batch entry first but checks every member against current version state before serving it. If any member is stale, undecodable, or missing, the whole batch is rejected and the cache falls back to single-key reads.
 
-- the cache first tries the grouped batch entry
-- every requested member is checked against current authoritative version state
-- undecodable, incomplete or stale batches are rejected
-- the cache falls back to single-key reads when needed
-
-Batch writes are about efficiency, not stronger atomicity. A successful batch write stores one combined value, but freshness is still enforced per member.
+On write, a batch stores all members as one combined value, but each member is still checked individually. Writing as a batch does not make the write atomic across keys.
 
 The default seed behavior is:
 
@@ -291,7 +321,7 @@ CasCache exposes a small hook surface for operational events such as:
 - version-store snapshot and bump errors
 - invalidate outages
 
-Helpful optional packages in this repository:
+Helpful but totaly optional packages:
 
 - `hooks/slog` for structured logging
 - `hooks/async` for non-blocking hook fan-out
@@ -304,14 +334,3 @@ Hooks should stay cheap and non-blocking. If they can block, wrap them in `hooks
 - If several replicas need shared freshness decisions, do not rely on the default local version store.
 - If values live in Redis, prefer `redis.New(...)` over manual wiring.
 - If you want per-node hot reads in local memory, keep values in Ristretto or BigCache and share only version state through `redis.NewVersionStore(...)`.
-
-CasCache is for the cases where actual correctness is an requirement.
-
-If you follow the normal flow:
-
-- `SnapshotVersion`
-- load from the source of truth
-- `SetIfVersion`
-- `Invalidate` after successful writes
-
-then stale writers are contained, cache hits are validated before they are served, and failures degrade to misses instead of uncertain freshness.
