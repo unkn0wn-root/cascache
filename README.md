@@ -1,14 +1,25 @@
 # CasCache
 
-CasCache is a Go cache library where invalidation is part of correctness.
+CasCache is a Go cache library that prevents stale data from silently winning.
 
-The problem it tries to solve:
+Most caches treat writes as unconditional: you `SET` a value and it sticks until someone deletes it or it expires. That works fine until two requests overlap.
 
-1. request A reads old data
-2. request B updates and invalidates the cache
-3. request A finishes later and tries to write the old data back into the cache
+1. request A reads a user record from the database
+2. while A is still working, request B updates that same record and invalidates the cache
+3. request A finishes and writes the now-outdated record back into the cache
 
-A plain `DEL` followed by a later `SET` does not prevent that race. CasCache does. It snapshots per-key version state before a fill, only stores if that snapshot is still current, and validates cached values again on read before serving them.
+The cache now holds stale data and nobody knows. A `DEL` followed by a `SET` does not prevent this because nothing ties the `SET` back to the state that existed when the read started.
+
+CasCache fixes this by remembering what version of a key you saw before you started your work. When you try to write, it checks whether that version is still current. If something changed in between, the write is rejected. On reads, it checks again - a cached value is only served if it still matches the latest known version. If anything is off, the cache treats it as a miss.
+
+## v3 - breaking change
+
+> [!IMPORTANT]
+> This README covers **v3**, which is not compatible with v2. Both the Go API and the on-wire format changed. Cached values written by v2 will **not** decode under v3.
+
+The main change: CAS validation moved from generation counters (a monotonic uint64) to fence tokens (16 bytes of cryptographically random data).
+
+A fence is an opaque random token assigned to a key every time its state changes. Validation is a simple equality check - does the fence embedded in the cached value still match the authoritative fence? If yes, the value is fresh. If not, it is stale. There is no numeric comparison or ordering involved.
 
 ## Why
 
