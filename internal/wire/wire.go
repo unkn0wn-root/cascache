@@ -38,21 +38,33 @@ const (
 	wireVersion   byte = 3
 	kindSingle         = 1
 	kindBatch          = 2
+	fenceSize          = 16
+	maxKeyLen          = 0xFFFF
 	maxUint32Wire      = uint64(^uint32(0))
+
+	// fixed prefix of a single-entry frame.
+	// magic(4) | ver(1) | kind(1) | fence(16) | vlen(4)
+	sHdr = 4 + 1 + 1 + fenceSize + 4
+
+	// fixed prefix of a batch frame (before per-item data).
+	// magic(4) | ver(1) | kind(1) | n(4)
+	bHdr = 4 + 1 + 1 + 4
+
+	// smallest possible per-item footprint.
+	// keyLen(2) | minKey(1) | fence(16) | vlen(4)
+	minBatchSize = 2 + 1 + fenceSize + 4
 )
 
 var (
-	// ErrCorrupt is returned when a byte slice doesn't conform to the expected
-	// structure (bad magic/version/kind/lengths).
 	ErrCorrupt = errors.New("corrupt entry")
 
 	// magic4 is the fixed 4-byte magic header ("CASC").
-	magic4 = [...]byte{'C', 'A', 'S', 'C'}
+	casc = [...]byte{'C', 'A', 'S', 'C'}
 )
 
 // hasMagic reports whether b starts with the "CASC" header.
 func hasMagic(b []byte) bool {
-	return len(b) >= 4 && bytes.Equal(b[:4], magic4[:])
+	return len(b) >= 4 && bytes.Equal(b[:4], casc[:])
 }
 
 // EncodeSingle encodes a single entry.
@@ -70,8 +82,8 @@ func EncodeSingle(fence version.Fence, payload []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	out := make([]byte, 4+1+1+16+4+len(payload))
-	copy(out[:4], magic4[:])
+	out := make([]byte, sHdr+len(payload))
+	copy(out[:4], casc[:])
 	out[4] = wireVersion
 	out[5] = kindSingle
 
@@ -86,17 +98,16 @@ func EncodeSingle(fence version.Fence, payload []byte) ([]byte, error) {
 // DecodeSingle parses a single entry and returns (fence, payload).
 // The returned payload is a zero-copy subslice of b and must be treated as read-only.
 func DecodeSingle(b []byte) (version.Fence, []byte, error) {
-	const hdr = 4 + 1 + 1 + 16 + 4
-	if len(b) < hdr || !hasMagic(b) || b[4] != wireVersion || b[5] != kindSingle {
+	if len(b) < sHdr || !hasMagic(b) || b[4] != wireVersion || b[5] != kindSingle {
 		return version.Fence{}, nil, ErrCorrupt
 	}
 
 	off := 6
-	f, err := version.ParseFenceBinary(b[off : off+16])
+	f, err := version.ParseFenceBinary(b[off : off+fenceSize])
 	if err != nil {
 		return version.Fence{}, nil, ErrCorrupt
 	}
-	off += 16
+	off += fenceSize
 
 	// vlen
 	if off+4 > len(b) {
@@ -134,20 +145,20 @@ func EncodeBatch(items []BatchItem) ([]byte, error) {
 		return nil, err
 	}
 
-	total := 4 + 1 + 1 + 4
+	total := bHdr
 	for _, it := range items {
 		l := len(it.Key)
-		if l == 0 || l > 0xFFFF {
+		if l == 0 || l > maxKeyLen {
 			return nil, fmt.Errorf("invalid key length %d", l)
 		}
 		if _, err := checkedUint32(uint64(len(it.Payload)), "payload length"); err != nil {
 			return nil, err
 		}
-		total += 2 + l + 16 + 4 + len(it.Payload)
+		total += 2 + l + fenceSize + 4 + len(it.Payload)
 	}
 
 	out := make([]byte, total)
-	copy(out[:4], magic4[:])
+	copy(out[:4], casc[:])
 	out[4] = wireVersion
 	out[5] = kindBatch
 
@@ -175,8 +186,7 @@ func EncodeBatch(items []BatchItem) ([]byte, error) {
 // string (one allocation per item). Duplicate keys in the stored items are
 // allowed; the last occurrence wins.
 func DecodeBatch(b []byte) ([]BatchItem, error) {
-	const hdr = 4 + 1 + 1 + 4
-	if len(b) < hdr || !hasMagic(b) || b[4] != wireVersion || b[5] != kindBatch {
+	if len(b) < bHdr || !hasMagic(b) || b[4] != wireVersion || b[5] != kindBatch {
 		return nil, ErrCorrupt
 	}
 
@@ -187,14 +197,12 @@ func DecodeBatch(b []byte) ([]BatchItem, error) {
 		return nil, ErrCorrupt
 	}
 
-	// cap preallocation by what the buffer could plausibly contain to avoid
-	// adversarial OOM if n is bogus. We assume the minimal per-item footprint:
-	// klen(2) + min key(1) + fence(16) + vlen(4) + min payload(0) = 23 bytes.
-	const mi = 2 + 1 + 16 + 4
+	// Cap preallocation by what the buffer could plausibly contain to avoid
+	// adversarial OOM if n is corrupted or malicious.
 	rem := len(b) - off
 	mp := 0
-	if rem >= mi {
-		mp = rem / mi
+	if rem >= minBatchSize {
+		mp = rem / minBatchSize
 	}
 
 	cap := min(n, mp)
@@ -217,14 +225,14 @@ func DecodeBatch(b []byte) ([]BatchItem, error) {
 		off += klen
 
 		// fence
-		if off+16 > len(b) {
+		if off+fenceSize > len(b) {
 			return nil, ErrCorrupt
 		}
-		f, err := version.ParseFenceBinary(b[off : off+16])
+		f, err := version.ParseFenceBinary(b[off : off+fenceSize])
 		if err != nil {
 			return nil, ErrCorrupt
 		}
-		off += 16
+		off += fenceSize
 
 		// vlen
 		if off+4 > len(b) {

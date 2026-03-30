@@ -8,7 +8,10 @@ import (
 	"time"
 )
 
-const fenceTokenSize = 16
+// fenceTokenSize is the canonical binary size of a Fence.
+// Important: Changing it is a wire-format change.
+// In another words - don't or be careful
+const tokenSize = 16
 
 // Fence is the authoritative compare-only freshness token for one key.
 //
@@ -21,7 +24,7 @@ const fenceTokenSize = 16
 // state is created or bumped. This includes recreation after retention cleanup
 // or TTL expiry so old cached values cannot become valid again through ABA.
 type Fence struct {
-	token [fenceTokenSize]byte
+	token [tokenSize]byte
 }
 
 func (f Fence) Equal(other Fence) bool {
@@ -32,6 +35,10 @@ func (f Fence) String() string {
 	return string(f.AppendText(nil))
 }
 
+// AppendBinary appends the canonical fixed-width binary form of f to dst.
+// The appended suffix is always exactly fenceTokenSize bytes.
+// Callers that encode fixed-layout frames may rely on this width remaining
+// stable for the current wire format.
 func (f Fence) AppendBinary(dst []byte) []byte {
 	return append(dst, f.token[:]...)
 }
@@ -72,7 +79,7 @@ func (f *Fence) UnmarshalText(text []byte) error {
 
 // ParseFence parses the canonical text form produced by Fence.String.
 func ParseFence(raw string) (Fence, error) {
-	if len(raw) != hex.EncodedLen(fenceTokenSize) {
+	if len(raw) != hex.EncodedLen(tokenSize) {
 		return Fence{}, fmt.Errorf("invalid fence length %d", len(raw))
 	}
 
@@ -85,7 +92,7 @@ func ParseFence(raw string) (Fence, error) {
 
 // ParseFenceBinary parses the canonical binary form of a fence.
 func ParseFenceBinary(b []byte) (Fence, error) {
-	if len(b) != fenceTokenSize {
+	if len(b) != tokenSize {
 		return Fence{}, fmt.Errorf("invalid fence length %d", len(b))
 	}
 
