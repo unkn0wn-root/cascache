@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.1.1](https://github.com/unkn0wn-root/cascache/compare/v3.1.0...v3.1.1) (2026-03-30)
+
+
+### Features
+
+* improve redis error and update readme ([45103ad](https://github.com/unkn0wn-root/cascache/commit/45103ad74964f629991bd15d8ef873f1b3142dbe))
+
 ## [3.1.0](https://github.com/unkn0wn-root/cascache/compare/v3.0.0...v3.1.0) (2026-03-30)
 
 
