@@ -13,7 +13,7 @@ import (
 	"github.com/unkn0wn-root/cascache/v3/version"
 )
 
-// VersionStore shares per-key authoritative version state across processes and survives restarts.
+// VersionStore shares per-key authoritative version state across processes.
 type VersionStore struct {
 	rdb         goredis.UniversalClient
 	closeClient bool
@@ -24,10 +24,13 @@ type VersionStore struct {
 
 var _ version.Store = (*VersionStore)(nil)
 
+// ErrFenceParse reports malformed authoritative fence state read from Redis.
+var ErrFenceParse = errors.New("cascache/redis: fence parse")
+
 type VersionStoreOptions struct {
 	Client      goredis.UniversalClient
 	CloseClient bool
-	VersionTTL  time.Duration // 0 keeps authoritative version state indefinitely
+	VersionTTL  time.Duration
 }
 
 // NewVersionStore constructs the Redis-backed authoritative version store.
@@ -52,17 +55,6 @@ func NewVersionStoreWithOptions(opts VersionStoreOptions) (*VersionStore, error)
 	}, nil
 }
 
-func (s *VersionStore) client() (goredis.UniversalClient, error) {
-	if s == nil || s.rdb == nil {
-		return nil, ErrNilClient
-	}
-	return s.rdb, nil
-}
-
-func (s *VersionStore) key(cacheKey version.CacheKey) string {
-	return keyutil.VersionStorageKey(keyutil.CacheKey(cacheKey.String()))
-}
-
 // Snapshot returns the current authoritative state.
 func (s *VersionStore) Snapshot(ctx context.Context, cacheKey version.CacheKey) (version.Snapshot, error) {
 	rdb, err := s.client()
@@ -78,11 +70,7 @@ func (s *VersionStore) Snapshot(ctx context.Context, cacheKey version.CacheKey) 
 		return version.Snapshot{}, err
 	}
 
-	f, err := version.ParseFence(r)
-	if err != nil {
-		return version.Snapshot{}, err
-	}
-	return version.Snapshot{Fence: f, Exists: true}, nil
+	return parseSnapshotValue(cacheKey, r)
 }
 
 // SnapshotMany returns authoritative state for multiple keys.
@@ -110,28 +98,11 @@ func (s *VersionStore) SnapshotMany(
 
 	out := make(map[version.CacheKey]version.Snapshot, len(cacheKeys))
 	for i, v := range vals {
-		switch vv := v.(type) {
-		case nil:
-			out[cacheKeys[i]] = version.Snapshot{}
-		case string:
-			fence, parseErr := version.ParseFence(vv)
-			if parseErr != nil {
-				return nil, fmt.Errorf("redis fence parse at %s: %w", cacheKeys[i], parseErr)
-			}
-			out[cacheKeys[i]] = version.Snapshot{Fence: fence, Exists: true}
-		case []byte:
-			fence, parseErr := version.ParseFence(string(vv))
-			if parseErr != nil {
-				return nil, fmt.Errorf("redis fence parse at %s: %w", cacheKeys[i], parseErr)
-			}
-			out[cacheKeys[i]] = version.Snapshot{Fence: fence, Exists: true}
-		default:
-			return nil, fmt.Errorf(
-				"redis fence parse at %s: unsupported mget type %T",
-				cacheKeys[i],
-				vv,
-			)
+		snap, err := parseSnapshotValue(cacheKeys[i], v)
+		if err != nil {
+			return nil, err
 		}
+		out[cacheKeys[i]] = snap
 	}
 	return out, nil
 }
@@ -205,4 +176,41 @@ func (s *VersionStore) Close(context.Context) error {
 		}
 	})
 	return s.closeErr
+}
+
+func (s *VersionStore) client() (goredis.UniversalClient, error) {
+	if s == nil || s.rdb == nil {
+		return nil, ErrNilClient
+	}
+	return s.rdb, nil
+}
+
+func (s *VersionStore) key(cacheKey version.CacheKey) string {
+	return keyutil.VersionStorageKey(keyutil.CacheKey(cacheKey.String()))
+}
+
+func parseSnapshotValue(cacheKey version.CacheKey, raw any) (version.Snapshot, error) {
+	switch v := raw.(type) {
+	case nil:
+		return version.Snapshot{}, nil
+	case string:
+		return parseSnapshotFence(cacheKey, v)
+	case []byte:
+		return parseSnapshotFence(cacheKey, string(v))
+	default:
+		return version.Snapshot{}, fmt.Errorf(
+			"%w at %s: unsupported redis type %T",
+			ErrFenceParse,
+			cacheKey,
+			v,
+		)
+	}
+}
+
+func parseSnapshotFence(cacheKey version.CacheKey, raw string) (version.Snapshot, error) {
+	f, err := version.ParseFence(raw)
+	if err != nil {
+		return version.Snapshot{}, fmt.Errorf("%w at %s: %w", ErrFenceParse, cacheKey, err)
+	}
+	return version.Snapshot{Fence: f, Exists: true}, nil
 }

@@ -1,7 +1,5 @@
 # CasCache
 
-CasCache is a Go cache library that prevents stale data from silently winning.
-
 Most caches treat writes as unconditional: you `SET` a value and it sticks until someone deletes it or it expires. That works fine until two requests overlap.
 
 1. request A reads a user record from the database
@@ -11,6 +9,29 @@ Most caches treat writes as unconditional: you `SET` a value and it sticks until
 The cache now holds stale data and nobody knows. A `DEL` followed by a `SET` does not prevent this because nothing ties the `SET` back to the state that existed when the read started.
 
 CasCache fixes this by remembering what version of a key you saw before you started your work. When you try to write, it checks whether that version is still current. If something changed in between, the write is rejected. On reads, it checks again - a cached value is only served if it still matches the latest known version. If anything is off, the cache treats it as a miss.
+
+## Index
+
+- [v3](#v3---breaking-change)
+- [Why](#why)
+- [How it works](#how-it-works)
+  - [About source reads](#about-source-reads)
+  - [Read guards](#read-guards)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+  - [Build a cache](#build-a-cache)
+  - [Read path](#read-path)
+  - [Write path](#write-path)
+- [Performance](#performance)
+  - [Single-key Redis operations](#single-key-redis-operations)
+  - [Batch operations](#batch-operations)
+  - [E2E comparison at 800 req/s](#e2e-comparison-at-800-reqs-mixed-workload-60-seconds)
+- [Choosing a topology](#choosing-a-topology)
+- [Redis example](#redis-example)
+- [Batch APIs](#batch-apis)
+- [Providers](#providers)
+- [Codecs](#codecs)
+- [Hooks](#hooks)
 
 ## v3 - breaking change
 
@@ -58,19 +79,18 @@ At p50 cascache is about 18% slower. At p95 and p99 the difference disappears be
 
 ## Why
 
-What CasCache does:
+What you get:
 
-- stale writers do not overwrite newer state after a successful invalidate
-- single-key reads only serve values that still match current authoritative version state
-- batch reads validate every requested member before serving the batch hit
-- backend trouble degrades to misses or skipped writes instead of uncertain freshness
+- a slow writer that finishes after an invalidate cannot silently overwrite the cache with outdated data
+- reads only serve values that still match the current version state, so your users do not see stale results just because something was cached
+- batch reads check every member before serving the batch, not just the batch key itself
+- if Redis or your backend has a bad moment, the cache degrades to misses or skipped writes instead of quietly serving data it cannot verify
 
-What it does not try to do:
+What CasCache does not try to solve:
 
-- make arbitrary multi-key writes globally atomic
-- recover from a source-of-truth write that succeeded when `Invalidate` did not
-- prove that a fill read came from a fully up-to-date source
-- turn a local in-process version store into a distributed invalidation system
+- if your "source-of-truth" write succeeds but `Invalidate` fails, the cache does not know the source moved forward
+- it does not prove that the value you just loaded from your database, api etc. was the newest one that existed anywhere - it only proves the cache entry still matches the last known version
+- if you run a local in-process version store, that state lives in one process and other replicas will not see it - use a shared version store like Redis for that
 
 ## How it works
 
@@ -91,7 +111,7 @@ The normal write path is:
 
 That means the cache never trusts a value just because it exists. A value must still match the current version state when it is read.
 
-### About stale source reads
+### About source reads
 
 CasCache guarantees cache freshness against its authoritative version state. It does not guarantee that the value you just loaded from a database or API was the newest value that existed anywhere.
 
@@ -103,9 +123,13 @@ So the guarantee is closer to "no stale cache refill after a successful invalida
 
 Most paths do **not** need a read guard. The normal version check already guarantees that once a key is invalidated, older cached bytes stop being valid.
 
-Use `ReadGuard` when a cache hit still needs one more authority check before it may be served. Typical cases:
+`ReadGuard` is a guard function you pass through options that the cache calls on every hit for a given key. At its simplest it is just extra cache-level logic - you look at the decoded value and decide whether it is still good enough to serve.
+The tradeoff comes when your guard calls another authority (API, DB, whatever). That is an extra I/O round trip per key, which means more pressure on that authority for every single cache hit and some extra lookup latency on the cache itself.
+For batch endpoints, use `BatchReadGuard` so a single source call can validate many keys at once instead of hitting the authority per member.
 
-- fills may come from a lagging database replica or API etc., but one endpoint must only serve values confirmed by a primary or another authoritative source
+Typical cases where a read guard makes sense:
+
+- fills come from a lagging replica or eventually consistent API, but one endpoint must only serve values confirmed by a primary or another authoritative source
 - the cached value carries a revision, timestamp, or some business state field that must still match source state before use
 
 Example:
@@ -136,13 +160,6 @@ cache, err := cascache.New(cascache.Options[User]{
 	},
 })
 ```
-
-Tradeoffs:
-
-- every guarded cache hit does extra work
-- guard errors fail closed to a miss instead of serving a maybe-stale value
-- use `BatchReadGuard` for batch endpoints when one source call can validate many keys
-- keep guards for paths where source freshness matters more than raw cache-hit latency
 
 ## Installation
 
@@ -277,7 +294,7 @@ Use the lower-level Redis constructors only when you are intentionally composing
 - `redis.NewProvider(...)`
 - `redis.NewKeyMutator(...)`
 
-If values live in Redis, prefer `redis.New(...)`.
+If values live in Redis, simply use `redis.New(...)` to make things easy for you.
 
 ## Redis example
 
@@ -319,15 +336,6 @@ func newRedisUserCache() error {
 	return nil
 }
 ```
-
-`redis.New(...)` is the recommended entry point when values are stored in Redis. It wires:
-
-- the Redis value provider
-- the Redis-backed version store
-- the Redis-native single-key "compare-and-write" path
-- the Redis-native single-key invalidate path
-
-Single-key `SetIfVersion` and `Invalidate` are atomic inside Redis. Batch entries are still validated on read rather than written as one globally atomic multi-key transaction.
 
 ## Batch APIs
 
@@ -388,10 +396,3 @@ Helpful but totaly optional packages:
 - `hooks/async` for non-blocking hook fan-out
 
 Hooks should stay cheap and non-blocking. If they can block, wrap them in `hooks/async`.
-
-## Summary
-
-- If the source-of-truth write succeeds, `Invalidate` is part of correctness.
-- If several replicas need shared freshness decisions, do not rely on the default local version store.
-- If values live in Redis, prefer `redis.New(...)` over manual wiring.
-- If you want per-node hot reads in local memory, keep values in Ristretto or BigCache and share only version state through `redis.NewVersionStore(...)`.
