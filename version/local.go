@@ -9,9 +9,9 @@ import (
 // localEntry holds the per-key authoritative fence and the time of the last
 // state mutation.
 //
-// UpdatedAt is set on init and bump operations. Reads do NOT modify timestamps,
-// which avoids write amplification on hot read paths. Cleanup relies on
-// UpdatedAt to prune long-inactive keys.
+// UpdatedAt is set on init and bump operations when timestamp tracking is
+// enabled. Reads do NOT modify timestamps, which avoids write amplification on
+// hot read paths. Cleanup relies on UpdatedAt to prune long-inactive keys.
 type localEntry struct {
 	Fence     Fence
 	UpdatedAt time.Time
@@ -28,11 +28,12 @@ type localEntry struct {
 // Ctx parameters are accepted to satisfy the Store interface, but are
 // ignored because all operations are local and non-blocking.
 type LocalStore struct {
-	mu        sync.RWMutex
-	entries   map[string]localEntry
-	stopCh    chan struct{}
-	wg        sync.WaitGroup
-	closeOnce sync.Once
+	mu             sync.RWMutex
+	entries        map[string]localEntry
+	stopCh         chan struct{}
+	wg             sync.WaitGroup
+	closeOnce      sync.Once
+	trackUpdatedAt bool
 
 	// retention is the minimum age since the last advance after which a key may be
 	// pruned by Cleanup. A non-positive retention disables pruning.
@@ -41,10 +42,13 @@ type LocalStore struct {
 
 var _ Store = (*LocalStore)(nil)
 
-// NewLocal constructs the in-process authoritative fence store used by the cache by
-// default. It does not start background cleanup.
+// NewLocal constructs the in-process authoritative fence store used by the cache
+// by default. It does not start background cleanup and skips timestamp tracking
+// because strict mode never prunes metadata.
 func NewLocal() *LocalStore {
-	return NewLocalWithCleanup(0, 0)
+	return &LocalStore{
+		entries: make(map[string]localEntry),
+	}
 }
 
 // NewLocalWithCleanup constructs a LocalStore with optional background
@@ -55,8 +59,9 @@ func NewLocal() *LocalStore {
 // non-positive, no background cleanup runs and you may call Cleanup manually.
 func NewLocalWithCleanup(cleanupInterval, retention time.Duration) *LocalStore {
 	s := &LocalStore{
-		entries:   make(map[string]localEntry),
-		retention: retention,
+		entries:        make(map[string]localEntry),
+		retention:      retention,
+		trackUpdatedAt: true,
 	}
 
 	if cleanupInterval > 0 && retention > 0 {
@@ -118,8 +123,12 @@ func (s *LocalStore) SnapshotMany(_ context.Context, ks []CacheKey) (map[CacheKe
 // CreateIfMissing creates authoritative state with a fresh fence when the
 // key is currently missing.
 func (s *LocalStore) CreateIfMissing(_ context.Context, k CacheKey) (Snapshot, bool, error) {
-	now := time.Now()
 	raw := k.String()
+
+	var updatedAt time.Time
+	if s.trackUpdatedAt {
+		updatedAt = time.Now()
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -138,7 +147,7 @@ func (s *LocalStore) CreateIfMissing(_ context.Context, k CacheKey) (Snapshot, b
 
 	e := localEntry{
 		Fence:     f,
-		UpdatedAt: now,
+		UpdatedAt: updatedAt,
 	}
 	s.entries[raw] = e
 	return Snapshot{
@@ -150,17 +159,21 @@ func (s *LocalStore) CreateIfMissing(_ context.Context, k CacheKey) (Snapshot, b
 // Advance moves the authoritative state for key k to a fresh fence and updates UpdatedAt.
 // Missing keys are created with a fresh fence.
 func (s *LocalStore) Advance(_ context.Context, k CacheKey) (Snapshot, error) {
-	now := time.Now()
 	raw := k.String()
-	s.mu.Lock()
-	e := s.entries[raw]
 	f, err := NewFence()
 	if err != nil {
-		s.mu.Unlock()
 		return Snapshot{}, err
 	}
+
+	var updatedAt time.Time
+	if s.trackUpdatedAt {
+		updatedAt = time.Now()
+	}
+
+	s.mu.Lock()
+	e := s.entries[raw]
 	e.Fence = f
-	e.UpdatedAt = now
+	e.UpdatedAt = updatedAt
 	s.entries[raw] = e
 	s.mu.Unlock()
 	return Snapshot{

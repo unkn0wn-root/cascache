@@ -15,7 +15,7 @@
 //     NOTE: holding any subslice is sufficient to keep the backing array alive.
 //     If you need to retain or mutate the payload beyond the frame’s lifetime,
 //     make your own copy.
-//   - Encode paths pre-compute capacity and bytes.Buffer.Grow to avoid realloc.
+//   - Encode paths pre-compute exact frame sizes and fill pre-sized byte slices.
 //   - Batch decode allocates exactly one string per item to materialize the key
 //     (stable map key semantics).
 //
@@ -70,37 +70,29 @@ func EncodeSingle(fence version.Fence, payload []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	var buf bytes.Buffer
-	buf.Grow(4 + 1 + 1 + 16 + 4 + len(payload))
+	out := make([]byte, 4+1+1+16+4+len(payload))
+	copy(out[:4], magic4[:])
+	out[4] = wireVersion
+	out[5] = kindSingle
 
-	// header
-	buf.Write(magic4[:])
-	buf.WriteByte(wireVersion)
-	buf.WriteByte(kindSingle)
-
-	// body
-	var u4 [4]byte
-	var fenceBytes [16]byte
-
-	buf.Write(fence.AppendBinary(fenceBytes[:0]))
-
-	binary.BigEndian.PutUint32(u4[:], vlen)
-	buf.Write(u4[:])
-
-	buf.Write(payload)
-	return buf.Bytes(), nil
+	off := 6
+	off += len(fence.AppendBinary(out[off:off])) // append into pre-sized slack
+	binary.BigEndian.PutUint32(out[off:off+4], vlen)
+	off += 4
+	copy(out[off:], payload)
+	return out, nil
 }
 
 // DecodeSingle parses a single entry and returns (fence, payload).
 // The returned payload is a zero-copy subslice of b and must be treated as read-only.
-func DecodeSingle(b []byte) (fence version.Fence, payload []byte, err error) {
+func DecodeSingle(b []byte) (version.Fence, []byte, error) {
 	const hdr = 4 + 1 + 1 + 16 + 4
 	if len(b) < hdr || !hasMagic(b) || b[4] != wireVersion || b[5] != kindSingle {
 		return version.Fence{}, nil, ErrCorrupt
 	}
 
 	off := 6
-	fence, err = version.ParseFenceBinary(b[off : off+16])
+	f, err := version.ParseFenceBinary(b[off : off+16])
 	if err != nil {
 		return version.Fence{}, nil, ErrCorrupt
 	}
@@ -116,7 +108,7 @@ func DecodeSingle(b []byte) (fence version.Fence, payload []byte, err error) {
 	if vlen < 0 || off+vlen != len(b) { // no trailing bytes allowed
 		return version.Fence{}, nil, ErrCorrupt
 	}
-	return fence, b[off : off+vlen], nil
+	return f, b[off : off+vlen], nil
 }
 
 // BatchItem holds one member of a batch-encoded set.
@@ -154,38 +146,26 @@ func EncodeBatch(items []BatchItem) ([]byte, error) {
 		total += 2 + l + 16 + 4 + len(it.Payload)
 	}
 
-	var buf bytes.Buffer
-	buf.Grow(total)
+	out := make([]byte, total)
+	copy(out[:4], magic4[:])
+	out[4] = wireVersion
+	out[5] = kindBatch
 
-	// header
-	buf.Write(magic4[:])
-	buf.WriteByte(wireVersion)
-	buf.WriteByte(kindBatch)
-
-	var u4 [4]byte
-	var u2 [2]byte
-	var fenceBytes [16]byte
-
-	binary.BigEndian.PutUint32(u4[:], n)
-	buf.Write(u4[:])
+	off := 6
+	binary.BigEndian.PutUint32(out[off:off+4], n)
+	off += 4
 
 	for _, it := range items {
-		binary.BigEndian.PutUint16(u2[:], uint16(len(it.Key)))
-		buf.Write(u2[:])
-		buf.WriteString(it.Key)
-
-		buf.Write(it.Fence.AppendBinary(fenceBytes[:0]))
-
-		vlen, err := checkedUint32(uint64(len(it.Payload)), "payload length")
-		if err != nil {
-			return nil, err
-		}
-		binary.BigEndian.PutUint32(u4[:], vlen)
-		buf.Write(u4[:])
-		buf.Write(it.Payload)
+		binary.BigEndian.PutUint16(out[off:off+2], uint16(len(it.Key)))
+		off += 2
+		off += copy(out[off:], it.Key)
+		off += len(it.Fence.AppendBinary(out[off:off])) // append into pre-sized slack
+		binary.BigEndian.PutUint32(out[off:off+4], uint32(len(it.Payload)))
+		off += 4
+		off += copy(out[off:], it.Payload)
 	}
 
-	return buf.Bytes(), nil
+	return out, nil
 }
 
 // DecodeBatch parses a batch entry into items.
@@ -240,7 +220,7 @@ func DecodeBatch(b []byte) ([]BatchItem, error) {
 		if off+16 > len(b) {
 			return nil, ErrCorrupt
 		}
-		fence, err := version.ParseFenceBinary(b[off : off+16])
+		f, err := version.ParseFenceBinary(b[off : off+16])
 		if err != nil {
 			return nil, ErrCorrupt
 		}
@@ -263,7 +243,7 @@ func DecodeBatch(b []byte) ([]BatchItem, error) {
 
 		items = append(items, BatchItem{
 			Key:     string(keyBytes), // one expected alloc per item
-			Fence:   fence,
+			Fence:   f,
 			Payload: payload,
 		})
 	}

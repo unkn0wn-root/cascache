@@ -2,9 +2,19 @@ package version
 
 import (
 	"context"
+	"crypto/rand"
+	"errors"
 	"testing"
 	"time"
 )
+
+type errorReader struct {
+	err error
+}
+
+func (r errorReader) Read(_ []byte) (int, error) {
+	return 0, r.err
+}
 
 func TestLocalSnapshotManyIncludesAllAndZeroForMissing(t *testing.T) {
 	ctx := context.Background()
@@ -66,6 +76,37 @@ func TestNewLocalDisablesAutomaticCleanup(t *testing.T) {
 			"strict local version store should not retain cleanup settings, got %v",
 			s.retention,
 		)
+	}
+}
+
+func TestLocalCreateIfMissingExistingDoesNotNeedNewFence(t *testing.T) {
+	ctx := context.Background()
+	s := NewLocal()
+	t.Cleanup(func() { _ = s.Close(ctx) })
+
+	initial, created, err := s.CreateIfMissing(ctx, NewCacheKey("k"))
+	if err != nil {
+		t.Fatalf("initial CreateIfMissing error: %v", err)
+	}
+	if !created || !initial.Exists {
+		t.Fatalf("expected initial creation, got snap=%+v created=%v", initial, created)
+	}
+
+	orig := rand.Reader
+	t.Cleanup(func() {
+		rand.Reader = orig
+	})
+	rand.Reader = errorReader{err: errors.New("rng unavailable")}
+
+	got, createdAgain, err := s.CreateIfMissing(ctx, NewCacheKey("k"))
+	if err != nil {
+		t.Fatalf("existing CreateIfMissing should not fail when rng is broken: %v", err)
+	}
+	if createdAgain {
+		t.Fatalf("expected existing key to report created=false")
+	}
+	if !got.Exists || !got.Fence.Equal(initial.Fence) {
+		t.Fatalf("unexpected existing snapshot: got=%+v want fence=%s", got, initial.Fence)
 	}
 }
 
