@@ -26,6 +26,6 @@
 //	obs, err := cache.SnapshotVersion(ctx, k) // before DB read
 //	v        := readFromDB(k)
 //	if err == nil {
-//		_, _ = cache.SetIfVersion(ctx, k, v, obs, 0) // write iff current version == obs
+//		_, _ = cache.SetIfVersion(ctx, k, v, obs) // write iff current version == obs
 //	}
 package cascache

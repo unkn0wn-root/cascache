@@ -458,7 +458,12 @@ func setIfVersionsMap[V any](
 	observed map[string]Version,
 	ttl time.Duration,
 ) error {
-	_, err := c.SetIfVersions(ctx, versionedValues(items, observed), ttl)
+	var err error
+	if ttl == 0 {
+		_, err = c.SetIfVersions(ctx, versionedValues(items, observed))
+	} else {
+		_, err = c.SetIfVersionsWithTTL(ctx, versionedValues(items, observed), ttl)
+	}
 	return err
 }
 
@@ -602,7 +607,7 @@ func TestSingleCASFlow(t *testing.T) {
 	if !obs.IsMissing() {
 		t.Fatalf("SnapshotVersion should be missing before first write, got %+v", obs)
 	}
-	result, err := cc.SetIfVersion(ctx, k, v, obs, 0)
+	result, err := cc.SetIfVersion(ctx, k, v, obs)
 	if err != nil {
 		t.Fatalf("SetIfVersion: %v", err)
 	}
@@ -626,7 +631,7 @@ func TestSingleCASFlow(t *testing.T) {
 	}
 
 	// Stale write using the original observed version should be skipped.
-	result, err = cc.SetIfVersion(ctx, k, v, obs, 0)
+	result, err = cc.SetIfVersion(ctx, k, v, obs)
 	if err != nil {
 		t.Fatalf("SetIfVersion stale: %v", err)
 	}
@@ -639,7 +644,7 @@ func TestSingleCASFlow(t *testing.T) {
 
 	// Fresh write with the current observed version should succeed.
 	obs2 := mustSnapshotVersion(t, ctx, cc, k)
-	result, err = cc.SetIfVersion(ctx, k, v, obs2, 0)
+	result, err = cc.SetIfVersion(ctx, k, v, obs2)
 	if err != nil {
 		t.Fatalf("SetIfVersion(fresh): %v", err)
 	}
@@ -661,7 +666,7 @@ func TestGetReadGuardRejectsAndDeletesEntry(t *testing.T) {
 
 	k := "u:guard"
 	v := user{ID: "guard", Name: "Ada"}
-	if _, err := cc.SetIfVersion(ctx, k, v, mustSnapshotVersion(t, ctx, cc, k), 0); err != nil {
+	if _, err := cc.SetIfVersion(ctx, k, v, mustSnapshotVersion(t, ctx, cc, k)); err != nil {
 		t.Fatalf("SetIfVersion: %v", err)
 	}
 
@@ -688,7 +693,7 @@ func TestGetReadGuardErrorMissesAndDeletesEntry(t *testing.T) {
 
 	k := "u:guard-error"
 	v := user{ID: "guard-error", Name: "Ada"}
-	if _, err := cc.SetIfVersion(ctx, k, v, mustSnapshotVersion(t, ctx, cc, k), 0); err != nil {
+	if _, err := cc.SetIfVersion(ctx, k, v, mustSnapshotVersion(t, ctx, cc, k)); err != nil {
 		t.Fatalf("SetIfVersion: %v", err)
 	}
 
@@ -733,7 +738,7 @@ func TestSingleKeyNamespaceFramingAvoidsCollisions(t *testing.T) {
 
 	leftVal := user{ID: "left", Name: "Left"}
 	rightVal := user{ID: "right", Name: "Right"}
-	if _, err := left.SetIfVersion(
+	if _, err := left.SetIfVersionWithTTL(
 		ctx,
 		"users:42",
 		leftVal,
@@ -742,7 +747,7 @@ func TestSingleKeyNamespaceFramingAvoidsCollisions(t *testing.T) {
 	); err != nil {
 		t.Fatalf("left SetIfVersion: %v", err)
 	}
-	if _, err := right.SetIfVersion(
+	if _, err := right.SetIfVersionWithTTL(
 		ctx,
 		"prod:users:42",
 		rightVal,
@@ -792,7 +797,7 @@ func TestSetIfVersionSnapshotErrorReturnsErrorAndSkipsWrite(t *testing.T) {
 	})
 	defer closeTest(t, ctx, cc)
 
-	result, err := cc.SetIfVersion(ctx, "u:1", user{ID: "1", Name: "Ada"}, Version{}, time.Minute)
+	result, err := cc.SetIfVersionWithTTL(ctx, "u:1", user{ID: "1", Name: "Ada"}, Version{}, time.Minute)
 	if err == nil {
 		t.Fatalf("SetIfVersion should return an error")
 	}
@@ -888,7 +893,7 @@ func TestSetIfVersionProviderErrorReturnsOpError(t *testing.T) {
 	)
 	defer closeTest(t, ctx, cc)
 
-	_, err := cc.SetIfVersion(ctx, "u:1", user{ID: "1", Name: "Ada"}, Version{}, time.Minute)
+	_, err := cc.SetIfVersionWithTTL(ctx, "u:1", user{ID: "1", Name: "Ada"}, Version{}, time.Minute)
 	if err == nil {
 		t.Fatalf("SetIfVersion should return an error")
 	}
@@ -1508,7 +1513,6 @@ func TestGetBatchReadGuardRejectFallsBackToSinglesWithReadGuard(t *testing.T) {
 		"b",
 		freshB,
 		mustSnapshotVersion(t, ctx, cc, "b"),
-		0,
 	); err != nil {
 		t.Fatalf("SetIfVersion fresh single: %v", err)
 	}
@@ -1956,7 +1960,7 @@ func TestSetIfVersionsRejectsDuplicateKeys(t *testing.T) {
 	cc := newTestCache(t, "user", mp, nil)
 	defer closeTest(t, ctx, cc)
 
-	_, err := cc.SetIfVersions(ctx, []VersionedValue[user]{
+	_, err := cc.SetIfVersionsWithTTL(ctx, []VersionedValue[user]{
 		{Key: "a", Value: user{ID: "a", Name: "A"}, Version: Version{}},
 		{Key: "a", Value: user{ID: "a2", Name: "A2"}, Version: Version{}},
 	}, time.Minute)
@@ -2883,7 +2887,7 @@ func TestNewUsesConfiguredKeyWriterForSetIfVersion(t *testing.T) {
 
 	key := "u:1"
 	value := user{ID: "1", Name: "Ada"}
-	result, err := cc.CAS.SetIfVersion(ctx, key, value, Version{}, 5*time.Second)
+	result, err := cc.CAS.SetIfVersionWithTTL(ctx, key, value, Version{}, 5*time.Second)
 	if err != nil {
 		t.Fatalf("SetIfVersion: %v", err)
 	}
