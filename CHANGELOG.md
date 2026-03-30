@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [3.0.0](https://github.com/unkn0wn-root/cascache/compare/v2.0.1...v3.0.0) (2026-03-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* v3
+
+### Features
+
+* improve wire protocol ([5fd9ca0](https://github.com/unkn0wn-root/cascache/commit/5fd9ca0fcd26d7f78bc6756f8d28f76aa52896ca))
+* improve wire protocol ([d0572b4](https://github.com/unkn0wn-root/cascache/commit/d0572b4d5fc35bd112317b17bfe87c3b2e3ed223))
+* v3 ([69631fc](https://github.com/unkn0wn-root/cascache/commit/69631fcbcf4e81672a896ee061734edaa5d92904))
+
+
+### Bug Fixes
+
+* remove old gens and swap with fence and update readme ([05b35fe](https://github.com/unkn0wn-root/cascache/commit/05b35fe25c5e4549dc116545ce84d7eb9817faeb))
+* tests ([bc89c40](https://github.com/unkn0wn-root/cascache/commit/bc89c40474a8f4f8a2bde3786ec6390c2feffc91))
+
 ### [2.0.1](https://github.com/unkn0wn-root/cascache/compare/v2.0.0...v2.0.1) (2026-03-24)
 
 ## [2.0.0](https://github.com/unkn0wn-root/cascache/compare/v1.4.2...v2.0.0) (2026-03-24)
