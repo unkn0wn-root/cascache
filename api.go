@@ -91,50 +91,6 @@ type CAS[V any] interface {
 	SetIfVersionsWithTTL(ctx context.Context, items []VersionedValue[V], ttl time.Duration) (BatchWriteResult, error)
 }
 
-// Version is per-key freshness token returned by the cache.
-// Treat it as a compare-only value and pass it back unchanged
-// to versioned write APIs.
-//
-// The zero value is the missing-version token.
-type Version struct {
-	fence  version.Fence
-	exists bool
-}
-
-func (v Version) Equal(other Version) bool {
-	if v.exists != other.exists {
-		return false
-	}
-	if !v.exists {
-		return true
-	}
-	return v.fence.Equal(other.fence)
-}
-
-func (v Version) IsMissing() bool {
-	return !v.exists
-}
-
-func versionFromSnapshot(s version.Snapshot) Version {
-	if !s.Exists {
-		return Version{}
-	}
-	return Version{
-		fence:  s.Fence,
-		exists: true,
-	}
-}
-
-func (v Version) snapshot() version.Snapshot {
-	if !v.exists {
-		return version.Snapshot{}
-	}
-	return version.Snapshot{
-		Fence:  v.fence,
-		Exists: true,
-	}
-}
-
 // WriteOutcome describes what happened during a versioned write attempt.
 type WriteOutcome string
 
