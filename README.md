@@ -19,7 +19,10 @@ CasCache fixes this by remembering what version of a key you saw before you star
 
 ## Index
 
-- [v3](#v3---breaking-change)
+- [Performance](#performance)
+  - [Single-key Redis operations](#single-key-redis-operations)
+  - [Batch operations](#batch-operations)
+  - [50,000 req/s target](#50000-reqs-target-mixed-workload-30-seconds)
 - [Why](#why)
 - [How it works](#how-it-works)
   - [About source reads](#about-source-reads)
@@ -29,25 +32,12 @@ CasCache fixes this by remembering what version of a key you saw before you star
   - [Build a cache](#build-a-cache)
   - [Read path](#read-path)
   - [Write path](#write-path)
-- [Performance](#performance)
-  - [Single-key Redis operations](#single-key-redis-operations)
-  - [Batch operations](#batch-operations)
-  - [E2E comparison at 800 req/s](#e2e-comparison-at-800-reqs-mixed-workload-60-seconds)
 - [Choosing a topology](#choosing-a-topology)
 - [Redis example](#redis-example)
 - [Batch APIs](#batch-apis)
 - [Providers](#providers)
 - [Codecs](#codecs)
 - [Hooks](#hooks)
-
-## v3 - breaking change
-
-> [!IMPORTANT]
-> This README covers **v3**, which is not compatible with v2. Both the Go API and the on-wire format changed. Cached values written by v2 will **not** decode under v3.
-
-The main change: CAS validation moved from generation counters (a monotonic uint64) to fence tokens (16 bytes of cryptographically random data).
-
-A fence is an opaque random token assigned to a key every time its state changes. Validation is a simple equality check - does the fence embedded in the cached value still match the authoritative fence? If yes, the value is fresh. If not, it is stale. There is no numeric comparison or ordering involved.
 
 ## Performance
 
@@ -73,16 +63,19 @@ Single-key reads are the most expensive path because every `Get` needs two round
 
 Batch reads amortize the fence-check cost across all keys with a single `MGET`, so the overhead nearly disappears.
 
-### E2E comparison at 800 req/s (mixed workload, 60 seconds)
+### 50,000 req/s target (mixed workload, 30 seconds)
 
-| Metric | CasCache | Naive (plain SET/GET/DEL) |
+Tested on `goos=darwin`, `goarch=arm64`, `cpu=Apple M4 Max`, using 5 API containers plus PostgreSQL and Redis. Both runs used the same mixed workload with a `50,000 req/s` offered load for `30s` and issued `1,500,000` requests. The comparison baseline here is ordinary Redis cache-aside: read miss -> load from Postgres -> store in Redis, write -> update Postgres -> delete the Redis entry.
+
+| Metric | CasCache | Redis cache-aside baseline |
 | --- | --- | --- |
-| p50 | 13.8ms | 11.8ms |
-| p95 | 217.8ms | 218.7ms |
-| p99 | 612.0ms | 614.1ms |
-| Stale reads | 0 | 6,339 |
+| p50 | 1.9ms | 0.8ms |
+| p95 | 22.9ms | 15.3ms |
+| p99 | 207.8ms | 201.2ms |
+| Max | 1337.1ms | 1091.6ms |
+| **Stale reads** | **0** | **195,461** |
 
-At p50 cascache is about 18% slower. At p95 and p99 the difference disappears because tail latency is dominated by network, Redis, and the database.
+At p50 the gap is about `1.1ms` (`1.9ms` vs `0.8ms`). At p95 the gap is about `7.6ms` (`22.9ms` vs `15.3ms`). At p99 the gap is about `6.6ms` (`207.8ms` vs `201.2ms`). The Redis cache-aside baseline was faster in this run, but it served `195,461` stale reads while CasCache served `0`.
 
 ## Why
 
