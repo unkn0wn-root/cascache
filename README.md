@@ -1,5 +1,12 @@
 # CasCache
 
+**TL;DR**
+
+If you run multiple pods, replicas, or services that share a cache and you need to make sure a cached key always reflects the latest known state and not something a slow writer quietly overwrote three seconds ago - CasCache is built for that.
+It will not serve stale data and it will not let a late write silently win or override. When it cannot prove a value is current, it treats the entry as a miss instead of serving something outdated.
+
+---
+
 Most caches treat writes as unconditional: you `SET` a value and it sticks until someone deletes it or it expires. That works fine until two requests overlap.
 
 1. request A reads a user record from the database
