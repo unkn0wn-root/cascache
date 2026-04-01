@@ -7,10 +7,10 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/unkn0wn-root/cascache/v3"
-	keyutil "github.com/unkn0wn-root/cascache/v3/internal/keys"
-	"github.com/unkn0wn-root/cascache/v3/internal/wire"
-	"github.com/unkn0wn-root/cascache/v3/version"
+	"github.com/unkn0wn-root/cascache"
+	keyutil "github.com/unkn0wn-root/cascache/internal/keys"
+	"github.com/unkn0wn-root/cascache/internal/wire"
+	"github.com/unkn0wn-root/cascache/version"
 )
 
 var ErrNilClient = errors.New("cascache/redis: nil client")

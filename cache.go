@@ -9,11 +9,11 @@ import (
 	"slices"
 	"time"
 
-	c "github.com/unkn0wn-root/cascache/v3/codec"
-	keyutil "github.com/unkn0wn-root/cascache/v3/internal/keys"
-	"github.com/unkn0wn-root/cascache/v3/internal/wire"
-	pr "github.com/unkn0wn-root/cascache/v3/provider"
-	"github.com/unkn0wn-root/cascache/v3/version"
+	c "github.com/unkn0wn-root/cascache/codec"
+	keyutil "github.com/unkn0wn-root/cascache/internal/keys"
+	"github.com/unkn0wn-root/cascache/internal/wire"
+	pr "github.com/unkn0wn-root/cascache/provider"
+	"github.com/unkn0wn-root/cascache/version"
 )
 
 type cache[V any] struct {
@@ -928,7 +928,7 @@ func (c *cache[V]) readSingles(ctx context.Context, keys []string, out map[strin
 // single-key identity used by the version store and the provider value key.
 // Example: logical key "42" in namespace "user" becomes:
 //   - Cache: "s:4:user:42"
-//   - Value: "cas:v3:val:{<hash>}:s:4:user:42"
+//   - Value: "cas:v:{<hash>}:s:4:user:42"
 //
 // The {<hash>} is a deterministic prefix derived from the cache key.
 func (c *cache[V]) singleKeys(userKey string) keyutil.Single {

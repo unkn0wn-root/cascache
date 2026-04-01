@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	c "github.com/unkn0wn-root/cascache/v3/codec"
-	pr "github.com/unkn0wn-root/cascache/v3/provider"
-	"github.com/unkn0wn-root/cascache/v3/version"
+	c "github.com/unkn0wn-root/cascache/codec"
+	pr "github.com/unkn0wn-root/cascache/provider"
+	"github.com/unkn0wn-root/cascache/version"
 )
 
 // WriteOutcome describes what happened during a versioned write attempt.

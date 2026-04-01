@@ -4,11 +4,11 @@
 //
 //	"log/slog"
 //
-//	"github.com/unkn0wn-root/cascache/v3"
-//	"github.com/unkn0wn-root/cascache/v3/codec"
-//	"github.com/unkn0wn-root/cascache/v3/hooks/async"
-//	"github.com/unkn0wn-root/cascache/v3/hooks/slog"
-//	cascacheredis "github.com/unkn0wn-root/cascache/v3/redis"
+//	"github.com/unkn0wn-root/cascache"
+//	"github.com/unkn0wn-root/cascache/codec"
+//	"github.com/unkn0wn-root/cascache/hooks/async"
+//	"github.com/unkn0wn-root/cascache/hooks/slog"
+//	cascacheredis "github.com/unkn0wn-root/cascache/redis"
 //
 // )
 //
@@ -34,8 +34,8 @@ package asynchook
 import (
 	"sync"
 
-	"github.com/unkn0wn-root/cascache/v3"
-	"github.com/unkn0wn-root/cascache/v3/version"
+	"github.com/unkn0wn-root/cascache"
+	"github.com/unkn0wn-root/cascache/version"
 )
 
 type Hooks struct {

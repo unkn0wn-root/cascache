@@ -10,8 +10,8 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/unkn0wn-root/cascache/v3/codec"
-	"github.com/unkn0wn-root/cascache/v3/version"
+	"github.com/unkn0wn-root/cascache/codec"
+	"github.com/unkn0wn-root/cascache/version"
 )
 
 type fakeClient struct {

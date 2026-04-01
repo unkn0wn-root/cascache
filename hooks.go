@@ -1,6 +1,6 @@
 package cascache
 
-import "github.com/unkn0wn-root/cascache/v3/version"
+import "github.com/unkn0wn-root/cascache/version"
 
 // Hooks are lightweight callbacks for high-signal events.
 // Implementations MUST be cheap and non-blocking; do not perform I/O.

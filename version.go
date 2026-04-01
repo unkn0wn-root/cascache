@@ -1,6 +1,6 @@
 package cascache
 
-import vp "github.com/unkn0wn-root/cascache/v3/version"
+import vp "github.com/unkn0wn-root/cascache/version"
 
 // Version is the per-key freshness token returned by the cache.
 // Callers should treat it as an compare-only value and pass it back

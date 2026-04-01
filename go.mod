@@ -1,4 +1,4 @@
-module github.com/unkn0wn-root/cascache/v3
+module github.com/unkn0wn-root/cascache
 
 go 1.24
 

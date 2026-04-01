@@ -7,7 +7,7 @@ import (
 
 	rc "github.com/dgraph-io/ristretto"
 
-	pr "github.com/unkn0wn-root/cascache/v3/provider"
+	pr "github.com/unkn0wn-root/cascache/provider"
 )
 
 type Ristretto struct {

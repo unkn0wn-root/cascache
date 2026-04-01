@@ -22,13 +22,13 @@ func TestSingleKeysAreInjectiveAcrossNamespaceBoundaries(t *testing.T) {
 	}
 }
 
-func TestBatchValueSortedUsesVersionedPrefixAndDigest(t *testing.T) {
+func TestBatchValueSortedUsesStablePrefixAndDigest(t *testing.T) {
 	key, err := NewKeyspace("user").BatchValueSorted([]string{"a", "b"})
 	if err != nil {
 		t.Fatalf("BatchValueSorted: %v", err)
 	}
 
-	const prefix = "cas:v3:val:b:4:user:"
+	const prefix = "cas:v:b:4:user:"
 	if !strings.HasPrefix(key.String(), prefix) {
 		t.Fatalf("batch key prefix mismatch: %q", key)
 	}
@@ -93,10 +93,10 @@ func TestSingleValueAndVersionKeysShareRedisHashTag(t *testing.T) {
 	valueKey := single.Value.String()
 	versionKey := VersionStorageKey(single.Cache)
 
-	if !strings.HasPrefix(valueKey, "cas:v3:val:{") {
+	if !strings.HasPrefix(valueKey, "cas:v:{") {
 		t.Fatalf("value key prefix mismatch: %q", valueKey)
 	}
-	if !strings.HasPrefix(versionKey, "cas:v3:ver:{") {
+	if !strings.HasPrefix(versionKey, "cas:ver:{") {
 		t.Fatalf("version key prefix mismatch: %q", versionKey)
 	}
 

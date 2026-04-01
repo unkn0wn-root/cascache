@@ -163,7 +163,7 @@ cache, err := cascache.New(cascache.Options[User]{
 ## Installation
 
 ```bash
-go get github.com/unkn0wn-root/cascache/v3
+go get github.com/unkn0wn-root/cascache
 ```
 
 ## Quick start
@@ -177,9 +177,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/unkn0wn-root/cascache/v3"
-	"github.com/unkn0wn-root/cascache/v3/codec"
-	ristrettoprovider "github.com/unkn0wn-root/cascache/v3/provider/ristretto"
+	"github.com/unkn0wn-root/cascache"
+	"github.com/unkn0wn-root/cascache/codec"
+	ristrettoprovider "github.com/unkn0wn-root/cascache/provider/ristretto"
 )
 
 type User struct {
@@ -307,8 +307,8 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/unkn0wn-root/cascache/v3/codec"
-	cascacheredis "github.com/unkn0wn-root/cascache/v3/redis"
+	"github.com/unkn0wn-root/cascache/codec"
+	cascacheredis "github.com/unkn0wn-root/cascache/redis"
 )
 
 type User struct {

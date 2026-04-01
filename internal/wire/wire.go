@@ -30,7 +30,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/unkn0wn-root/cascache/v3/version"
+	"github.com/unkn0wn-root/cascache/version"
 )
 
 const (

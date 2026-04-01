@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	c "github.com/unkn0wn-root/cascache/v3/codec"
-	"github.com/unkn0wn-root/cascache/v3/internal/wire"
-	pr "github.com/unkn0wn-root/cascache/v3/provider"
-	"github.com/unkn0wn-root/cascache/v3/version"
+	c "github.com/unkn0wn-root/cascache/codec"
+	"github.com/unkn0wn-root/cascache/internal/wire"
+	pr "github.com/unkn0wn-root/cascache/provider"
+	"github.com/unkn0wn-root/cascache/version"
 )
 
 type memEntry struct {
@@ -23,7 +23,7 @@ type memEntry struct {
 	exp time.Time // zero => no TTL
 }
 
-const batchValueRoot = "cas:v3:val:b:"
+const batchValueRoot = "cas:v:b:"
 
 type memProvider struct {
 	m map[string]memEntry

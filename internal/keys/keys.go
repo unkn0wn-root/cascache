@@ -17,9 +17,8 @@ var (
 )
 
 const (
-	rootPrefix         = "cas:v3:"
-	valueRoot          = rootPrefix + "val:"
-	versionRoot        = rootPrefix + "ver:"
+	valueRoot          = "cas:v:"
+	versionRoot        = "cas:ver:"
 	singleKind         = "s:"
 	batchKind          = "b:"
 	maxBatchKeyPartLen = uint64(math.MaxUint32)
@@ -45,7 +44,7 @@ type Single struct {
 	Value ValueKey
 }
 
-// Keyspace owns the v3 keyspace for one logical namespace.
+// Keyspace owns the cascache keyspace for one logical namespace.
 type Keyspace struct {
 	singlePrefix string
 	batchPrefix  string

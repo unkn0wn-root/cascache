@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/unkn0wn-root/cascache/v3/version"
+	"github.com/unkn0wn-root/cascache/version"
 )
 
 func fenceForVersionID(id uint64) version.Fence {

@@ -17,9 +17,9 @@
 //
 // Keys:
 //
-//	cas:v3:val:{<slot>}:s:<nsLen>:<ns>:<key>        - single entries
-//	cas:v3:val:b:<nsLen>:<ns>:<sha256-128>          - set-shaped entries (128-bit SHA-256 over sorted keys)
-//	cas:v3:ver:{<slot>}:s:<nsLen>:<ns>:<key>        - authoritative version state
+//	cas:v:{<slot>}:s:<nsLen>:<ns>:<key>             - single entries
+//	cas:v:b:<nsLen>:<ns>:<sha256-128>               - set-shaped entries (128-bit SHA-256 over sorted keys)
+//	cas:ver:{<slot>}:s:<nsLen>:<ns>:<key>           - authoritative version state
 //
 // CAS pattern:
 //

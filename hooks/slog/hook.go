@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"sync/atomic"
 
-	"github.com/unkn0wn-root/cascache/v3"
-	"github.com/unkn0wn-root/cascache/v3/version"
+	"github.com/unkn0wn-root/cascache"
+	"github.com/unkn0wn-root/cascache/version"
 )
 
 // Options configures the slog-based Hooks.

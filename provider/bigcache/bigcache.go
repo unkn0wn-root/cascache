@@ -6,7 +6,7 @@ import (
 
 	bc "github.com/allegro/bigcache/v3"
 
-	pr "github.com/unkn0wn-root/cascache/v3/provider"
+	pr "github.com/unkn0wn-root/cascache/provider"
 )
 
 // Note: BigCache has a global LifeWindow; it ignores per-entry TTLs passed to Set.

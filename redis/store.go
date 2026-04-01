@@ -9,8 +9,8 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	keyutil "github.com/unkn0wn-root/cascache/v3/internal/keys"
-	"github.com/unkn0wn-root/cascache/v3/version"
+	keyutil "github.com/unkn0wn-root/cascache/internal/keys"
+	"github.com/unkn0wn-root/cascache/version"
 )
 
 // VersionStore shares per-key authoritative version state across processes.

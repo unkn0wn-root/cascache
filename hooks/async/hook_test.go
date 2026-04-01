@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/unkn0wn-root/cascache/v3"
+	"github.com/unkn0wn-root/cascache"
 )
 
 type blockingHook struct {

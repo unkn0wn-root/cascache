@@ -6,8 +6,8 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/unkn0wn-root/cascache/v3"
-	c "github.com/unkn0wn-root/cascache/v3/codec"
+	"github.com/unkn0wn-root/cascache"
+	c "github.com/unkn0wn-root/cascache/codec"
 )
 
 // Options configures the full Redis-backed cache.
