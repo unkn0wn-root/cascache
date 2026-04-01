@@ -90,7 +90,6 @@ What CasCache does not try to solve:
 
 - if your "source-of-truth" write succeeds but `Invalidate` fails, the cache does not know the source moved forward
 - it does not prove that the value you just loaded from your database, api etc. was the newest one that existed anywhere - it only proves the cache entry still matches the last known version
-- if you run a local in-process version store, that state lives in one process and other replicas will not see it - use a shared version store like Redis for that
 
 ## How it works
 
@@ -248,8 +247,9 @@ func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
 	// SetIfVersion returns (WriteResult, error). A version mismatch is not
 	// an error - it means another request invalidated this key while you were
 	// loading. The cache skips the write and the next reader will fill it
-	// with fresh data. We already have the value from the database, so we
-	// return it either way.
+	// with fresh data. Here we explicitly ignore the error and return value,
+	// but cascache gives you the possibility to handle them if you want to
+	// short-circuit, log, or react to a failed cache write.
 	_, _ = r.Cache.SetIfVersion(ctx, id, user, version)
 	return user, nil
 }
