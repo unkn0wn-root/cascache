@@ -26,16 +26,6 @@ func (v Version) IsMissing() bool {
 	return !v.exists
 }
 
-func versionFromSnapshot(s vp.Snapshot) Version {
-	if !s.Exists {
-		return Version{}
-	}
-	return Version{
-		fence:  s.Fence,
-		exists: true,
-	}
-}
-
 func (v Version) snapshot() vp.Snapshot {
 	if !v.exists {
 		return vp.Snapshot{}
@@ -43,5 +33,15 @@ func (v Version) snapshot() vp.Snapshot {
 	return vp.Snapshot{
 		Fence:  v.fence,
 		Exists: true,
+	}
+}
+
+func versionFromSnapshot(s vp.Snapshot) Version {
+	if !s.Exists {
+		return Version{}
+	}
+	return Version{
+		fence:  s.Fence,
+		exists: true,
 	}
 }

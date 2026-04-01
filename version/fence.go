@@ -25,6 +25,19 @@ type Fence struct {
 	token [tokenSize]byte
 }
 
+// NewFence returns a fresh random authoritative fence token.
+func NewFence() (Fence, error) {
+	var f Fence
+	for {
+		if _, err := rand.Read(f.token[:]); err != nil {
+			return Fence{}, err
+		}
+		if f != (Fence{}) {
+			return f, nil
+		}
+	}
+}
+
 func (f Fence) Equal(other Fence) bool {
 	return f.token == other.token
 }
@@ -102,17 +115,4 @@ func ParseFenceBinary(b []byte) (Fence, error) {
 		return Fence{}, fmt.Errorf("invalid zero fence")
 	}
 	return f, nil
-}
-
-// NewFence returns a fresh random authoritative fence token.
-func NewFence() (Fence, error) {
-	var f Fence
-	for {
-		if _, err := rand.Read(f.token[:]); err != nil {
-			return Fence{}, err
-		}
-		if f != (Fence{}) {
-			return f, nil
-		}
-	}
 }

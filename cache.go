@@ -935,34 +935,12 @@ func (c *cache[V]) singleKeys(userKey string) keyutil.Single {
 	return c.space.Single(userKey)
 }
 
-// toVersionCacheKey bridges the internal key builder and the public VersionStore API.
-// The VersionStore boundary is intentionally typed so custom implementations cannot
-// silently keep treating canonical identities as plain logical strings.
-func toVersionCacheKey(cacheKey keyutil.CacheKey) version.CacheKey {
-	return version.NewCacheKey(cacheKey.String())
-}
-
 // batchKeySorted builds the provider storage key for a batch entry from a set
 // of sorted member keys. The key is a hash of the members, so the same set
 // always maps to the same storage key regardless of input order.
 // The sortedKeys slice must be sorted in ascending order and deduplicated.
 func (c *cache[V]) batchKeySorted(sortedKeys []string) (keyutil.ValueKey, error) {
 	return c.space.BatchValueSorted(sortedKeys)
-}
-
-func sortedUnique(keys []string) []string {
-	if len(keys) == 0 {
-		return []string{}
-	}
-
-	out := slices.Clone(keys)
-	slices.Sort(out)
-	return slices.Compact(out)
-}
-
-func isLocalVersionStore(store version.Store) bool {
-	_, ok := store.(*version.LocalStore)
-	return ok
 }
 
 type batchReadGuardResult struct {
@@ -1057,14 +1035,6 @@ func (c *cache[V]) decodeBatch(requested []string, items map[string]wire.BatchIt
 		bk[k] = v
 	}
 	return bk, nil
-}
-
-func indexBatch(items []wire.BatchItem) map[string]wire.BatchItem {
-	bk := make(map[string]wire.BatchItem, len(items))
-	for _, it := range items {
-		bk[it.Key] = it // duplicates in stored items: last wins
-	}
-	return bk
 }
 
 // seedBatch materializes validated batch members as single key entries.
@@ -1262,6 +1232,13 @@ func (c *cache[V]) seedSingles(
 	return errors.Join(errs...)
 }
 
+// toVersionCacheKey bridges the internal key builder and the public VersionStore API.
+// The VersionStore boundary is intentionally typed so custom implementations cannot
+// silently keep treating canonical identities as plain logical strings.
+func toVersionCacheKey(cacheKey keyutil.CacheKey) version.CacheKey {
+	return version.NewCacheKey(cacheKey.String())
+}
+
 func snapshotMatchesVersion(snap version.Snapshot, version Version) bool {
 	if version.IsMissing() {
 		return !snap.Exists
@@ -1270,6 +1247,14 @@ func snapshotMatchesVersion(snap version.Snapshot, version Version) bool {
 		return false
 	}
 	return snap.Fence.Equal(version.fence)
+}
+
+func indexBatch(items []wire.BatchItem) map[string]wire.BatchItem {
+	bk := make(map[string]wire.BatchItem, len(items))
+	for _, it := range items {
+		bk[it.Key] = it // duplicates in stored items: last wins
+	}
+	return bk
 }
 
 func prepBatchWrite[V any](items []VersionedValue[V]) ([]batchWriteItem[V], []string, error) {
@@ -1292,4 +1277,19 @@ func prepBatchWrite[V any](items []VersionedValue[V]) ([]batchWriteItem[V], []st
 		ks[i] = it.key
 	}
 	return ws, ks, nil
+}
+
+func sortedUnique(keys []string) []string {
+	if len(keys) == 0 {
+		return []string{}
+	}
+
+	out := slices.Clone(keys)
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+func isLocalVersionStore(store version.Store) bool {
+	_, ok := store.(*version.LocalStore)
+	return ok
 }

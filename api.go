@@ -9,6 +9,73 @@ import (
 	"github.com/unkn0wn-root/cascache/v3/version"
 )
 
+// WriteOutcome describes what happened during a versioned write attempt.
+type WriteOutcome string
+
+const (
+	WriteOutcomeStored           WriteOutcome = "stored"
+	WriteOutcomeVersionMismatch  WriteOutcome = "version_mismatch"
+	WriteOutcomeSnapshotError    WriteOutcome = "snapshot_error"
+	WriteOutcomeProviderRejected WriteOutcome = "provider_rejected"
+	WriteOutcomeDisabled         WriteOutcome = "disabled"
+)
+
+type WriteResult struct {
+	Outcome WriteOutcome
+}
+
+// Stored reports whether the write landed in the provider.
+func (r WriteResult) Stored() bool {
+	return r.Outcome == WriteOutcomeStored
+}
+
+// BatchWriteResult describes the result of a versioned write through the batch
+// entry path.
+type BatchWriteResult struct {
+	Outcome       WriteOutcome
+	SeededSingles bool
+}
+
+// Stored reports whether the batch entry landed in the provider.
+func (r BatchWriteResult) Stored() bool {
+	return r.Outcome == WriteOutcomeStored
+}
+
+// VersionedValue is the caller-facing unit for versioned multi-key writes.
+type VersionedValue[V any] struct {
+	Key     string
+	Value   V
+	Version Version
+}
+
+// BatchReadSeedMode controls whether a successful batch read validated
+// members as individual single-key entries.
+// The zero/default value is BatchReadSeedOff so batch hits stay read-only unless
+// the caller explicitly opts into warming singles.
+type BatchReadSeedMode uint8
+
+const (
+	BatchReadSeedOff BatchReadSeedMode = iota
+	BatchReadSeedAll
+	BatchReadSeedIfMissing
+)
+
+// BatchWriteSeedMode controls how a successful SetIfVersions
+// write individual single-key entries.
+//
+// The zero/default value is BatchWriteSeedStrict, which routes each single
+// through SetIfVersion again so the post-batch seeding path preserves the same
+// per-key CAS recheck as standalone writes. Higher-throughput systems can opt
+// into BatchWriteSeedFast to reuse the validated batch payloads directly, or
+// BatchWriteSeedOff to skip success path single seeding entirely.
+type BatchWriteSeedMode uint8
+
+const (
+	BatchWriteSeedStrict BatchWriteSeedMode = iota
+	BatchWriteSeedFast
+	BatchWriteSeedOff
+)
+
 // KeyWriter is an optional backend-native fast path for single-key
 // compare-and-write operations.
 // versionKey identifies the canonical authoritative version state tracked by
@@ -90,73 +157,6 @@ type CAS[V any] interface {
 	SetIfVersions(ctx context.Context, items []VersionedValue[V]) (BatchWriteResult, error)
 	SetIfVersionsWithTTL(ctx context.Context, items []VersionedValue[V], ttl time.Duration) (BatchWriteResult, error)
 }
-
-// WriteOutcome describes what happened during a versioned write attempt.
-type WriteOutcome string
-
-const (
-	WriteOutcomeStored           WriteOutcome = "stored"
-	WriteOutcomeVersionMismatch  WriteOutcome = "version_mismatch"
-	WriteOutcomeSnapshotError    WriteOutcome = "snapshot_error"
-	WriteOutcomeProviderRejected WriteOutcome = "provider_rejected"
-	WriteOutcomeDisabled         WriteOutcome = "disabled"
-)
-
-type WriteResult struct {
-	Outcome WriteOutcome
-}
-
-// Stored reports whether the write landed in the provider.
-func (r WriteResult) Stored() bool {
-	return r.Outcome == WriteOutcomeStored
-}
-
-// BatchWriteResult describes the result of a versioned write through the batch
-// entry path.
-type BatchWriteResult struct {
-	Outcome       WriteOutcome
-	SeededSingles bool
-}
-
-// Stored reports whether the batch entry landed in the provider.
-func (r BatchWriteResult) Stored() bool {
-	return r.Outcome == WriteOutcomeStored
-}
-
-// VersionedValue is the caller-facing unit for versioned multi-key writes.
-type VersionedValue[V any] struct {
-	Key     string
-	Value   V
-	Version Version
-}
-
-// BatchReadSeedMode controls whether a successful batch read validated
-// members as individual single-key entries.
-// The zero/default value is BatchReadSeedOff so batch hits stay read-only unless
-// the caller explicitly opts into warming singles.
-type BatchReadSeedMode uint8
-
-const (
-	BatchReadSeedOff BatchReadSeedMode = iota
-	BatchReadSeedAll
-	BatchReadSeedIfMissing
-)
-
-// BatchWriteSeedMode controls how a successful SetIfVersions
-// write individual single-key entries.
-//
-// The zero/default value is BatchWriteSeedStrict, which routes each single
-// through SetIfVersion again so the post-batch seeding path preserves the same
-// per-key CAS recheck as standalone writes. Higher-throughput systems can opt
-// into BatchWriteSeedFast to reuse the validated batch payloads directly, or
-// BatchWriteSeedOff to skip success path single seeding entirely.
-type BatchWriteSeedMode uint8
-
-const (
-	BatchWriteSeedStrict BatchWriteSeedMode = iota
-	BatchWriteSeedFast
-	BatchWriteSeedOff
-)
 
 // Options configures the CAS cache.
 // Namespace, Provider, and Codec are required.
