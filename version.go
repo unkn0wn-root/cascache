@@ -12,6 +12,8 @@ type Version struct {
 	exists bool
 }
 
+// Equal reports whether two versions refer to the same fence state.
+// Two missing versions are considered equal.
 func (v Version) Equal(other Version) bool {
 	if v.exists != other.exists {
 		return false
@@ -22,10 +24,14 @@ func (v Version) Equal(other Version) bool {
 	return v.fence.Equal(other.fence)
 }
 
+// IsMissing reports whether the version represents a key that has no
+// authoritative fence yet (i.e. the key has never been written).
 func (v Version) IsMissing() bool {
 	return !v.exists
 }
 
+// converts the public Version to the internal version.Snapshot
+// used by the VersionStore.
 func (v Version) snapshot() vp.Snapshot {
 	if !v.exists {
 		return vp.Snapshot{}
@@ -36,6 +42,8 @@ func (v Version) snapshot() vp.Snapshot {
 	}
 }
 
+// converts an internal version.Snapshot back to the
+// public Version returned to callers.
 func versionFromSnapshot(s vp.Snapshot) Version {
 	if !s.Exists {
 		return Version{}
