@@ -9,6 +9,30 @@ import (
 	"github.com/unkn0wn-root/cascache/v3/version"
 )
 
+// Cache is an alias for CAS so callers can write cascache.Cache[V] if preferred.
+type Cache[V any] = CAS[V]
+
+// CAS is the provider-agnostic cache interface with compare-and-swap safety
+// via per-key version fences. V is the caller's value type
+// serialization is handled by the configured Codec[V].
+type CAS[V any] interface {
+	Enabled() bool
+	Close(context.Context) error
+
+	// Single
+	Get(ctx context.Context, key string) (v V, ok bool, err error)
+	SnapshotVersion(ctx context.Context, key string) (Version, error)
+	SetIfVersion(ctx context.Context, key string, value V, version Version) (WriteResult, error)
+	SetIfVersionWithTTL(ctx context.Context, key string, value V, version Version, ttl time.Duration) (WriteResult, error)
+	Invalidate(ctx context.Context, key string) error
+
+	// Batch (order-agnostic return. Use your own ordering by keys slice)
+	GetMany(ctx context.Context, keys []string) (values map[string]V, missing []string, err error)
+	SnapshotVersions(ctx context.Context, keys []string) (map[string]Version, error)
+	SetIfVersions(ctx context.Context, items []VersionedValue[V]) (BatchWriteResult, error)
+	SetIfVersionsWithTTL(ctx context.Context, items []VersionedValue[V], ttl time.Duration) (BatchWriteResult, error)
+}
+
 // WriteOutcome describes what happened during a versioned write attempt.
 type WriteOutcome string
 
@@ -101,6 +125,8 @@ type KeyInvalidator interface {
 	Invalidate(ctx context.Context, versionKey version.CacheKey, valueKey string) error
 }
 
+// KeyMutator combines KeyWriter and KeyInvalidator for backends that support
+// both native compare-and-write and single-key invalidation in a single path.
 type KeyMutator interface {
 	KeyWriter
 	KeyInvalidator
@@ -133,30 +159,6 @@ type BatchReadGuardFunc[V any] func(ctx context.Context, values map[string]V) (r
 // grouped batch-entry path rather than a single-key entry. memberCount is 1 for
 // single writes and the number of logical keys contained in a batch entry.
 type SetCostFunc func(key string, raw []byte, isBatch bool, memberCount int) int64
-
-// Cache is an alias for CAS so callers can write cascache.Cache[V] if preferred.
-type Cache[V any] = CAS[V]
-
-// CAS is the provider-agnostic cache interface with compare-and-swap safety
-// via per-key version fences. V is the caller's value type
-// serialization is handled by the configured Codec[V].
-type CAS[V any] interface {
-	Enabled() bool
-	Close(context.Context) error
-
-	// Single
-	Get(ctx context.Context, key string) (v V, ok bool, err error)
-	SnapshotVersion(ctx context.Context, key string) (Version, error)
-	SetIfVersion(ctx context.Context, key string, value V, version Version) (WriteResult, error)
-	SetIfVersionWithTTL(ctx context.Context, key string, value V, version Version, ttl time.Duration) (WriteResult, error)
-	Invalidate(ctx context.Context, key string) error
-
-	// Batch (order-agnostic return. Use your own ordering by keys slice)
-	GetMany(ctx context.Context, keys []string) (values map[string]V, missing []string, err error)
-	SnapshotVersions(ctx context.Context, keys []string) (map[string]Version, error)
-	SetIfVersions(ctx context.Context, items []VersionedValue[V]) (BatchWriteResult, error)
-	SetIfVersionsWithTTL(ctx context.Context, items []VersionedValue[V], ttl time.Duration) (BatchWriteResult, error)
-}
 
 // Options configures the CAS cache.
 // Namespace, Provider, and Codec are required.

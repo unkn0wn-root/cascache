@@ -1239,6 +1239,11 @@ func toVersionCacheKey(cacheKey keyutil.CacheKey) version.CacheKey {
 	return version.NewCacheKey(cacheKey.String())
 }
 
+func isLocalVersionStore(store version.Store) bool {
+	_, ok := store.(*version.LocalStore)
+	return ok
+}
+
 func snapshotMatchesVersion(snap version.Snapshot, version Version) bool {
 	if version.IsMissing() {
 		return !snap.Exists
@@ -1249,6 +1254,8 @@ func snapshotMatchesVersion(snap version.Snapshot, version Version) bool {
 	return snap.Fence.Equal(version.fence)
 }
 
+// this builds a lookup map from a slice of stored batch items keyed by
+// their logical key. Duplicate keys are resolved with last wins.
 func indexBatch(items []wire.BatchItem) map[string]wire.BatchItem {
 	bk := make(map[string]wire.BatchItem, len(items))
 	for _, it := range items {
@@ -1257,6 +1264,8 @@ func indexBatch(items []wire.BatchItem) map[string]wire.BatchItem {
 	return bk
 }
 
+// converts VersionedValues into internal write items sorted
+// by key and returns the deduplicated sorted key slice.
 func prepBatchWrite[V any](items []VersionedValue[V]) ([]batchWriteItem[V], []string, error) {
 	ws := make([]batchWriteItem[V], len(items))
 	for i, it := range items {
@@ -1289,7 +1298,10 @@ func sortedUnique(keys []string) []string {
 	return slices.Compact(out)
 }
 
-func isLocalVersionStore(store version.Store) bool {
-	_, ok := store.(*version.LocalStore)
-	return ok
+func coalesce[T comparable](v, def T) T {
+	var zero T
+	if v == zero {
+		return def
+	}
+	return v
 }
