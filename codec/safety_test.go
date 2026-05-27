@@ -1,6 +1,7 @@
 package codec
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 
@@ -50,5 +51,29 @@ func TestProtobufNilCtorResultReturnsError(t *testing.T) {
 
 	if _, err := c.Decode(nil); !errors.Is(err, ErrUninitializedProtobuf) {
 		t.Fatalf("Decode error mismatch: %v", err)
+	}
+}
+
+func TestBytesCloneCopies(t *testing.T) {
+	t.Parallel()
+
+	c := BytesClone{}
+	src := []byte("abc")
+	enc, err := c.Encode(src)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	src[0] = 'z'
+	if !bytes.Equal(enc, []byte("abc")) {
+		t.Fatalf("Encode returned aliased bytes: %q", enc)
+	}
+
+	dec, err := c.Decode(enc)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	enc[0] = 'y'
+	if !bytes.Equal(dec, []byte("abc")) {
+		t.Fatalf("Decode returned aliased bytes: %q", dec)
 	}
 }

@@ -77,6 +77,7 @@ func New[V any](opts Options[V]) (cascache.CAS[V], error) {
 		Disabled:       opts.Disabled,
 		ComputeSetCost: opts.ComputeSetCost,
 		VersionStore:   ver,
+		KeyReader:      mutator,
 		KeyWriter:      mutator,
 		KeyInvalidator: mutator,
 		DisableBatch:   opts.DisableBatch,

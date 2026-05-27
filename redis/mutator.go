@@ -22,7 +22,10 @@ type KeyMutator struct {
 	versionTTL time.Duration
 }
 
-var _ cascache.KeyMutator = (*KeyMutator)(nil)
+var (
+	_ cascache.KeyMutator = (*KeyMutator)(nil)
+	_ cascache.KeyReader  = (*KeyMutator)(nil)
+)
 
 var setIfVersionScript = goredis.NewScript(`
 local current = redis.call("GET", KEYS[1])
@@ -39,6 +42,11 @@ if current then
 	end
 	if current ~= expected_fence then
 		return 0
+	end
+	if version_ttl_ms and version_ttl_ms > 0 then
+		redis.call("PEXPIRE", KEYS[1], version_ttl_ms)
+	else
+		redis.call("PERSIST", KEYS[1])
 	end
 else
 	if not expect_missing then
@@ -151,6 +159,39 @@ func (s *KeyMutator) SetIfVersion(
 	return r == 1, nil
 }
 
+func (s *KeyMutator) ReadKey(
+	ctx context.Context,
+	versionKey version.CacheKey,
+	valueKey string,
+) (cascache.KeyReadResult, error) {
+	if s == nil || s.client == nil {
+		return cascache.KeyReadResult{}, ErrNilClient
+	}
+
+	vals, err := s.client.MGet(ctx, valueKey, versionStorageKey(versionKey)).Result()
+	if err != nil {
+		return cascache.KeyReadResult{}, err
+	}
+	if len(vals) != 2 {
+		return cascache.KeyReadResult{}, errors.New("cascache/redis: unexpected MGET result length")
+	}
+
+	var out cascache.KeyReadResult
+	if vals[0] != nil {
+		raw, err := redisBytes(vals[0])
+		if err != nil {
+			return cascache.KeyReadResult{}, err
+		}
+		out.Raw = raw
+		out.Found = true
+	}
+
+	snap, snapErr := parseSnapshotValue(versionKey, vals[1])
+	out.Snapshot = snap
+	out.SnapshotErr = snapErr
+	return out, nil
+}
+
 func (s *KeyMutator) Invalidate(
 	ctx context.Context,
 	versionKey version.CacheKey,
@@ -188,4 +229,15 @@ func ttlMillis(ttl time.Duration) int64 {
 		return 1
 	}
 	return ms
+}
+
+func redisBytes(raw any) ([]byte, error) {
+	switch v := raw.(type) {
+	case string:
+		return []byte(v), nil
+	case []byte:
+		return v, nil
+	default:
+		return nil, errors.New("cascache/redis: unsupported redis value type")
+	}
 }

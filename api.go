@@ -114,6 +114,35 @@ type KeyWriter interface {
 	SetIfVersion(ctx context.Context, versionKey version.CacheKey, valueKey string, expected version.Snapshot, payload []byte, ttl time.Duration) (stored bool, err error)
 }
 
+// KeyReadResult is the combined value and version state returned by
+// KeyReader.ReadKey for a single key.
+type KeyReadResult struct {
+	// Raw is the encoded single-entry wire frame held by the provider (the
+	// fence-stamped envelope), not the decoded codec payload. It is only
+	// meaningful when Found is true.
+	Raw []byte
+	// Found reports whether a value entry existed. When false the read is a
+	// miss and Raw, Snapshot, and SnapshotErr are ignored.
+	Found bool
+	// Snapshot is the authoritative version state read alongside the value. It
+	// is consulted only when SnapshotErr is nil.
+	Snapshot version.Snapshot
+	// SnapshotErr carries a version parse or version-state failure that should
+	// fail the read closed (returning a miss) without deleting the value.
+	// Transport or read-command failures must instead be returned as ReadKey's
+	// error so the caller surfaces them as an operation error.
+	SnapshotErr error
+}
+
+// KeyReader is an optional backend-native fast path for single-key reads.
+// Implementations read the encoded value entry and authoritative version state
+// together. Transport/read command failures should be returned as err. Version
+// parse or version-state failures that should fail closed without deleting the
+// value should be returned as SnapshotErr.
+type KeyReader interface {
+	ReadKey(ctx context.Context, versionKey version.CacheKey, valueKey string) (KeyReadResult, error)
+}
+
 // KeyInvalidator is an optional backend-native fast path for single-key
 // invalidation.
 // versionKey identifies the canonical authoritative version state tracked by
@@ -172,6 +201,7 @@ type Options[V any] struct {
 	Disabled       bool          // default false (enabled)
 	ComputeSetCost SetCostFunc   // default 1
 	VersionStore   version.Store // nil => LocalStore (in-process)
+	KeyReader      KeyReader
 	KeyWriter      KeyWriter
 	KeyInvalidator KeyInvalidator
 	DisableBatch   bool // default false => batch enabled

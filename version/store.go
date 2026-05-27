@@ -44,3 +44,11 @@ type Store interface {
 	// Close releases resources (no-op ok).
 	Close(context.Context) error
 }
+
+// Refresher is an optional Store capability for backends with expiring
+// authoritative metadata. Refresh extends or removes expiry for existing
+// version state without changing its fence. refreshed=false means no current
+// state existed to refresh.
+type Refresher interface {
+	Refresh(ctx context.Context, cacheKey CacheKey) (refreshed bool, err error)
+}

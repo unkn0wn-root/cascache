@@ -22,7 +22,27 @@ type VersionStore struct {
 	closeErr    error
 }
 
-var _ version.Store = (*VersionStore)(nil)
+var (
+	_ version.Store     = (*VersionStore)(nil)
+	_ version.Refresher = (*VersionStore)(nil)
+)
+
+var refreshScript = goredis.NewScript(`
+local current = redis.call("GET", KEYS[1])
+local version_ttl_ms = tonumber(ARGV[1])
+
+if not current then
+	return 0
+end
+
+if version_ttl_ms and version_ttl_ms > 0 then
+	redis.call("PEXPIRE", KEYS[1], version_ttl_ms)
+else
+	redis.call("PERSIST", KEYS[1])
+end
+
+return 1
+`)
 
 // ErrFenceParse reports malformed authoritative fence state read from Redis.
 var ErrFenceParse = errors.New("cascache/redis: fence parse")
@@ -87,6 +107,17 @@ func (s *VersionStore) SnapshotMany(
 		return nil, err
 	}
 
+	if usesSlotRouting(rdb) {
+		return s.snapshotManyPipeline(ctx, rdb, cacheKeys)
+	}
+	return s.snapshotManyMGet(ctx, rdb, cacheKeys)
+}
+
+func (s *VersionStore) snapshotManyMGet(
+	ctx context.Context,
+	rdb goredis.UniversalClient,
+	cacheKeys []version.CacheKey,
+) (map[version.CacheKey]version.Snapshot, error) {
 	keys := make([]string, len(cacheKeys))
 	for i, k := range cacheKeys {
 		keys[i] = s.key(k)
@@ -105,6 +136,60 @@ func (s *VersionStore) SnapshotMany(
 		out[cacheKeys[i]] = snap
 	}
 	return out, nil
+}
+
+func (s *VersionStore) snapshotManyPipeline(
+	ctx context.Context,
+	rdb goredis.UniversalClient,
+	cacheKeys []version.CacheKey,
+) (map[version.CacheKey]version.Snapshot, error) {
+	cmds := make([]*goredis.StringCmd, len(cacheKeys))
+	_, err := rdb.Pipelined(ctx, func(pipe goredis.Pipeliner) error {
+		for i, k := range cacheKeys {
+			cmds[i] = pipe.Get(ctx, s.key(k))
+		}
+		return nil
+	})
+	return snapshotsFromStringCmds(cacheKeys, cmds, err)
+}
+
+func snapshotsFromStringCmds(
+	cacheKeys []version.CacheKey,
+	cmds []*goredis.StringCmd,
+	pipelineErr error,
+) (map[version.CacheKey]version.Snapshot, error) {
+	if pipelineErr != nil && !errors.Is(pipelineErr, goredis.Nil) {
+		return nil, pipelineErr
+	}
+
+	out := make(map[version.CacheKey]version.Snapshot, len(cacheKeys))
+	for i, cmd := range cmds {
+		if cmd == nil {
+			return nil, fmt.Errorf("cascache/redis: missing pipeline command for %s", cacheKeys[i])
+		}
+		if err := cmd.Err(); errors.Is(err, goredis.Nil) {
+			out[cacheKeys[i]] = version.Snapshot{}
+			continue
+		} else if err != nil {
+			return nil, err
+		}
+
+		snap, err := parseSnapshotFence(cacheKeys[i], cmd.Val())
+		if err != nil {
+			return nil, err
+		}
+		out[cacheKeys[i]] = snap
+	}
+	return out, nil
+}
+
+func usesSlotRouting(rdb goredis.UniversalClient) bool {
+	switch rdb.(type) {
+	case *goredis.ClusterClient, *goredis.Ring:
+		return true
+	default:
+		return false
+	}
 }
 
 // CreateIfMissing creates authoritative state with a fresh fence only if absent.
@@ -153,6 +238,26 @@ func (s *VersionStore) Advance(ctx context.Context, cacheKey version.CacheKey) (
 		return version.Snapshot{}, err
 	}
 	return version.Snapshot{Fence: f, Exists: true}, nil
+}
+
+// Refresh extends or removes expiry for existing authoritative version state
+// without changing its fence.
+func (s *VersionStore) Refresh(ctx context.Context, cacheKey version.CacheKey) (bool, error) {
+	rdb, err := s.client()
+	if err != nil {
+		return false, err
+	}
+
+	r, err := refreshScript.Run(
+		ctx,
+		rdb,
+		[]string{s.key(cacheKey)},
+		ttlMillis(s.versionTTL),
+	).Int()
+	if err != nil {
+		return false, err
+	}
+	return r == 1, nil
 }
 
 // Cleanup is not applicable for Redis by default.
