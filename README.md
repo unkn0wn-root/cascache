@@ -45,23 +45,23 @@ CasCache does more work than a plain cache. Here is what that costs, measured ag
 
 ### Single-key Redis operations
 
-| Operation | Plain Redis | CasCache | Extra cost | Redis round trips |
-| --- | --- | --- | --- | --- |
-| Single read (`Get`) | ~17µs | ~33µs | +16µs | 1 with `redis.New`; 2 on the generic provider path |
-| Snapshot then set (full fill) | ~16µs | ~36µs | +20µs | 3 (miss + snapshot + Lua conditional set) |
-| Single write (`SetIfVersion`) | ~16µs | ~23µs | +7µs | 1 (Lua script, atomic) |
-| Invalidate | ~15µs | ~16µs | +1µs | 1 (Lua script, atomic) |
+| Operation | Plain Redis baseline | CasCache | Extra cost | Slower | Redis round trips |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Single read (`Get`) | ~26.4µs | ~26.9µs | +0.5µs | +1.8% | 1 with `redis.New`; 2 on the generic provider path |
+| Single write (`SetIfVersion`) | ~27.7µs | ~31.9µs | +4.2µs | +15.2% | 1 (Lua script, atomic) |
+| Snapshot then set | ~27.7µs | ~51.3µs | +23.6µs | +60.0% | 2 (snapshot + Lua conditional set) |
+| Invalidate | ~25.7µs | ~26.7µs | +1.1µs | +4.3% | 1 (Lua script, atomic) |
 
-With the Redis backend constructed by `redis.New`, single-key reads fetch the value and authoritative fence together. Generic provider wiring still reads the value and fence separately. Writes and invalidates use Lua scripts to stay atomic in a single round trip. The extra cost per operation is in the low tens of microseconds.
+With the Redis backend constructed by `redis.New`, single-key reads fetch the value and authoritative fence together. Generic provider wiring still reads the value and fence separately. Writes and invalidates use Lua scripts to stay atomic. `SnapshotVersion` plus `SetIfVersion` is the full safe fill-write sequence and is intentionally more expensive than a plain Redis `SET`.
 
 ### Batch operations
 
-| Operation | Extra cost vs plain Redis | Redis round trips |
-| --- | --- | --- |
-| Batch get (32 small keys) | ~4% | 2 (batch blob + `MGET` all fences) |
-| Batch get (32 medium keys) | ~1% | 2 (batch blob + `MGET` all fences) |
+| Operation | Plain Redis baseline | CasCache | Extra cost | Slower | Redis round trips |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Batch get (32 small keys, p4) | ~142.1µs | ~175.5µs | +33.4µs | +23.5% | 2 (batch blob + `MGET` all fences) |
+| Batch get (32 medium keys, p4) | ~278.3µs | ~284.2µs | +5.9µs | +2.1% | 2 (batch blob + `MGET` all fences) |
 
-Batch reads amortize the fence-check cost across all keys with a single `MGET`, so the overhead nearly disappears.
+Batch reads amortize the fence-check cost across all keys with a single `MGET`. The percentage overhead is more visible for small payloads because the fixed validation work is spread over fewer bytes.
 
 ### 50,000 req/s target (mixed workload, 30 seconds)
 
