@@ -367,6 +367,79 @@ type recordingKeyAdapter struct {
 
 var _ KeyMutator = (*recordingKeyAdapter)(nil)
 
+type recordingKeyReader struct {
+	result         KeyReadResult
+	err            error
+	calls          int
+	lastVersionKey version.CacheKey
+	lastValueKey   string
+}
+
+var _ KeyReader = (*recordingKeyReader)(nil)
+
+func (r *recordingKeyReader) ReadKey(
+	_ context.Context,
+	versionKey version.CacheKey,
+	valueKey string,
+) (KeyReadResult, error) {
+	r.calls++
+	r.lastVersionKey = versionKey
+	r.lastValueKey = valueKey
+	return r.result, r.err
+}
+
+type recordingHooks struct {
+	NopHooks
+	versionSnapshotErrors int
+	selfHeals             []SelfHealReason
+}
+
+func (h *recordingHooks) VersionSnapshotError(int, error) {
+	h.versionSnapshotErrors++
+}
+
+func (h *recordingHooks) SelfHealSingle(_ string, r SelfHealReason) {
+	h.selfHeals = append(h.selfHeals, r)
+}
+
+type closeErrProvider struct {
+	*memProvider
+	err error
+}
+
+var _ pr.Provider = (*closeErrProvider)(nil)
+
+func (p *closeErrProvider) Close(context.Context) error {
+	return p.err
+}
+
+type closeErrVersionStore struct {
+	version.Store
+	err error
+}
+
+var _ version.Store = (*closeErrVersionStore)(nil)
+
+func (s *closeErrVersionStore) Close(context.Context) error {
+	return s.err
+}
+
+type refreshingVersionStore struct {
+	version.Store
+	refreshCalls int
+	refreshed    bool
+	refreshErr   error
+	lastRefresh  version.CacheKey
+}
+
+var _ version.Refresher = (*refreshingVersionStore)(nil)
+
+func (s *refreshingVersionStore) Refresh(_ context.Context, cacheKey version.CacheKey) (bool, error) {
+	s.refreshCalls++
+	s.lastRefresh = cacheKey
+	return s.refreshed, s.refreshErr
+}
+
 func (s *recordingKeyAdapter) SetIfVersion(
 	_ context.Context,
 	versionKey version.CacheKey,
@@ -517,6 +590,20 @@ func mutateFence(f version.Fence, mutate func([]byte)) version.Fence {
 	return mutated
 }
 
+func mustEncodeUserSingle(t *testing.T, f version.Fence, value user) []byte {
+	t.Helper()
+
+	payload, err := (c.JSON[user]{}).Encode(value)
+	if err != nil {
+		t.Fatalf("Encode user: %v", err)
+	}
+	raw, err := wire.EncodeSingle(f, payload)
+	if err != nil {
+		t.Fatalf("EncodeSingle: %v", err)
+	}
+	return raw
+}
+
 func closeTest(t *testing.T, ctx context.Context, c interface{ Close(context.Context) error }) {
 	t.Helper()
 	if err := c.Close(ctx); err != nil {
@@ -540,7 +627,7 @@ func assertExpiryBefore(
 	}
 }
 
-func mustImpl(t *testing.T, c interface{}) *cache[user] {
+func mustImpl(t *testing.T, c any) *cache[user] {
 	t.Helper()
 	switch cc := c.(type) {
 	case *cache[user]:
@@ -653,6 +740,143 @@ func TestSingleCASFlow(t *testing.T) {
 	}
 	if got, ok, err := cc.Get(ctx, k); err != nil || !ok || got != v {
 		t.Fatalf("Get after fresh set: ok=%v err=%v got=%v", ok, err, got)
+	}
+}
+
+func TestGetKeyReaderHit(t *testing.T) {
+	ctx := context.Background()
+	sentinel := errors.New("provider get should not be called")
+	mp := &getErrProvider{memProvider: newMemProvider(), err: sentinel}
+	fence := testFence(1)
+	want := user{ID: "1", Name: "Ada"}
+	reader := &recordingKeyReader{
+		result: KeyReadResult{
+			Raw:      mustEncodeUserSingle(t, fence, want),
+			Found:    true,
+			Snapshot: version.Snapshot{Fence: fence, Exists: true},
+		},
+	}
+	vs := &countingVersionStore{inner: version.NewLocal()}
+
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.KeyReader = reader
+		o.VersionStore = vs
+	})
+	defer closeTest(t, ctx, cc)
+
+	got, ok, err := cc.Get(ctx, "u:1")
+	if err != nil || !ok || got != want {
+		t.Fatalf("Get via KeyReader: got=%+v ok=%v err=%v", got, ok, err)
+	}
+	if reader.calls != 1 {
+		t.Fatalf("KeyReader calls=%d, want 1", reader.calls)
+	}
+	if vs.snapshotCalls != 0 || vs.snapshotManyCalls != 0 {
+		t.Fatalf(
+			"version store should not be read on KeyReader hit, snapshot=%d many=%d",
+			vs.snapshotCalls,
+			vs.snapshotManyCalls,
+		)
+	}
+}
+
+func TestGetKeyReaderSnapshotErr(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	hooks := &recordingHooks{}
+	fence := testFence(2)
+	reader := &recordingKeyReader{
+		result: KeyReadResult{
+			Raw:         mustEncodeUserSingle(t, fence, user{ID: "1", Name: "Ada"}),
+			Found:       true,
+			SnapshotErr: errors.New("bad version state"),
+		},
+	}
+
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.KeyReader = reader
+		o.Hooks = hooks
+	})
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	sk := impl.singleKeys("u:1")
+	mp.m[sk.Value.String()] = memEntry{v: []byte("keep")}
+
+	got, ok, err := cc.Get(ctx, "u:1")
+	if err != nil || ok {
+		t.Fatalf("Get should fail closed to miss, got=%+v ok=%v err=%v", got, ok, err)
+	}
+	if hooks.versionSnapshotErrors != 1 {
+		t.Fatalf("VersionSnapshotError hooks=%d, want 1", hooks.versionSnapshotErrors)
+	}
+	if _, found := mp.m[sk.Value.String()]; !found {
+		t.Fatalf("snapshot error should not delete provider entry")
+	}
+	if len(hooks.selfHeals) != 0 {
+		t.Fatalf("snapshot error should not self-heal, got %v", hooks.selfHeals)
+	}
+}
+
+func TestGetKeyReaderCorrupt(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	hooks := &recordingHooks{}
+	reader := &recordingKeyReader{
+		result: KeyReadResult{
+			Raw:   []byte("not a cascache wire frame"),
+			Found: true,
+		},
+	}
+
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.KeyReader = reader
+		o.Hooks = hooks
+	})
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	sk := impl.singleKeys("u:1")
+	mp.m[sk.Value.String()] = memEntry{v: []byte("delete me")}
+
+	got, ok, err := cc.Get(ctx, "u:1")
+	if err != nil || ok {
+		t.Fatalf("Get should miss corrupt KeyReader value, got=%+v ok=%v err=%v", got, ok, err)
+	}
+	if _, found := mp.m[sk.Value.String()]; found {
+		t.Fatalf("corrupt KeyReader value should delete provider entry")
+	}
+	if len(hooks.selfHeals) != 1 || hooks.selfHeals[0] != SelfHealReasonCorrupt {
+		t.Fatalf("self-heal reasons=%v, want [%s]", hooks.selfHeals, SelfHealReasonCorrupt)
+	}
+}
+
+func TestGetCorruptBeforeSnapshot(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	hooks := &recordingHooks{}
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.Hooks = hooks
+		o.VersionStore = &failingVersionStore{snapshotErr: errors.New("snapshot failed")}
+	})
+	defer closeTest(t, ctx, cc)
+
+	impl := mustImpl(t, cc)
+	sk := impl.singleKeys("u:1")
+	mp.m[sk.Value.String()] = memEntry{v: []byte("not a cascache wire frame")}
+
+	got, ok, err := cc.Get(ctx, "u:1")
+	if err != nil || ok {
+		t.Fatalf("Get should miss corrupt generic value, got=%+v ok=%v err=%v", got, ok, err)
+	}
+	if _, found := mp.m[sk.Value.String()]; found {
+		t.Fatalf("corrupt generic value should be deleted before snapshot read")
+	}
+	if len(hooks.selfHeals) != 1 || hooks.selfHeals[0] != SelfHealReasonCorrupt {
+		t.Fatalf("self-heal reasons=%v, want [%s]", hooks.selfHeals, SelfHealReasonCorrupt)
+	}
+	if hooks.versionSnapshotErrors != 0 {
+		t.Fatalf("snapshot should not be loaded after corrupt wire, hooks=%d", hooks.versionSnapshotErrors)
 	}
 }
 
@@ -811,6 +1035,106 @@ func TestSetIfVersionSnapshotErrorReturnsErrorAndSkipsWrite(t *testing.T) {
 	impl := mustImpl(t, cc)
 	if _, ok, _ := mp.Get(ctx, impl.singleKeys("u:1").Value.String()); ok {
 		t.Fatalf("SetIfVersion should skip writes when snapshot fails")
+	}
+}
+
+func TestSetRefreshesVersionTTL(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	vs := &refreshingVersionStore{Store: version.NewLocal(), refreshed: true}
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.VersionStore = vs
+	})
+	defer closeTest(t, ctx, cc)
+
+	key := "u:ttl"
+	first := user{ID: "ttl", Name: "first"}
+	result, err := cc.SetIfVersion(ctx, key, first, Version{})
+	if err != nil || !result.Stored() {
+		t.Fatalf("first SetIfVersion: result=%+v err=%v", result, err)
+	}
+	if vs.refreshCalls != 0 {
+		t.Fatalf("missing-version create should not need refresh, got %d calls", vs.refreshCalls)
+	}
+
+	obs := mustSnapshotVersion(t, ctx, cc, key)
+	second := user{ID: "ttl", Name: "second"}
+	result, err = cc.SetIfVersion(ctx, key, second, obs)
+	if err != nil || !result.Stored() {
+		t.Fatalf("second SetIfVersion: result=%+v err=%v", result, err)
+	}
+	if vs.refreshCalls != 1 {
+		t.Fatalf("existing-version write should refresh once, got %d", vs.refreshCalls)
+	}
+
+	impl := mustImpl(t, cc)
+	if vs.lastRefresh != impl.versionKey(key) {
+		t.Fatalf("Refresh key=%q, want %q", vs.lastRefresh, impl.versionKey(key))
+	}
+}
+
+func TestSetRefreshError(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	vs := &refreshingVersionStore{Store: version.NewLocal(), refreshed: true}
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.VersionStore = vs
+	})
+	defer closeTest(t, ctx, cc)
+
+	key := "u:ttl-error"
+	first := user{ID: "ttl-error", Name: "first"}
+	if result, err := cc.SetIfVersion(ctx, key, first, Version{}); err != nil || !result.Stored() {
+		t.Fatalf("first SetIfVersion: result=%+v err=%v", result, err)
+	}
+
+	vs.refreshErr = errors.New("refresh failed")
+	obs := mustSnapshotVersion(t, ctx, cc, key)
+	result, err := cc.SetIfVersion(ctx, key, user{ID: "ttl-error", Name: "second"}, obs)
+	if err == nil {
+		t.Fatalf("SetIfVersion should return refresh error")
+	}
+	if !errors.Is(err, vs.refreshErr) {
+		t.Fatalf("SetIfVersion error=%v, want %v", err, vs.refreshErr)
+	}
+	if result.Outcome != WriteOutcomeSnapshotError {
+		t.Fatalf("SetIfVersion outcome=%q, want %q", result.Outcome, WriteOutcomeSnapshotError)
+	}
+
+	got, ok, err := cc.Get(ctx, key)
+	if err != nil || !ok || got != first {
+		t.Fatalf("refresh failure should skip provider write, got=%+v ok=%v err=%v", got, ok, err)
+	}
+}
+
+func TestSetRefreshMissing(t *testing.T) {
+	ctx := context.Background()
+	mp := newMemProvider()
+	vs := &refreshingVersionStore{Store: version.NewLocal(), refreshed: true}
+	cc := newTestCache(t, "user", mp, func(o *Options[user]) {
+		o.VersionStore = vs
+	})
+	defer closeTest(t, ctx, cc)
+
+	key := "u:ttl-missing"
+	first := user{ID: "ttl-missing", Name: "first"}
+	if result, err := cc.SetIfVersion(ctx, key, first, Version{}); err != nil || !result.Stored() {
+		t.Fatalf("first SetIfVersion: result=%+v err=%v", result, err)
+	}
+
+	vs.refreshed = false
+	obs := mustSnapshotVersion(t, ctx, cc, key)
+	result, err := cc.SetIfVersion(ctx, key, user{ID: "ttl-missing", Name: "second"}, obs)
+	if err != nil {
+		t.Fatalf("SetIfVersion should not error on refresh-missing mismatch: %v", err)
+	}
+	if result.Outcome != WriteOutcomeVersionMismatch {
+		t.Fatalf("SetIfVersion outcome=%q, want %q", result.Outcome, WriteOutcomeVersionMismatch)
+	}
+
+	got, ok, err := cc.Get(ctx, key)
+	if err != nil || !ok || got != first {
+		t.Fatalf("refresh missing should skip provider write, got=%+v ok=%v err=%v", got, ok, err)
 	}
 }
 
@@ -1096,6 +1420,30 @@ func TestSelfHealOnCorrupt(t *testing.T) {
 	}
 	if _, ok, _ := mp.Get(ctx, sk.Value.String()); ok {
 		t.Fatalf("stale entry was not deleted by self-heal")
+	}
+}
+
+func TestCloseReturnsAllErrors(t *testing.T) {
+	ctx := context.Background()
+	versionErr := errors.New("version close failed")
+	providerErr := errors.New("provider close failed")
+
+	cc := newTestCache(t, "user", &closeErrProvider{
+		memProvider: newMemProvider(),
+		err:         providerErr,
+	}, func(o *Options[user]) {
+		o.VersionStore = &closeErrVersionStore{
+			Store: version.NewLocal(),
+			err:   versionErr,
+		}
+	})
+
+	err := cc.Close(ctx)
+	if !errors.Is(err, versionErr) {
+		t.Fatalf("Close error should include version error, got %v", err)
+	}
+	if !errors.Is(err, providerErr) {
+		t.Fatalf("Close error should include provider error, got %v", err)
 	}
 }
 

@@ -1,6 +1,8 @@
 // Package redis contains the Redis backend for cascache.
 //
 // Most callers should use New.
+// New wires the Redis value provider, version store, single-key read fast path,
+// and single-key mutation scripts from one shared client.
 //
 // The lower-level constructors exist for custom topologies:
 //   - NewVersionStore when values stay outside Redis but version state must be shared.

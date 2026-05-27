@@ -14,6 +14,8 @@
 //     single-key compare-and-write and invalidate. KeyMutator is the
 //     alias for implementations that provide both. See the redis
 //     subpackage for the built-in Redis implementation.
+//   - KeyReader: optional backend-native fast path for reading a single value
+//     and its authoritative version state together.
 //
 // Keys:
 //

@@ -47,12 +47,12 @@ CasCache does more work than a plain cache. Here is what that costs, measured ag
 
 | Operation | Plain Redis | CasCache | Extra cost | Redis round trips |
 | --- | --- | --- | --- | --- |
-| Single read (`Get`) | ~17µs | ~33µs | +16µs | 2 (value + fence check) |
+| Single read (`Get`) | ~17µs | ~33µs | +16µs | 1 with `redis.New`; 2 on the generic provider path |
 | Snapshot then set (full fill) | ~16µs | ~36µs | +20µs | 3 (miss + snapshot + Lua conditional set) |
 | Single write (`SetIfVersion`) | ~16µs | ~23µs | +7µs | 1 (Lua script, atomic) |
 | Invalidate | ~15µs | ~16µs | +1µs | 1 (Lua script, atomic) |
 
-Single-key reads are the most expensive path because every `Get` needs two round trips: one for the value and one for the authoritative fence. Writes and invalidates use Lua scripts to stay atomic in a single round trip. The extra cost per operation is in the low tens of microseconds.
+With the Redis backend constructed by `redis.New`, single-key reads fetch the value and authoritative fence together. Generic provider wiring still reads the value and fence separately. Writes and invalidates use Lua scripts to stay atomic in a single round trip. The extra cost per operation is in the low tens of microseconds.
 
 ### Batch operations
 
