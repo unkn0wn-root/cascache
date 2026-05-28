@@ -321,6 +321,52 @@ func (c *cache[V]) buildSingleWrite(
 	}, nil
 }
 
+// singleKeys translates a caller-facing logical key into both the canonical
+// single-key identity used by the version store and the provider value key.
+// Example: logical key "42" in namespace "user" becomes:
+//   - Cache: "s:4:user:42"
+//   - Value: "cas:v3:val:{<hash>}:s:4:user:42"
+//
+// The {<hash>} is a deterministic prefix derived from the cache key.
+func (c *cache[V]) singleKeys(userKey string) keys.Single {
+	return c.space.Single(userKey)
+}
+
+// guardSingleRead applies the configured single-key read guard and translates
+// its result into the self-heal reason Get should record on rejection.
+func (c *cache[V]) guardSingleRead(ctx context.Context, key string, value V) SelfHealReason {
+	if c.readGuard == nil {
+		return ""
+	}
+
+	ok, err := c.readGuard(ctx, key, value)
+	if err != nil {
+		return SelfHealReasonReadGuardError
+	}
+	if !ok {
+		return SelfHealReasonReadGuardReject
+	}
+	return ""
+}
+
+// addSingle encodes one single-entry frame from an already validated batch
+// member and inserts it only if the provider reports the key as missing.
+func (c *cache[V]) addSingle(
+	ctx context.Context,
+	key string,
+	fence version.Fence,
+	payload []byte,
+	ttl time.Duration,
+) error {
+	sk := c.singleKeys(key)
+	sw, err := c.buildSingleWrite(sk, fence, payload)
+	if err != nil {
+		return err
+	}
+	_, err = c.adder.Add(ctx, sw.storageKey, sw.wire, sw.cost, ttl)
+	return err
+}
+
 // setSingle executes a prepared single-entry provider Set and reports
 // admission rejection through hooks without treating it as an error.
 func (c *cache[V]) setSingle(ctx context.Context, sw singleWrite, ttl time.Duration) (bool, error) {
@@ -349,23 +395,5 @@ func (c *cache[V]) writeSingle(
 		return err
 	}
 	_, err = c.setSingle(ctx, sw, ttl)
-	return err
-}
-
-// addSingle encodes one single-entry frame from an already validated batch
-// member and inserts it only if the provider reports the key as missing.
-func (c *cache[V]) addSingle(
-	ctx context.Context,
-	key string,
-	fence version.Fence,
-	payload []byte,
-	ttl time.Duration,
-) error {
-	sk := c.singleKeys(key)
-	sw, err := c.buildSingleWrite(sk, fence, payload)
-	if err != nil {
-		return err
-	}
-	_, err = c.adder.Add(ctx, sw.storageKey, sw.wire, sw.cost, ttl)
 	return err
 }
