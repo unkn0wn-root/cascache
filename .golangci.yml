@@ -1,0 +1,51 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - exhaustive
+    - bodyclose
+    - noctx
+    - errorlint
+    - copyloopvar
+    - durationcheck
+    - makezero
+    - nilerr
+    - rowserrcheck
+    - sqlclosecheck
+    - wastedassign
+    - misspell
+    - revive
+    - unconvert
+    - usestdlibvars
+
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: true
+    errorlint:
+      asserts: false
+    revive:
+      rules:
+        - name: exported
+          arguments: [checkPrivateReceivers, disableStutteringCheck]
+        - name: package-comments
+        - name: context-as-argument
+        - name: error-return
+        - name: error-strings
+        - name: indent-error-flow
+        - name: var-naming
+
+  exclusions:
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - revive
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
