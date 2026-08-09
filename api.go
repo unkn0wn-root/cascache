@@ -4,214 +4,127 @@ import (
 	"context"
 	"time"
 
-	c "github.com/unkn0wn-root/cascache/v3/codec"
-	pr "github.com/unkn0wn-root/cascache/v3/provider"
-	"github.com/unkn0wn-root/cascache/v3/version"
+	"github.com/unkn0wn-root/cascache/v4/backend"
+	"github.com/unkn0wn-root/cascache/v4/codec"
 )
 
-// Cache is an alias for CAS so callers can write cascache.Cache[V] if preferred.
-type Cache[V any] = CAS[V]
+// DefaultEntryTTL is used for writes that pass a zero TTL.
+const DefaultEntryTTL = 10 * time.Minute
 
-// CAS is the provider-agnostic cache interface with compare-and-swap safety
-// via per-key version fences. V is the caller's value type
-// serialization is handled by the configured Codec[V].
-type CAS[V any] interface {
-	Enabled() bool
-	Close(context.Context) error
+// NoExpiration asks for a value that never expires. A backend may shorten it so
+// a value cannot outlive the invalidation state that judges it;
+// [SetResult.EffectiveTTL] reports the applied TTL.
+const NoExpiration = backend.NoExpiration
 
-	// Single
-	Get(ctx context.Context, key string) (v V, ok bool, err error)
-	SnapshotVersion(ctx context.Context, key string) (Version, error)
-	SetIfVersion(ctx context.Context, key string, value V, version Version) (WriteResult, error)
-	SetIfVersionWithTTL(ctx context.Context, key string, value V, version Version, ttl time.Duration) (WriteResult, error)
-	Invalidate(ctx context.Context, key string) error
-
-	// Batch (order-agnostic return. Use your own ordering by keys slice)
-	GetMany(ctx context.Context, keys []string) (values map[string]V, missing []string, err error)
-	SnapshotVersions(ctx context.Context, keys []string) (map[string]Version, error)
-	SetIfVersions(ctx context.Context, items []VersionedValue[V]) (BatchWriteResult, error)
-	SetIfVersionsWithTTL(ctx context.Context, items []VersionedValue[V], ttl time.Duration) (BatchWriteResult, error)
-}
-
-// WriteOutcome describes what happened during a versioned write attempt.
-type WriteOutcome string
-
-const (
-	WriteOutcomeStored           WriteOutcome = "stored"
-	WriteOutcomeVersionMismatch  WriteOutcome = "version_mismatch"
-	WriteOutcomeSnapshotError    WriteOutcome = "snapshot_error"
-	WriteOutcomeProviderRejected WriteOutcome = "provider_rejected"
-	WriteOutcomeDisabled         WriteOutcome = "disabled"
-)
-
-type WriteResult struct {
-	Outcome WriteOutcome
-}
-
-// Stored reports whether the write landed in the provider.
-func (r WriteResult) Stored() bool {
-	return r.Outcome == WriteOutcomeStored
-}
-
-// BatchWriteResult describes the result of a versioned write through the batch
-// entry path.
-type BatchWriteResult struct {
-	Outcome       WriteOutcome
-	SeededSingles bool
-}
-
-// Stored reports whether the batch entry landed in the provider.
-func (r BatchWriteResult) Stored() bool {
-	return r.Outcome == WriteOutcomeStored
-}
-
-// VersionedValue is the caller-facing unit for versioned multi-key writes.
-type VersionedValue[V any] struct {
-	Key     string
-	Value   V
-	Version Version
-}
-
-// BatchReadSeedMode controls whether a successful batch read validated
-// members as individual single-key entries.
-// The zero/default value is BatchReadSeedOff so batch hits stay read-only unless
-// the caller explicitly opts into warming singles.
-type BatchReadSeedMode uint8
-
-const (
-	BatchReadSeedOff BatchReadSeedMode = iota
-	BatchReadSeedAll
-	BatchReadSeedIfMissing
-)
-
-// BatchWriteSeedMode controls how a successful SetIfVersions
-// write individual single-key entries.
+// Snapshot identifies the invalidation state of a key at one point in time.
+// Take one with [Cache.Snapshot] before reading the source, then pass it to
+// [Cache.Set]. An invalidation between those calls refuses the write.
 //
-// The zero/default value is BatchWriteSeedStrict, which routes each single
-// through SetIfVersion again so the post-batch seeding path preserves the same
-// per-key CAS recheck as standalone writes. Higher-throughput systems can opt
-// into BatchWriteSeedFast to reuse the validated batch payloads directly, or
-// BatchWriteSeedOff to skip success path single seeding entirely.
-type BatchWriteSeedMode uint8
+// Snapshots are opaque. The zero Snapshot is invalid.
+type Snapshot struct {
+	_     [0]func() // Keep representation changes from becoming API breaks.
+	fence backend.Fence
+}
+
+// SetCostFunc returns an entry's admission weight. raw is the full stored frame
+// and must not be modified. Calls may run concurrently.
+type SetCostFunc func(key string, raw []byte) int64
+
+// TTLFunc computes the TTL for a fill. It must be safe for concurrent use.
+type TTLFunc func() (time.Duration, error)
+
+// Loader reads the source after a cache miss. Its context belongs to the shared
+// loader run, not to one caller.
+type Loader[V any] func(ctx context.Context) (V, error)
+
+// SetOutcome reports what a cache write did.
+type SetOutcome uint8
 
 const (
-	BatchWriteSeedStrict BatchWriteSeedMode = iota
-	BatchWriteSeedFast
-	BatchWriteSeedOff
+	// SetOutcomeUnknown is the zero value and is never a successful write.
+	SetOutcomeUnknown SetOutcome = iota
+	// SetOutcomeStored means the value was stored.
+	SetOutcomeStored
+	// SetOutcomeConflict means the snapshot was no longer current at the write.
+	SetOutcomeConflict
+	// SetOutcomeBackendRejected means the backend declined the write.
+	SetOutcomeBackendRejected
+	// SetOutcomeDisabled means the cache is disabled and ignored the write.
+	SetOutcomeDisabled
 )
 
-// KeyWriter is an optional backend-native fast path for single-key
-// compare-and-write operations.
-// versionKey identifies the canonical authoritative version state tracked by
-// the configured VersionStore. valueKey identifies the provider storage key for the encoded single
-// value entry. Implementations are responsible for coordinating those two keys
-// so SetIfVersion preserves the same freshness contract as the generic cache
-// path.
-type KeyWriter interface {
-	// payload is the codec-encoded caller value, not the final wire envelope.
-	// Implementations are responsible for writing a value stamped with the
-	// authoritative fence that actually won the compare/init step.
-	SetIfVersion(ctx context.Context, versionKey version.CacheKey, valueKey string, expected version.Snapshot, payload []byte, ttl time.Duration) (stored bool, err error)
+func (o SetOutcome) String() string {
+	switch o {
+	case SetOutcomeStored:
+		return "stored"
+	case SetOutcomeConflict:
+		return "conflict"
+	case SetOutcomeBackendRejected:
+		return "backend_rejected"
+	case SetOutcomeDisabled:
+		return "disabled"
+	default:
+		return "unknown"
+	}
 }
 
-// KeyReadResult is the combined value and version state returned by
-// KeyReader.ReadKey for a single key.
-type KeyReadResult struct {
-	// Raw is the encoded single-entry wire frame held by the provider (the
-	// fence-stamped envelope), not the decoded codec payload. It is only
-	// meaningful when Found is true.
-	Raw []byte
-	// Found reports whether a value entry existed. When false the read is a
-	// miss and Raw, Snapshot, and SnapshotErr are ignored.
-	Found bool
-	// Snapshot is the authoritative version state read alongside the value. It
-	// is consulted only when SnapshotErr is nil.
-	Snapshot version.Snapshot
-	// SnapshotErr carries a version parse or version-state failure that should
-	// fail the read closed (returning a miss) without deleting the value.
-	// Transport or read-command failures must instead be returned as ReadKey's
-	// error so the caller surfaces them as an operation error.
-	SnapshotErr error
+// SetResult reports what a cache write did. Only [SetOutcomeStored] is a fill.
+// Use keyed fields because later releases may add data.
+type SetResult struct {
+	Outcome SetOutcome
+
+	// EffectiveTTL is the applied TTL after defaults and backend limits. Zero
+	// means the value does not expire.
+	EffectiveTTL time.Duration
 }
 
-// KeyReader is an optional backend-native fast path for single-key reads.
-// Implementations read the encoded value entry and authoritative version state
-// together. Transport/read command failures should be returned as err. Version
-// parse or version-state failures that should fail closed without deleting the
-// value should be returned as SnapshotErr.
-type KeyReader interface {
-	ReadKey(ctx context.Context, versionKey version.CacheKey, valueKey string) (KeyReadResult, error)
-}
-
-// KeyInvalidator is an optional backend-native fast path for single-key
-// invalidation.
-// versionKey identifies the canonical authoritative version state tracked by
-// the configured VersionStore. valueKey identifies the provider storage key for the encoded single
-// value entry. Implementations are responsible for coordinating those two keys
-// so Invalidate preserves the same contract as the generic cache
-// path.
-type KeyInvalidator interface {
-	Invalidate(ctx context.Context, versionKey version.CacheKey, valueKey string) error
-}
-
-// KeyMutator combines KeyWriter and KeyInvalidator for backends that support
-// both native compare-and-write and single-key invalidation in a single path.
-type KeyMutator interface {
-	KeyWriter
-	KeyInvalidator
-}
-
-// ReadGuardFunc can veto serving a decoded cache hit for a single logical key.
-// It is intended for critical paths that need an authoritative source check
-// before a cached value may be returned.
-// Return allow=false to reject the entry as stale or unsafe. Any returned error
-// is treated conservatively as a rejection and the caller receives a miss.
-type ReadGuardFunc[V any] func(ctx context.Context, key string, value V) (allow bool, err error)
-
-// BatchReadGuardFunc is the batch form of ReadGuardFunc for validated GetMany hits.
-// The input map contains only the requested logical keys that survived wire and
-// fence checks. Return the keys that failed validation. Any non-empty
-// result deletes the stored batch entry because batch values are stored as a
-// single blob.
-//
-// If ReadGuard is also configured, GetMany rechecks the rejected keys through
-// per-key fallback reads. Otherwise, rejected keys are treated as misses for
-// that GetMany call so they cannot be served back from seeded singles.
-type BatchReadGuardFunc[V any] func(ctx context.Context, values map[string]V) (rejected map[string]struct{}, err error)
-
-// SetCostFunc computes the provider cost used for a cache write.
-// The returned value is passed through to Provider.Set (and Adder.Add when
-// applicable). Providers that use admission or weighted eviction can interpret
-// it as entry weight; providers that ignore cost may discard it.
-// key is the provider storage key cascache is writing. raw is the fully encoded
-// wire value that will be stored. isBatch reports whether the write targets the
-// grouped batch-entry path rather than a single-key entry. memberCount is 1 for
-// single writes and the number of logical keys contained in a batch entry.
-type SetCostFunc func(key string, raw []byte, isBatch bool, memberCount int) int64
-
-// Options configures the CAS cache.
-// Namespace, Provider, and Codec are required.
+// Options configure a [Cache]. Namespace, Backend and Codec are required. Use
+// keyed fields because later releases may add options.
 type Options[V any] struct {
-	Namespace string // logical namespace to isolate the keyspace
-	Provider  pr.Provider
-	Codec     c.Codec[V]
+	// Namespace must be unique among caches sharing a backend.
+	Namespace string
 
-	DefaultTTL     time.Duration // singles; 0 => 10m
-	BatchTTL       time.Duration // batches; 0 => 10m
-	Disabled       bool          // default false (enabled)
-	ComputeSetCost SetCostFunc   // default 1
-	VersionStore   version.Store // nil => LocalStore (in-process)
-	KeyReader      KeyReader
-	KeyWriter      KeyWriter
-	KeyInvalidator KeyInvalidator
-	DisableBatch   bool // default false => batch enabled
-	ReadGuard      ReadGuardFunc[V]
-	BatchReadGuard BatchReadGuardFunc[V]
-	BatchReadSeed  BatchReadSeedMode
-	BatchWriteSeed BatchWriteSeedMode
-	Hooks          Hooks
+	// Backend belongs to the caller and is never closed by the cache.
+	Backend backend.Backend
+
+	// Codec encodes and decodes cached values.
+	Codec codec.Codec[V]
+
+	// DefaultTTL applies to writes that pass a zero TTL. Zero uses
+	// [DefaultEntryTTL].
+	DefaultTTL time.Duration
+
+	// ComputeTTL sets the TTL of fills made by [Cache.Load]. Nil uses
+	// DefaultTTL. See [JitterTTL].
+	ComputeTTL TTLFunc
+
+	// ComputeSetCost returns the admission cost of a stored frame. Nil uses 1.
+	ComputeSetCost SetCostFunc
+
+	// LoadTimeout bounds a shared loader run. Zero means no timeout.
+	LoadTimeout time.Duration
+
+	// Disabled makes the cache a pass-through.
+	Disabled bool
+
+	// OnLoad observes completed loads.
+	OnLoad LoadFunc
+
+	// Observer receives health events.
+	Observer Observer
 }
 
-func New[V any](opts Options[V]) (CAS[V], error) {
-	return newCache(opts)
+// Validate checks the required fields.
+func (o Options[V]) Validate() error {
+	switch {
+	case o.Namespace == "":
+		return ErrNoNamespace
+	case isNil(o.Backend):
+		return ErrNoBackend
+	case isNil(o.Codec):
+		return ErrNoCodec
+	case o.DefaultTTL < 0 && o.DefaultTTL != NoExpiration:
+		return ErrInvalidTTL
+	}
+	return nil
 }

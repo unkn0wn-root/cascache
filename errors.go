@@ -5,89 +5,50 @@ import (
 	"fmt"
 )
 
-// ErrBatchReadSeedNeedsAdder identifies an invalid configuration where
-// BatchReadSeedIfMissing is requested with a provider that does not implement
-// Adder.
-var ErrBatchReadSeedNeedsAdder = errors.New("BatchReadSeedIfMissing requires Adder")
-
-type InvalidateError struct {
-	Key        string
-	AdvanceErr error
-	DelErr     error
-}
-
-func (e *InvalidateError) Error() string {
-	switch {
-	case e.AdvanceErr != nil && e.DelErr != nil:
-		return fmt.Sprintf(
-			"invalidate %q failed: version advance and delete failed: advance=%v; delete=%v",
-			e.Key,
-			e.AdvanceErr,
-			e.DelErr,
-		)
-	case e.AdvanceErr != nil:
-		return fmt.Sprintf("invalidate %q: version advance failed: %v", e.Key, e.AdvanceErr)
-	case e.DelErr != nil:
-		return fmt.Sprintf("invalidate %q: delete failed: %v", e.Key, e.DelErr)
-	default:
-		return fmt.Sprintf("invalidate %q: unknown error", e.Key)
-	}
-}
-
-func (e *InvalidateError) Unwrap() []error {
-	switch {
-	case e.AdvanceErr == nil:
-		if e.DelErr == nil {
-			return nil
-		}
-		return []error{e.DelErr}
-	case e.DelErr == nil:
-		return []error{e.AdvanceErr}
-	default:
-		return []error{e.AdvanceErr, e.DelErr}
-	}
-}
-
-// Op identifies the logical cache operation that failed.
-type Op string
-
-const (
-	OpGet           Op = "get"
-	OpSet           Op = "set"
-	OpAdd           Op = "add"
-	OpSnapshot      Op = "snapshot"
-	OpInvalidate    Op = "invalidate"
-	OpGetMany       Op = "get_many"
-	OpSetIfVersions Op = "set_if_versions"
+// Construction and input errors.
+var (
+	ErrNoNamespace = errors.New("cascache: namespace is required")
+	ErrNoBackend   = errors.New("cascache: backend is required")
+	ErrNoCodec     = errors.New("cascache: codec is required")
+	ErrNoLoader    = errors.New("cascache: loader is required")
+	// ErrInvalidSnapshot reports a zero snapshot passed to a write.
+	ErrInvalidSnapshot = errors.New("cascache: invalid snapshot")
+	// ErrInvalidTTL reports a negative TTL other than [NoExpiration].
+	ErrInvalidTTL = errors.New("cascache: invalid TTL")
+	// ErrInvalidCost reports a nonpositive admission cost.
+	ErrInvalidCost = errors.New("cascache: invalid cost")
 )
 
-// OpError reports an operation failure and, when applicable,
-// the logical key that triggered it.
+// ErrBackendContract reports a backend that returned something its contract
+// does not allow, such as an invalid fence from Ensure.
+var ErrBackendContract = errors.New("cascache: backend contract violation")
+
+// ErrComputeTTL marks a fill skipped because [Options.ComputeTTL] failed. Load
+// still returns the loaded value.
+var ErrComputeTTL = errors.New("cascache: compute ttl")
+
+var (
+	// ErrLoaderPanic reports a loader that panicked.
+	ErrLoaderPanic = errors.New("cascache: loader panicked")
+	// ErrLoaderGoexit reports a loader that exited without returning.
+	ErrLoaderGoexit = errors.New("cascache: loader exited without returning")
+)
+
+// OpError adds the operation and key to an error.
 type OpError struct {
 	Op  Op
-	Key string // empty for non-key specific failures such as batch path failures
-
-	// Err is the underlying cause.
-	// Error panics if Err is nil.
+	Key string
 	Err error
 }
 
 func (e *OpError) Error() string {
-	if e == nil {
-		return "<nil>"
-	}
-
-	err := e.Err.Error()
-
 	switch {
-	case e.Op != "" && e.Key != "":
-		return fmt.Sprintf("%s %q: %s", e.Op, e.Key, err)
-	case e.Op != "":
-		return fmt.Sprintf("%s: %s", e.Op, err)
-	case e.Key != "":
-		return fmt.Sprintf("%q: %s", e.Key, err)
+	case e == nil:
+		return "<nil>"
+	case e.Err == nil:
+		return fmt.Sprintf("cascache %s %q: unknown error", e.Op, e.Key)
 	default:
-		return err
+		return fmt.Sprintf("cascache %s %q: %v", e.Op, e.Key, e.Err)
 	}
 }
 
@@ -98,13 +59,17 @@ func (e *OpError) Unwrap() error {
 	return e.Err
 }
 
-func opError(op Op, key string, err error) error {
-	if err == nil {
-		return nil
-	}
-	return &OpError{
-		Op:  op,
-		Key: key,
-		Err: err,
-	}
+// PanicError carries what a loader panicked with, and where. It unwraps to [ErrLoaderPanic].
+type PanicError struct {
+	Value any
+	Stack []byte
 }
+
+func (e *PanicError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%s: %v\n%s", ErrLoaderPanic.Error(), e.Value, e.Stack)
+}
+
+func (e *PanicError) Unwrap() error { return ErrLoaderPanic }
