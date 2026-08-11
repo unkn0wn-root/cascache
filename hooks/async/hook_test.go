@@ -1,75 +1,127 @@
-package asynchook
+package asynchook_test
 
 import (
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/unkn0wn-root/cascache/v3"
+	"github.com/unkn0wn-root/cascache/v4"
+	asynchook "github.com/unkn0wn-root/cascache/v4/hooks/async"
 )
 
-type blockingHook struct {
-	cascache.NopHooks
-	startedOnce sync.Once
-	started     chan struct{}
-	release     chan struct{}
-	calls       atomic.Int32
+type recorder struct {
+	mu     sync.Mutex
+	events []cascache.Event
+	block  chan struct{}
 }
 
-func (h *blockingHook) SelfHealSingle(string, cascache.SelfHealReason) {
-	if h.started != nil {
-		h.startedOnce.Do(func() { close(h.started) })
+func (r *recorder) Observe(e cascache.Event) {
+	if r.block != nil {
+		<-r.block
 	}
-	if h.release != nil {
-		<-h.release
-	}
-	h.calls.Add(1)
+	r.mu.Lock()
+	r.events = append(r.events, e)
+	r.mu.Unlock()
 }
 
-func TestHooksCloseDropsLateEvents(t *testing.T) {
-	t.Parallel()
-
-	h := New(nil, 1, 1)
-	h.Close()
-
-	h.SelfHealSingle("k", cascache.SelfHealReasonCorrupt)
-	h.BatchRejected("ns", 1, cascache.BatchRejectReasonDecodeError)
+func (r *recorder) all() []cascache.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]cascache.Event(nil), r.events...)
 }
 
-func TestHooksCloseWaitsForInFlightEvent(t *testing.T) {
-	t.Parallel()
+func TestWrapDeliversInTheBackground(t *testing.T) {
+	rec := &recorder{}
+	q := asynchook.New(1, 16)
+	obs := q.Wrap(rec)
 
-	inner := &blockingHook{
-		started: make(chan struct{}),
-		release: make(chan struct{}),
+	obs.Observe(cascache.Event{Type: cascache.EventEntryRejected, Key: "a"})
+	obs.Observe(cascache.Event{Type: cascache.EventStoreRejected, Key: "b"})
+
+	q.Close()
+
+	got := rec.all()
+	if len(got) != 2 {
+		t.Fatalf("got %d events, want 2: %+v", len(got), got)
 	}
-	h := New(inner, 1, 1)
+	if got[0].Key != "a" || got[1].Key != "b" {
+		t.Fatalf("events arrived as %+v, want a then b", got)
+	}
+}
 
-	h.SelfHealSingle("k", cascache.SelfHealReasonCorrupt)
-	<-inner.started
+func TestWrapOfNilIsNil(t *testing.T) {
+	q := asynchook.New(1, 1)
+	defer q.Close()
 
-	closed := make(chan struct{})
+	if obs := q.Wrap(nil); obs != nil {
+		t.Fatalf("Wrap(nil) = %v, want nil", obs)
+	}
+
+	var typedNil *recorder
+	if obs := q.Wrap(typedNil); obs != nil {
+		t.Fatalf("Wrap(typed nil) = %v, want nil", obs)
+	}
+}
+
+func TestSubmittingToAFullQueueDropsRatherThanBlocks(t *testing.T) {
+	rec := &recorder{block: make(chan struct{})}
+	q := asynchook.New(1, 1)
+	obs := q.Wrap(rec)
+
+	done := make(chan struct{})
 	go func() {
-		h.Close()
-		close(closed)
+		defer close(done)
+		for range 100 {
+			obs.Observe(cascache.Event{Type: cascache.EventEntryRejected})
+		}
 	}()
 
 	select {
-	case <-closed:
-		t.Fatal("Close returned before in-flight event completed")
-	case <-time.After(50 * time.Millisecond):
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Observe blocked on a full queue")
 	}
 
-	close(inner.release)
+	close(rec.block)
+	q.Close()
 
-	select {
-	case <-closed:
-	case <-time.After(time.Second):
-		t.Fatal("Close did not return after releasing in-flight event")
+	if got := len(rec.all()); got == 0 || got >= 100 {
+		t.Fatalf("delivered %d of 100 events, want some but not all", got)
 	}
+}
 
-	if got := inner.calls.Load(); got != 1 {
-		t.Fatalf("call count mismatch: got %d want 1", got)
+func TestSubmitAfterCloseIsDropped(t *testing.T) {
+	rec := &recorder{}
+	q := asynchook.New(1, 16)
+	obs := q.Wrap(rec)
+
+	q.Close()
+	obs.Observe(cascache.Event{Type: cascache.EventEntryRejected})
+
+	if got := rec.all(); len(got) != 0 {
+		t.Fatalf("delivered %+v after Close, want nothing", got)
+	}
+}
+
+func TestCloseIsIdempotent(t *testing.T) {
+	q := asynchook.New(0, 0) // defaults
+	for range 3 {
+		q.Close()
+	}
+}
+
+func TestObserversShareTheQueue(t *testing.T) {
+	first, second := &recorder{}, &recorder{}
+	q := asynchook.New(2, 16)
+
+	q.Wrap(first).Observe(cascache.Event{Type: cascache.EventEntryRejected, Key: "first"})
+	q.Wrap(second).Observe(cascache.Event{Type: cascache.EventEntryRejected, Key: "second"})
+	q.Close()
+
+	if got := first.all(); len(got) != 1 || got[0].Key != "first" {
+		t.Fatalf("first observer got %+v", got)
+	}
+	if got := second.all(); len(got) != 1 || got[0].Key != "second" {
+		t.Fatalf("second observer got %+v", got)
 	}
 }

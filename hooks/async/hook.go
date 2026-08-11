@@ -1,129 +1,115 @@
-// usage:
-//
-// import (
-//
-//	"log/slog"
-//
-//	"github.com/unkn0wn-root/cascache/v3"
-//	"github.com/unkn0wn-root/cascache/v3/codec"
-//	"github.com/unkn0wn-root/cascache/v3/hooks/async"
-//	"github.com/unkn0wn-root/cascache/v3/hooks/slog"
-//	cascacheredis "github.com/unkn0wn-root/cascache/v3/redis"
-//
-// )
-//
-//	raw := sloghook.New(slog.Default(), sloghook.Options{
-//	    SelfHealEvery:   10, // sample logs: ~every 10th self-heal
-//	    BatchRejectEvery: 1,  // log every batch rejection
-//	})
-//
-// hooks := asynchook.New(raw, 1, 1000) // 1 worker; queue 1000 events
-// defer hooks.Close()
-//
-// sharedVersionStore, _ := cascacheredis.NewVersionStore(rdb)
-//
-//	cache, _ := cascache.New[User](cascache.Options[User]{
-//	    Namespace: "app:prod:user",
-//	    Provider:  provider,
-//	    Codec:     codec.JSON[User]{},
-//	    VersionStore:  sharedVersionStore,
-//	    Hooks:     hooks, // or `raw` if you don’t want async
-//	})
+// Package asynchook runs cascache observers outside cache operations. Its queue
+// is bounded and drops events instead of blocking producers.
 package asynchook
 
 import (
 	"sync"
 
-	"github.com/unkn0wn-root/cascache/v3"
-	"github.com/unkn0wn-root/cascache/v3/version"
+	"github.com/unkn0wn-root/cascache/v4"
+	"github.com/unkn0wn-root/cascache/v4/internal/typednil"
 )
 
-type Hooks struct {
-	inner  cascache.Hooks
-	q      chan func()
+const (
+	DefaultWorkers   = 1
+	DefaultQueueSize = 1024
+)
+
+// Keep the observer with its queued event.
+type queued struct {
+	observer cascache.Observer
+	event    cascache.Event
+}
+
+// Queue runs wrapped observers on background workers.
+type Queue struct {
+	events chan queued
+	stop   chan struct{}
 	wg     sync.WaitGroup
 	once   sync.Once
-	mu     sync.RWMutex
+
+	// Keep events open because submit may race with Close.
+	mu     sync.Mutex
 	closed bool
 }
 
-var _ cascache.Hooks = (*Hooks)(nil)
-
-func New(inner cascache.Hooks, workers, qlen int) *Hooks {
-	if inner == nil {
-		inner = cascache.NopHooks{}
-	}
+// New starts a Queue. Non-positive values use the defaults.
+func New(workers, queueSize int) *Queue {
 	if workers <= 0 {
-		workers = 1
+		workers = DefaultWorkers
 	}
-	if qlen <= 0 {
-		qlen = 1024
+	if queueSize <= 0 {
+		queueSize = DefaultQueueSize
 	}
 
-	h := &Hooks{inner: inner, q: make(chan func(), qlen)}
-	h.wg.Add(workers)
-	for range workers {
-		go func() {
-			defer h.wg.Done()
-			for f := range h.q {
-				f()
-			}
-		}()
+	q := &Queue{
+		events: make(chan queued, queueSize),
+		stop:   make(chan struct{}),
 	}
-	return h
+	for range workers {
+		q.wg.Add(1)
+		go q.work()
+	}
+	return q
 }
 
-func (h *Hooks) Close() {
-	h.once.Do(func() {
-		h.mu.Lock()
-		h.closed = true
-		close(h.q)
-		h.mu.Unlock()
-		h.wg.Wait()
+// Wrap returns an observer that delivers to inner on this queue's workers.
+// Observers wrapped by the same Queue share its capacity and its workers.
+func (q *Queue) Wrap(inner cascache.Observer) cascache.Observer {
+	if typednil.Is(inner) {
+		return nil
+	}
+	return cascache.ObserverFunc(func(e cascache.Event) {
+		q.submit(queued{observer: inner, event: e})
 	})
 }
 
-func (h *Hooks) try(f func()) {
-	h.mu.RLock()
-	if h.closed {
-		h.mu.RUnlock()
+// Close drains queued events and stops the workers. It is safe to call more
+// than once.
+func (q *Queue) Close() {
+	q.once.Do(func() {
+		q.mu.Lock()
+		q.closed = true
+		q.mu.Unlock()
+
+		close(q.stop)
+		q.wg.Wait()
+	})
+}
+
+func (q *Queue) submit(item queued) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.closed {
 		return
 	}
 	select {
-	case h.q <- f:
-	default: // drop
+	case q.events <- item:
+	default:
+		// Drop rather than block the cache operation.
 	}
-	h.mu.RUnlock()
 }
 
-func (h *Hooks) SelfHealSingle(k string, r cascache.SelfHealReason) {
-	h.try(func() { h.inner.SelfHealSingle(k, r) })
+func (q *Queue) work() {
+	defer q.wg.Done()
+	for {
+		select {
+		case item := <-q.events:
+			item.observer.Observe(item.event)
+		case <-q.stop:
+			q.drain()
+			return
+		}
+	}
 }
 
-func (h *Hooks) VersionAdvanceError(k version.CacheKey, err error) {
-	h.try(func() { h.inner.VersionAdvanceError(k, err) })
-}
-
-func (h *Hooks) LocalVersionStoreWithBatch() {
-	h.try(func() { h.inner.LocalVersionStoreWithBatch() })
-}
-
-func (h *Hooks) BatchRejected(ns string, n int, r cascache.BatchRejectReason) {
-	h.try(func() { h.inner.BatchRejected(ns, n, r) })
-}
-
-func (h *Hooks) ProviderSetRejected(k string, b bool) {
-	h.try(func() { h.inner.ProviderSetRejected(k, b) })
-}
-
-func (h *Hooks) VersionSnapshotError(n int, err error) {
-	h.try(func() { h.inner.VersionSnapshotError(n, err) })
-}
-
-func (h *Hooks) VersionCreateError(k version.CacheKey, err error) {
-	h.try(func() { h.inner.VersionCreateError(k, err) })
-}
-
-func (h *Hooks) InvalidateOutage(k string, be, de error) {
-	h.try(func() { h.inner.InvalidateOutage(k, be, de) })
+func (q *Queue) drain() {
+	for {
+		select {
+		case item := <-q.events:
+			item.observer.Observe(item.event)
+		default:
+			return
+		}
+	}
 }
