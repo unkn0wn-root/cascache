@@ -1,30 +1,47 @@
+// Package bigcache adapts BigCache as a cascache value store.
 package bigcache
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	bc "github.com/allegro/bigcache/v3"
 
-	pr "github.com/unkn0wn-root/cascache/v3/provider"
+	pr "github.com/unkn0wn-root/cascache/v4/provider"
 )
 
-// Note: BigCache has a global LifeWindow; it ignores per-entry TTLs passed to Set.
+// BigCache expires entries on one global LifeWindow and ignores the per-entry
+// TTLs cascache passes to Set. Size the LifeWindow as the longest a value may
+// be served for.
 type BigCache struct {
 	c *bc.BigCache
 }
 
-var _ pr.Provider = (*BigCache)(nil)
+var _ pr.Store = (*BigCache)(nil)
 
+// Config sizes the underlying cache and sets its one expiry window.
 type Config struct {
-	LifeWindow         time.Duration
-	CleanWindow        time.Duration
+	// LifeWindow is how long an entry lives. It applies to every entry.
+	LifeWindow time.Duration
+
+	// CleanWindow is how often expired entries are swept.
+	CleanWindow time.Duration
+
+	// MaxEntriesInWindow and MaxEntrySize size BigCache's initial allocation.
+	// Zero uses BigCache's defaults.
 	MaxEntriesInWindow int
 	MaxEntrySize       int
-	HardMaxCacheSizeMB int // ~ memory limit; 0 = unlimited
+
+	// HardMaxCacheSizeMB caps memory. Zero is unlimited.
+	HardMaxCacheSizeMB int
+
+	// Shards must be a power of two. Zero uses BigCache's default.
+	Shards int
 }
 
-func New(cfg Config) (*BigCache, error) {
+// New returns a BigCache-backed store. The context bounds only construction.
+func New(ctx context.Context, cfg Config) (*BigCache, error) {
 	conf := bc.DefaultConfig(cfg.LifeWindow)
 	if cfg.CleanWindow > 0 {
 		conf.CleanWindow = cfg.CleanWindow
@@ -38,7 +55,10 @@ func New(cfg Config) (*BigCache, error) {
 	if cfg.HardMaxCacheSizeMB > 0 {
 		conf.HardMaxCacheSize = cfg.HardMaxCacheSizeMB
 	}
-	c, err := bc.New(context.Background(), conf)
+	if cfg.Shards > 0 {
+		conf.Shards = cfg.Shards
+	}
+	c, err := bc.New(ctx, conf)
 	if err != nil {
 		return nil, err
 	}
@@ -47,19 +67,16 @@ func New(cfg Config) (*BigCache, error) {
 
 func (p *BigCache) Get(_ context.Context, key string) ([]byte, bool, error) {
 	b, err := p.c.Get(key)
-	if err == bc.ErrEntryNotFound {
+	if errors.Is(err, bc.ErrEntryNotFound) {
 		return nil, false, nil
 	}
-	return b, err == nil, err
+	if err != nil {
+		return nil, false, err
+	}
+	return b, true, nil
 }
 
-func (p *BigCache) Set(
-	_ context.Context,
-	key string,
-	value []byte,
-	_ int64,
-	_ time.Duration,
-) (bool, error) {
+func (p *BigCache) Set(_ context.Context, key string, value []byte, _ int64, _ time.Duration) (bool, error) {
 	// Per-entry TTL not supported; LifeWindow applies.
 	if err := p.c.Set(key, value); err != nil {
 		return false, err
@@ -68,7 +85,8 @@ func (p *BigCache) Set(
 }
 
 func (p *BigCache) Del(_ context.Context, key string) error {
-	if err := p.c.Delete(key); err != nil && err != bc.ErrEntryNotFound {
+	// Deleting a missing key satisfies the Store contract.
+	if err := p.c.Delete(key); err != nil && !errors.Is(err, bc.ErrEntryNotFound) {
 		return err
 	}
 	return nil
