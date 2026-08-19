@@ -1,12 +1,4 @@
-# Example
-
-This example shows a basic read and write flow with the current v3 API.
-
-It uses:
-
-- `SnapshotVersion` before the database read
-- `SetIfVersion` after the database read
-- `Invalidate` after a database write
+## Quickstart
 
 ```go
 package main
@@ -17,9 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/unkn0wn-root/cascache/v3"
-	"github.com/unkn0wn-root/cascache/v3/codec"
-	ristrettoprovider "github.com/unkn0wn-root/cascache/v3/provider/ristretto"
+	"github.com/unkn0wn-root/cascache/v4"
+	"github.com/unkn0wn-root/cascache/v4/backend"
+	"github.com/unkn0wn-root/cascache/v4/codec"
+	rp "github.com/unkn0wn-root/cascache/v4/provider/ristretto"
 )
 
 type User struct {
@@ -49,28 +42,18 @@ func (db *InMemoryDB) UpdateName(id, name string) error {
 
 type UserRepo struct {
 	DB    *InMemoryDB
-	Cache cascache.CAS[User]
+	Cache *cascache.Cache[User]
 }
 
 func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
-	if cached, ok, err := r.Cache.Get(ctx, id); err == nil && ok {
-		return cached, nil
-	}
-
-	version, err := r.Cache.SnapshotVersion(ctx, id)
-	if err != nil {
-		return User{}, err
-	}
-
-	user, err := r.DB.Get(id)
-	if err != nil {
-		return User{}, err
-	}
-
-	_, _ = r.Cache.SetIfVersion(ctx, id, user, version)
-	return user, nil
+	return r.Cache.Load(ctx, id, func(ctx context.Context) (User, error) {
+		return r.DB.Get(id)
+	})
 }
 
+// Update the database first, then invalidate the cache. This makes existing
+// cached copies unusable and prevents a concurrent load from writing an older
+// value back to the cache.
 func (r *UserRepo) UpdateName(ctx context.Context, id, name string) error {
 	if err := r.DB.UpdateName(id, name); err != nil {
 		return err
@@ -78,95 +61,109 @@ func (r *UserRepo) UpdateName(ctx context.Context, id, name string) error {
 	return r.Cache.Invalidate(ctx, id)
 }
 
-func newUserCache() (cascache.CAS[User], error) {
-	provider, err := ristrettoprovider.New(ristrettoprovider.Config{
+// newUserCache creates a cache for one process. Values and invalidation state
+// are both kept locally.
+func newUserCache() (*cascache.Cache[User], *backend.Local, error) {
+	store, err := rp.New(rp.Config{
 		NumCounters: 1_000_000,
 		MaxCost:     64 << 20,
 		BufferItems: 64,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return cascache.New(cascache.Options[User]{
+	b, err := backend.NewLocal(store, backend.LocalOptions{})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cache, err := cascache.New(cascache.Options[User]{
 		Namespace:  "user",
-		Provider:   provider,
+		Backend:    b,
 		Codec:      codec.JSON[User]{},
 		DefaultTTL: 5 * time.Minute,
-		BatchTTL:    5 * time.Minute,
 	})
+	if err != nil {
+		_ = b.Close()
+		return nil, nil, err
+	}
+	return cache, b, nil
 }
 
 func main() {
 	ctx := context.Background()
 
-	cache, err := newUserCache()
+	cache, b, err := newUserCache()
 	if err != nil {
 		panic(err)
 	}
-	defer cache.Close(ctx)
+	// The cache does not close the backend, so close it here.
+	defer b.Close()
 
 	db := &InMemoryDB{
 		m: map[string]User{
 			"42": {ID: "42", Name: "Linus"},
 		},
 	}
+
 	repo := &UserRepo{DB: db, Cache: cache}
 
 	u1, _ := repo.GetByID(ctx, "42")
-	fmt.Println("first read:", u1.Name)
+	fmt.Println("First read:", u1.Name)
 
 	_ = repo.UpdateName(ctx, "42", "Tommy Lee Jones")
 
 	u2, _ := repo.GetByID(ctx, "42")
-	fmt.Println("after update:", u2.Name)
+	fmt.Println("After update:", u2.Name)
 }
 ```
 
 Expected output:
 
 ```text
-first read: Linus
-after update: Tommy Lee Jones
+First read: Linus
+After update: Tommy Lee Jones
 ```
 
-## Batch example
+## Sharing invalidation state across replicas
+
+Keep the invalidation state in Redis while each replica stores values in local
+memory. Invalidating a key from one replica makes cached copies in every
+replica invalid:
 
 ```go
-func (r *UserRepo) GetMany(ctx context.Context, ids []string) (map[string]User, error) {
-	values, missing, err := r.Cache.GetMany(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-	if len(missing) == 0 {
-		return values, nil
-	}
+// import redisbackend "github.com/unkn0wn-root/cascache/v4/backend/redis"
 
-	versions, err := r.Cache.SnapshotVersions(ctx, missing)
-	if err != nil {
-		return nil, err
-	}
+b, err := redisbackend.NewShared(store, client, redisbackend.Options{})
+```
 
-	loaded := make([]User, 0, len(missing))
-	for _, id := range missing {
-		user, err := r.DB.Get(id)
-		if err != nil {
-			return nil, err
-		}
-		loaded = append(loaded, user)
-	}
+Nothing else changes. The replica that invalidates deletes only its own copy.
+Copies in other replicas no longer match the shared state and are discarded
+when read.
 
-	items := make([]cascache.VersionedValue[User], 0, len(loaded))
-	for _, user := range loaded {
-		items = append(items, cascache.VersionedValue[User]{
-			Key:     user.ID,
-			Value:   user,
-			Version: versions[user.ID],
-		})
-		values[user.ID] = user
-	}
+## Filling by hand
 
-	_, _ = r.Cache.SetIfVersions(ctx, items)
-	return values, nil
+`Load` covers the usual case. When you need your own write flow, take a snapshot
+before reading from the database:
+
+```go
+snapshot, err := cache.Snapshot(ctx, id)
+if err != nil {
+	return err
+}
+
+user, err := db.Get(id)
+if err != nil {
+	return err
+}
+
+res, err := cache.Set(ctx, id, user, snapshot)
+if err != nil {
+	return err
+}
+if res.Outcome == cascache.SetOutcomeConflict {
+	// The key was invalidated while we were reading. The value we loaded was
+	// already stale, so it was not cached. Nothing to do.
 }
 ```

@@ -1,174 +1,30 @@
-# CasCache
+# cascache
 
-**TL;DR**
+A Go cache that does not return a cached value after it has been invalidated.
 
-If you run multiple pods, replicas, or services that share a cache and you need to make sure a cached key always reflects the latest known state and not something a slow writer quietly overwrote three seconds ago - CasCache is built for that.
-It will not serve stale data and it will not let a late write silently win or override. When it cannot prove a value is current, it treats the entry as a miss instead of serving something outdated.
-
----
-
-Most caches treat writes as unconditional: you `SET` a value and it sticks until someone deletes it or it expires. That works fine until two requests overlap.
-
-1. request A reads a user record from the database
-2. while A is still working, request B updates that same record and invalidates the cache
-3. request A finishes and writes the now-outdated record back into the cache
-
-The cache now holds stale data and nobody knows. A `DEL` followed by a `SET` does not prevent this because nothing ties the `SET` back to the state that existed when the read started.
-
-CasCache fixes this by remembering what version of a key you saw before you started your work. When you try to write, it checks whether that version is still current. If something changed in between, the write is rejected. On reads, it checks again - a cached value is only served if it still matches the latest known version. If anything is off, the cache treats it as a miss.
-
-## Index
-
-- [Performance](#performance)
-  - [Single-key Redis operations](#single-key-redis-operations)
-  - [Batch operations](#batch-operations)
-  - [50,000 req/s target](#50000-reqs-target-mixed-workload-30-seconds)
-- [Why](#why)
-- [How it works](#how-it-works)
-  - [About source reads](#about-source-reads)
-  - [Read guards](#read-guards)
-- [Installation](#installation)
-- [Quick start](#quick-start)
-  - [Build a cache](#build-a-cache)
-  - [Read path](#read-path)
-  - [Write path](#write-path)
-- [Choosing a topology](#choosing-a-topology)
-- [Redis example](#redis-example)
-- [Batch APIs](#batch-apis)
-- [Providers](#providers)
-- [Codecs](#codecs)
-- [Hooks](#hooks)
-
-## Performance
-
-CasCache does more work than a plain cache. Here is what that costs, measured against plain Redis with the same codec and payload.
-
-### Single-key Redis operations
-
-| Operation | Plain Redis baseline | CasCache | Extra cost | Slower | Redis round trips |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Single read (`Get`) | ~26.4µs | ~26.9µs | +0.5µs | +1.8% | 1 with `redis.New`; 2 on the generic provider path |
-| Single write (`SetIfVersion`) | ~27.7µs | ~31.9µs | +4.2µs | +15.2% | 1 (Lua script, atomic) |
-| Snapshot then set | ~27.7µs | ~51.3µs | +23.6µs | +60.0% | 2 (snapshot + Lua conditional set) |
-| Invalidate | ~25.7µs | ~26.7µs | +1.1µs | +4.3% | 1 (Lua script, atomic) |
-
-With the Redis backend constructed by `redis.New`, single-key reads fetch the value and authoritative fence together. Generic provider wiring still reads the value and fence separately. Writes and invalidates use Lua scripts to stay atomic. `SnapshotVersion` plus `SetIfVersion` is the full safe fill-write sequence and is intentionally more expensive than a plain Redis `SET`.
-
-### Batch operations
-
-| Operation | Plain Redis baseline | CasCache | Extra cost | Slower | Redis round trips |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Batch get (32 small keys, p4) | ~142.1µs | ~175.5µs | +33.4µs | +23.5% | 2 (batch blob + `MGET` all fences) |
-| Batch get (32 medium keys, p4) | ~278.3µs | ~284.2µs | +5.9µs | +2.1% | 2 (batch blob + `MGET` all fences) |
-
-Batch reads amortize the fence-check cost across all keys with a single `MGET`. The percentage overhead is more visible for small payloads because the fixed validation work is spread over fewer bytes.
-
-### 50,000 req/s target (mixed workload, 30 seconds)
-
-Tested on `goos=darwin`, `goarch=arm64`, `cpu=Apple M4 Max`, using 5 API containers plus PostgreSQL and Redis. Both runs used the same mixed workload with a `50,000 req/s` offered load for `30s` and issued `1,500,000` requests. The comparison baseline here is ordinary Redis cache-aside: read miss -> load from Postgres -> store in Redis, write -> update Postgres -> delete the Redis entry.
-
-| Metric | CasCache | Redis cache-aside baseline |
-| --- | --- | --- |
-| p50 | 1.9ms | 0.8ms |
-| p95 | 22.9ms | 15.3ms |
-| p99 | 207.8ms | 201.2ms |
-| Max | 1337.1ms | 1091.6ms |
-| **Stale reads** | **0** | **195,461** |
-
-At p50 the gap is about `1.1ms` (`1.9ms` vs `0.8ms`). At p95 the gap is about `7.6ms` (`22.9ms` vs `15.3ms`). At p99 the gap is about `6.6ms` (`207.8ms` vs `201.2ms`). The Redis cache-aside baseline was faster in this run, but it served `195,461` stale reads while CasCache served `0`.
-
-## Why
-
-What you get:
-
-- a slow writer that finishes after an invalidate cannot silently overwrite the cache with outdated data
-- reads only serve values that still match the current version state, so your users do not see stale results just because something was cached
-- batch reads check every member before serving the batch, not just the batch key itself
-- if Redis or your backend has a bad moment, the cache degrades to misses or skipped writes instead of quietly serving data it cannot verify
-
-What CasCache does not try to solve:
-
-- if your "source-of-truth" write succeeds but `Invalidate` fails, the cache does not know the source moved forward
-- it does not prove that the value you just loaded from your database, api etc. was the newest one that existed anywhere - it only proves the cache entry still matches the last known version
-
-## How it works
-
-CasCache keeps authoritative version state for every logical key.
-
-The normal fill path is:
-
-1. `SnapshotVersion`
-2. do your service, app, business logic (db, API etc.)
-3. `SetIfVersion`
-
-Use `SetIfVersionWithTTL` only when you need to override the cache's default TTL for that write.
-
-The normal write path is:
-
-1. write where you want
-2. `Invalidate`
-
-That means the cache never trusts a value just because it exists. A value must still match the current version state when it is read.
-
-### About source reads
-
-CasCache guarantees cache freshness against its authoritative version state. It does not guarantee that the value you just loaded from a database or API was the newest value that existed anywhere.
-
-If a fill reads from a lagging database replica or an "eventually consistent" API, that request can still observe old data from the source. What CasCache prevents is that old data being accepted back into the cache after the key has moved to a new fence. Once version state changes, old cache entries stop validating on read and stale refill attempts are rejected on write.
-
-So the guarantee is closer to "no stale cache refill after a successful invalidate" than "the cache can prove your source read was globally current." If a path needs that stronger guarantee, the fill has to read from an authority that is fresh enough for your consistency model, or use `ReadGuard` / `BatchReadGuard` on critical read paths.
-
-### Read guards
-
-Most paths do **not** need a read guard. The normal version check already guarantees that once a key is invalidated, older cached bytes stop being valid.
-
-`ReadGuard` is a guard function you pass through options that the cache calls on every hit for a given key. At its simplest it is just extra cache-level logic - you look at the decoded value and decide whether it is still good enough to serve.
-The tradeoff comes when your guard calls another authority (API, DB, whatever). That is an extra I/O round trip per key, which means more pressure on that authority for every single cache hit and some extra lookup latency on the cache itself.
-For batch endpoints, use `BatchReadGuard` so a single source call can validate many keys at once instead of hitting the authority per member.
-
-Typical cases where a read guard makes sense:
-
-- fills come from a lagging replica or eventually consistent API, but one endpoint must only serve values confirmed by a primary or another authoritative source
-- the cached value carries a revision, timestamp, or some business state field that must still match source state before use
-
-Example:
+Every key has **invalidation state**, represented by a 128-bit token. Each
+cached value stores the token that was current when it was written. The value
+is returned only if that token is still current. Invalidating a key creates a
+new token, which makes existing cached copies invalid, including copies in
+other replicas. The `backend` package calls this token a *fence*.
 
 ```go
-type User struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	UpdatedAt time.Time `json:"updated_at"`
-}
-
-type UserMetaStore interface {
-	CurrentUpdatedAt(ctx context.Context, id string) (time.Time, error)
-}
-
-var meta UserMetaStore
-
-cache, err := cascache.New(cascache.Options[User]{
-	Namespace: "user",
-	Provider:  provider,
-	Codec:     codec.JSON[User]{},
-	ReadGuard: func(ctx context.Context, key string, cached User) (bool, error) {
-		current, err := meta.CurrentUpdatedAt(ctx, key)
-		if err != nil {
-			return false, err
-		}
-		return cached.UpdatedAt.Equal(current), nil
-	},
-})
+import "github.com/unkn0wn-root/cascache/v4"
 ```
 
-## Installation
+## Safe failure behavior
 
-```bash
-go get github.com/unkn0wn-root/cascache/v3
-```
+If the cache cannot confirm that a value is current, it treats the value as a
+miss. This includes invalidation state that is missing, expired or evicted, as
+well as failed cleanup. The value is loaded again instead of being returned.
+This works because tokens have no valid zero value and are never reused.
+
+Redis replica reads are the exception. Replication lag can return an old value
+and its matching old token, so the cache cannot tell that the data is outdated.
+The Redis backend rejects known replica-read configurations unless they are
+explicitly allowed.
 
 ## Quick start
-
-### Build a cache
 
 ```go
 package main
@@ -177,222 +33,295 @@ import (
 	"context"
 	"time"
 
-	"github.com/unkn0wn-root/cascache/v3"
-	"github.com/unkn0wn-root/cascache/v3/codec"
-	ristrettoprovider "github.com/unkn0wn-root/cascache/v3/provider/ristretto"
+	"github.com/unkn0wn-root/cascache/v4"
+	"github.com/unkn0wn-root/cascache/v4/backend"
+	"github.com/unkn0wn-root/cascache/v4/codec"
+	rp "github.com/unkn0wn-root/cascache/v4/provider/ristretto"
 )
 
 type User struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID   string
+	Name string
 }
 
-func newUserCache() (cascache.CAS[User], error) {
-	provider, err := ristrettoprovider.New(ristrettoprovider.Config{
+func newUserCache() (*cascache.Cache[User], *backend.Local, error) {
+	store, err := rp.New(rp.Config{
 		NumCounters: 1_000_000,
 		MaxCost:     64 << 20,
 		BufferItems: 64,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return cascache.New(cascache.Options[User]{
+	b, err := backend.NewLocal(store, backend.LocalOptions{})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cache, err := cascache.New(cascache.Options[User]{
 		Namespace:  "user",
-		Provider:   provider,
+		Backend:    b,
 		Codec:      codec.JSON[User]{},
 		DefaultTTL: 5 * time.Minute,
-		BatchTTL:   5 * time.Minute,
+	})
+	if err != nil {
+		_ = b.Close()
+		return nil, nil, err
+	}
+	return cache, b, nil
+}
+
+func readUser(ctx context.Context, cache *cascache.Cache[User], id string) (User, error) {
+	return cache.Load(ctx, id, func(ctx context.Context) (User, error) {
+		return db.ReadUser(ctx, id)
 	})
 }
-
-func main() {
-	cache, err := newUserCache()
-	if err != nil {
-		panic(err)
-	}
-	defer cache.Close(context.Background())
-}
 ```
 
-### Read path
+`Load` is the normal read path. If several callers request the same missing key
+at the same time, the cache runs the loader once and returns the result to all
+of them. If the loader returns a value, a cache read or write error does not
+hide it.
+
+After an invalidation completes, a later load will not return the old value. If
+a shared loader call started earlier and its result cannot be confirmed as
+current, the caller starts or joins another call. Changes made without calling
+`Invalidate` still depend on the TTL.
+
+A caller can stop waiting without canceling a loader call that other callers
+are still using. `Options.LoadTimeout` applies to each loader call, so it may
+apply twice when a value has to be loaded again. A loader panic is returned as
+a `*PanicError`, which unwraps to `ErrLoaderPanic` and includes the stack.
+
+## Invalidation
+
+Update the source first, then invalidate:
 
 ```go
-type UserStore interface {
-	Load(ctx context.Context, id string) (User, error)
+if err := db.UpdateUser(ctx, user); err != nil {
+	return err
 }
-
-type UserRepo struct {
-	Cache cascache.CAS[User]
-	Store UserStore
-}
-
-func (r *UserRepo) GetByID(ctx context.Context, id string) (User, error) {
-	if user, ok, err := r.Cache.Get(ctx, id); err != nil {
-		return User{}, err
-	} else if ok {
-		return user, nil
-	}
-
-	version, err := r.Cache.SnapshotVersion(ctx, id)
-	if err != nil {
-		return User{}, err
-	}
-
-	user, err := r.Store.Load(ctx, id)
-	if err != nil {
-		return User{}, err
-	}
-
-	// SetIfVersion returns (WriteResult, error). A version mismatch is not
-	// an error - it means another request invalidated this key while you were
-	// loading. The cache skips the write and the next reader will fill it
-	// with fresh data. Here we explicitly ignore the error and return value,
-	// but cascache gives you the possibility to handle them if you want to
-	// short-circuit, log, or react to a failed cache write.
-	_, _ = r.Cache.SetIfVersion(ctx, id, user, version)
-	return user, nil
-}
+return cache.Invalidate(ctx, user.ID)
 ```
 
-### Write path
+`Invalidate` updates the key's invalidation state before removing the cached
+value. This prevents a load already in progress from writing an older value
+back to the cache. Copies in other replicas also stop being returned, even if
+they have not been deleted yet.
+
+Retry if `Invalidate` returns an error. The invalidation state may not have
+changed, so the old value may still be returned. If the state changed but
+deleting the value failed, `Invalidate` does not return that cleanup error. The
+remaining value no longer passes the token check. The failure is reported as
+`EventCleanupFailed`, and a later read tries to remove the value again.
+
+A service that only invalidates values does not need their type or codec:
 
 ```go
-type UserWriter interface {
-	Save(ctx context.Context, user User) error
-}
-
-type UserWriteRepo struct {
-	Cache  cascache.CAS[User]
-	Writer UserWriter
-}
-
-func (r *UserWriteRepo) Save(ctx context.Context, user User) error {
-	if err := r.Writer.Save(ctx, user); err != nil {
-		return err
-	}
-
-	// Treat invalidate failures as real incidents.
-	return r.Cache.Invalidate(ctx, user.ID)
-}
+inv, err := cascache.NewInvalidator(cascache.InvalidatorOptions{
+	Namespace: "user",
+	Backend:   b,
+})
 ```
 
-## Choosing a topology
+`Cache.Invalidator()` returns the same handle for a cache you already have.
 
-CasCache can be used in a few different shapes.
-The right choice depends on where values live and whether replicas need shared freshness decisions.
+## Reads and writes by hand
 
-| Constructor | Use it when | Notes |
-| --- | --- | --- |
-| `cascache.New(...)` | values live in any supported provider and one process owns freshness decisions | default version store is local and in-process |
-| `cascache.New(...)` + `redis.NewVersionStore(...)` | values should stay outside Redis, but replicas must agree on freshness | common pattern for per-node Ristretto or BigCache plus shared Redis version state |
-| `redis.New(...)` | both values and version state should live in Redis | preferred Redis entry point; includes Redis-native single-key compare-and-write and invalidate |
-
-Use the lower-level Redis constructors only when you are intentionally composing a custom topology:
-
-- `redis.NewVersionStore(...)`
-- `redis.NewProvider(...)`
-- `redis.NewKeyMutator(...)`
-
-If values live in Redis, simply use `redis.New(...)` to make things easy for you.
-
-## Redis example
+To load and write a value manually, take the snapshot **before** reading the
+source:
 
 ```go
-package main
+snapshot, err := cache.Snapshot(ctx, key)
+if err != nil {
+	return err
+}
 
+value, err := loadFromSource(ctx, key)
+if err != nil {
+	return err
+}
+
+res, err := cache.Set(ctx, key, value, snapshot)
+```
+
+The order matters. If the key is invalidated between the snapshot and the
+write, the invalidation state changes and the write is refused. Taking the
+snapshot after reading the source could allow an older value to be cached.
+
+If the write is refused, `Set` returns `SetOutcomeConflict` rather than an
+error. The value was not cached because the key changed after the snapshot.
+
+## Backend setups
+
+The cache stores data through a `backend.Backend`. There are three common ways
+to configure it:
+
+```go
 import (
-	"context"
-	"time"
-
-	goredis "github.com/redis/go-redis/v9"
-
-	"github.com/unkn0wn-root/cascache/v3/codec"
-	cascacheredis "github.com/unkn0wn-root/cascache/v3/redis"
+	"github.com/unkn0wn-root/cascache/v4/backend"
+	redisbackend "github.com/unkn0wn-root/cascache/v4/backend/redis"
 )
 
-type User struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
+// One process: values and invalidation state both in memory.
+b, _ := backend.NewLocal(store, backend.LocalOptions{})
 
-func newRedisUserCache() error {
-	rdb := goredis.NewClient(&goredis.Options{
-		Addr: "127.0.0.1:6379",
-	})
+// Many replicas, sharing values and invalidation state in Redis. Each atomic
+// operation uses one server-side script.
+b, _ := redisbackend.New(client, redisbackend.Options{})
 
-	cache, err := cascacheredis.New(cascacheredis.Options[User]{
-		Namespace:  "user",
-		Client:     rdb,
-		Codec:      codec.JSON[User]{},
-		DefaultTTL: 5 * time.Minute,
-		BatchTTL:   5 * time.Minute,
-	})
-	if err != nil {
-		return err
-	}
-	defer cache.Close(context.Background())
+// Many replicas, each keeping values in memory with shared invalidation state.
+// Reads stay in the process, but invalidation applies to every copy.
+b, _ := redisbackend.NewShared(store, client, redisbackend.Options{})
+```
 
-	return nil
+`backend/redis` is the Redis *backend*. `provider/redis` is only a plain value
+store. When values and invalidation state live in the same Redis, prefer
+`backend/redis.New`, which needs fewer round trips and updates them atomically.
+
+With `NewShared`, each replica can delete only its own in-memory copy. Copies in
+other replicas no longer match the shared invalidation state and are discarded
+when they are read.
+
+## Redis reads must go to the primary
+
+The Redis client passed to CASCache **must route reads to the current primary**.
+After an invalidation, a lagging replica may still return both the old value and
+its matching old fence. The fence check succeeds even though the data is old,
+so CASCache may return it.
+
+Replication is still recommended for high availability. Replicas may be
+promoted during failover; CASCache operations must simply use whichever node is
+the current primary. A cache error or source reload during failover is safe. A
+read from a lagging replica is not.
+
+The examples below import `github.com/redis/go-redis/v9` as `goredis`.
+
+For standalone or managed Redis, use the primary or writer endpoint, never a
+reader endpoint:
+
+```go
+client := goredis.NewClient(&goredis.Options{
+	Addr: "redis-primary:6379",
+})
+```
+
+With Sentinel, use primary discovery and leave `ReplicaOnly` false:
+
+```go
+client := goredis.NewFailoverClient(&goredis.FailoverOptions{
+	MasterName:    "mymaster",
+	SentinelAddrs: []string{"sentinel-1:26379", "sentinel-2:26379"},
+	ReplicaOnly:   false,
+})
+```
+
+With Redis Cluster, leave every replica-read option false:
+
+```go
+client := goredis.NewClusterClient(&goredis.ClusterOptions{
+	Addrs: []string{"redis-1:6379", "redis-2:6379", "redis-3:6379"},
+
+	ReadOnly:       false,
+	RouteByLatency: false,
+	RouteRandomly:  false,
+})
+```
+
+The same fields must remain false on `goredis.UniversalOptions`. In Sentinel
+mode, its `ReadOnly` field becomes `ReplicaOnly`. `RouteByLatency` and
+`RouteRandomly` automatically enable replica reads for Cluster clients.
+
+Prefer `typed.NewRedis` for application caches; it does not expose an option to
+permit replica reads. When using `redisbackend.New` or
+`redisbackend.NewShared`, leave `AllowReplicaReads` false and treat
+`redisbackend.ErrReplicaReads` as a startup configuration failure. CASCache can
+detect known `goredis.ClusterClient` replica-read settings, but it cannot detect
+a managed-service reader endpoint, an external read-routing proxy, or every
+custom/Sentinel configuration.
+
+You can also provide your own backend. `backend.Backend` documents the required
+behavior. Use `backendtest.TestBackend` to check your implementation.
+`backend.FenceStore` and `backend.NewComposite` are for custom backends. Most
+cache users do not need them.
+
+## Invalidation lifetime
+
+Invalidation state may expire. If it is missing, the cache returns a miss. Its
+lifetime therefore affects the hit rate, not whether old data can be returned.
+The built-in backends give it a limited lifetime by default.
+
+The invalidation state must live at least as long as the cached value. The
+backend enforces this by shortening the value's TTL when needed and reports the
+TTL it applied:
+
+```go
+res, _ := cache.SetWithTTL(ctx, key, value, snapshot, 48*time.Hour)
+res.EffectiveTTL // clamped to the invalidation lifetime
+```
+
+Track `RejectStateMissing` in your metrics. Frequent events mean values are
+being discarded because their invalidation state is missing, which lowers the
+hit rate.
+
+## Monitoring
+
+Cache events are sent to an `Observer`:
+
+```go
+cascache.Options[User]{
+	Observer: cascache.ObserverFunc(func(e cascache.Event) {
+		log.Printf("%s %s %s: %v", e.Type, e.Op, e.Reason, e.Err)
+	}),
 }
 ```
 
-## Batch APIs
+`hooks/slog` logs events and redacts keys by default. `hooks/async` runs an
+observer from a bounded background queue instead of inside the cache call.
+`MultiObserver` combines several observers. New event types may be added, so
+ignore unknown types rather than treating them as errors.
 
-CasCache also supports grouped batch entries:
+`Options.OnLoad` reports completed loads separately, including hits, misses,
+writes attributed to the load, and timing.
 
-- `GetMany`
-- `SnapshotVersions`
-- `SetIfVersions`
-- `SetIfVersionsWithTTL` when you need a per-call TTL override
+## Typed keys
 
-On read, the cache tries the batch entry first but checks every member against current version state before serving it. If any member is stale, undecodable, or missing, the whole batch is rejected and the cache falls back to single-key reads.
+`typed` adds keys of your own type, jittered TTLs and metrics:
 
-On write, a batch stores all members as one combined value, but each member is still checked individually. Writing as a batch does not make the write atomic across keys.
+```go
+cache, err := typed.NewRedis(client, typed.Options[uuid.UUID, Frame]{
+	Config: typed.Config{
+		Namespace: "device-gw:family",
+		MaxTTL:    10 * time.Minute,
+		MinTTL:    8 * time.Minute,
+		Jitter:    0.2,
+		Metrics:   metrics,
+	},
+	KeyFunc: func(id uuid.UUID) string { return id.String() },
+	Codec:   codec.JSON[Frame]{},
+})
+```
 
-The default seed behavior is:
+Jitter spreads expiration times, so entries written together do not all reload
+at once.
 
-- `BatchReadSeedOff`
-- `BatchWriteSeedStrict`
+## Ownership
 
-That keeps reads simple by default and preserves per-key CAS checks when singles are materialized after a successful batch write.
+The cache does not close anything passed to it. You are responsible for closing
+backends, stores, and Redis clients. `backend.Local` runs a cleanup goroutine,
+so close it when you are done. Closing it does not close the value store.
 
-## Providers
+## Storage layout
 
-This repository currently includes:
+An entry occupies two keys that share a Redis Cluster hash tag, so one MGET or
+one script can touch the pair:
 
-- `provider/ristretto`
-- `provider/bigcache`
-- `redis` as a Redis-backed provider and full Redis topology
+```
+cas:v4:val:{tag}:s:<len(namespace)>:<namespace>:<key>
+cas:v4:fen:{tag}:s:<len(namespace)>:<namespace>:<key>
+```
 
-Provider notes:
-
-- Ristretto may reject writes under pressure; CasCache reports that as `provider_rejected`
-- BigCache ignores per-entry TTL and uses its global `LifeWindow`
-- Redis supports per-entry TTL and the Redis-native single-key mutation path
-
-## Codecs
-
-- `codec.JSON`
-- `codec.NewCBOR` / `codec.MustCBOR`
-- `codec.Msgpack`
-- `codec.NewProtobuf`
-- `codec.Bytes`
-- `codec.String`
-
-## Hooks
-
-CasCache exposes a small hook surface for operational events such as:
-
-- self-healed corrupt or stale entries
-- rejected batches
-- provider write rejections
-- version-store snapshot and bump errors
-- invalidate outages
-
-Helpful but totaly optional packages:
-
-- `hooks/slog` for structured logging
-- `hooks/async` for non-blocking hook fan-out
-
-Hooks should stay cheap and non-blocking. If they can block, wrap them in `hooks/async`.
+The `v4` prefix identifies the storage layout version, not the module version.
+Encoding the namespace length prevents collisions between caches that share a
+store.

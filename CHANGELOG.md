@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [4.0.0] - Unreleased
+
+### Breaking changes
+
+* move the module to `github.com/unkn0wn-root/cascache/v4`
+* replace the v3 implementation with the new cache, backend, and snapshot APIs
+* remove the batch and read-guard APIs
+* use `cas:v4` storage keys and version 4 wire frames
+
+### Features
+
+* add `Load` with shared work for concurrent cache misses
+* add local, Redis, and shared Redis backends
+* add standalone invalidation, typed keys, metrics, and observer hooks
+
 ### [3.2.1](https://github.com/unkn0wn-root/cascache/compare/v3.1.3...v3.2.1) (2026-05-27)
 
 
