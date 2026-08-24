@@ -1,6 +1,7 @@
 package typed
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -67,6 +68,21 @@ func (m Metrics) observer() cascache.Observer {
 		return nil
 	}
 	return cascache.ObserverFunc(m.observe)
+}
+
+// Build a load callback only when a load metric is set.
+// A nil one lets the core skip its own reporting too, not just this dispatch.
+func (m Metrics) loadFunc() cascache.LoadFunc {
+	if m.Hit == nil && m.Miss == nil &&
+		m.Fill == nil && m.SetSkipped == nil &&
+		m.Error == nil && m.Load == nil &&
+		m.LoadFailed == nil && m.LoadCanceled == nil &&
+		m.LoadReloaded == nil {
+		return nil
+	}
+	return func(_ context.Context, info cascache.LoadInfo) {
+		m.observeLoad(info)
+	}
 }
 
 func (m Metrics) observe(e cascache.Event) {

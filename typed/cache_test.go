@@ -536,6 +536,77 @@ func TestInvalidatorRetiresThroughTheSameKeyFunc(t *testing.T) {
 	}
 }
 
+// failingInvalidate is a backend whose invalidations fail; everything else
+// behaves normally.
+type failingInvalidate struct {
+	backend.Backend
+	err error
+}
+
+func (b failingInvalidate) Invalidate(
+	context.Context,
+	backend.Key,
+	backend.Fence,
+) (backend.InvalidateResult, error) {
+	return backend.InvalidateResult{}, b.err
+}
+
+func TestInvalidatorRecordsTheSameMetricsAsTheCache(t *testing.T) {
+	ctx := context.Background()
+	failing := errors.New("store is down")
+
+	c := &counters{}
+	newInvalidator := func(b backend.Backend) *typed.Invalidator[string] {
+		t.Helper()
+		cache, err := typed.New(typed.Options[string, user]{
+			Config: typed.Config{
+				Namespace: "user", MaxTTL: time.Hour, Metrics: c.metrics(),
+			},
+			KeyFunc: func(k string) string { return k },
+			Codec:   codec.JSON[user]{},
+			Backend: b,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cache.Invalidator()
+	}
+
+	working := newBackend(t, memstore.New(memstore.Options{}))
+	if err := newInvalidator(working).Invalidate(ctx, "42"); err != nil {
+		t.Fatalf("Invalidate: %v", err)
+	}
+	if got := c.snapshot().invalidated; got != 1 {
+		t.Fatalf("invalidated = %d, want 1", got)
+	}
+
+	broken := newInvalidator(failingInvalidate{Backend: working, err: failing})
+	if err := broken.Invalidate(ctx, "42"); !errors.Is(err, failing) {
+		t.Fatalf("Invalidate = %v, want the failure", err)
+	}
+
+	got := c.snapshot()
+	if got.invalidated != 1 {
+		t.Fatalf("invalidated = %d, want the failed call not to count", got.invalidated)
+	}
+	if len(got.errs) != 1 || got.errs[0] != cascache.OpInvalidate {
+		t.Fatalf("errors = %v, want one %v", got.errs, cascache.OpInvalidate)
+	}
+}
+
+// A disabled cache does nothing, so its invalidator records nothing.
+func TestDisabledInvalidatorRecordsNothing(t *testing.T) {
+	ctx := context.Background()
+	cache, c, _ := newCache(t, func(o *typed.Options[string, user]) { o.Disabled = true })
+
+	if err := cache.Invalidator().Invalidate(ctx, "42"); err != nil {
+		t.Fatalf("Invalidate: %v", err)
+	}
+	if got := c.snapshot().invalidated; got != 0 {
+		t.Fatalf("invalidated = %d, want 0", got)
+	}
+}
+
 func onlyEntry(t testing.TB, store *memstore.Store) (string, []byte) {
 	t.Helper()
 

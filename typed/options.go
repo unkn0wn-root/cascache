@@ -1,7 +1,6 @@
 package typed
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -87,8 +86,6 @@ func (opts Options[K, V]) coreOptions(b backend.Backend) cascache.Options[V] {
 		LoadTimeout:    opts.LoadTimeout,
 		Disabled:       opts.Disabled,
 		Observer:       cascache.MultiObserver(opts.Observer, opts.Metrics.observer()),
-		OnLoad: func(_ context.Context, info cascache.LoadInfo) {
-			opts.Metrics.observeLoad(info)
-		},
+		OnLoad:         opts.Metrics.loadFunc(),
 	}
 }
