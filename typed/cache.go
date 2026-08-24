@@ -159,16 +159,38 @@ func (c *Cache[K, V]) Invalidate(ctx context.Context, key K) error {
 // Invalidator returns a handle that invalidates this cache's keys without
 // knowing its value type. Keys still go through this cache's KeyFunc.
 func (c *Cache[K, V]) Invalidator() *Invalidator[K] {
-	return &Invalidator[K]{inv: c.cache.Invalidator(), key: c.key}
+	return &Invalidator[K]{
+		inv:           c.cache.Invalidator(),
+		key:           c.key,
+		onError:       c.metrics.Error,
+		onInvalidated: c.metrics.Invalidated,
+	}
 }
 
-// Invalidator retires entries of a cache whose value type it does not know.
+// Invalidator retires entries of a cache whose value type it does not know. It
+// keeps the two callbacks it records rather than the whole [Metrics].
 type Invalidator[K comparable] struct {
-	inv *cascache.Invalidator
-	key func(K) string
+	inv           *cascache.Invalidator
+	key           func(K) string
+	onError       func(cascache.Op, error)
+	onInvalidated func()
 }
 
-// Invalidate makes the cached value for key unusable.
+// Invalidate makes the cached value for key unusable. It records the same
+// metrics [Cache.Invalidate] does.
 func (i *Invalidator[K]) Invalidate(ctx context.Context, key K) error {
-	return i.inv.Invalidate(ctx, i.key(key))
+	if !i.inv.Enabled() {
+		return nil
+	}
+
+	if err := i.inv.Invalidate(ctx, i.key(key)); err != nil {
+		if i.onError != nil {
+			i.onError(cascache.OpInvalidate, err)
+		}
+		return err
+	}
+	if i.onInvalidated != nil {
+		i.onInvalidated()
+	}
+	return nil
 }
