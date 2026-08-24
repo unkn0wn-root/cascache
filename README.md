@@ -325,3 +325,39 @@ cas:v4:fen:{tag}:s:<len(namespace)>:<namespace>:<key>
 The `v4` prefix identifies the storage layout version, not the module version.
 Encoding the namespace length prevents collisions between caches that share a
 store.
+
+## Benchmarks
+
+The benchmarks in [`_benchmarks`](_benchmarks/README.md) use one cached
+256-byte value. The local cases use a simple in-memory store. These results are
+the median of 5 x 1s runs on an Apple M4 Max with Go 1.26.0.
+Redis 8.10.1 was running in Docker on the same machine.
+
+### Read
+
+| Read | ns/op | B/op | allocs/op |
+| --- | ---: | ---: | ---: |
+| CASCache local | 215 | 704 | 5 |
+| CASCache Redis | 142,360 | 1,392 | 19 |
+| Plain Redis `GET` | 131,714 | 456 | 6 |
+
+### Set
+
+| Set | ns/op | B/op | allocs/op |
+| --- | ---: | ---: | ---: |
+| CASCache local | 225 | 736 | 5 |
+| CASCache Redis | 142,487 | 1,032 | 20 |
+| Plain Redis `SET` | 136,250 | 258 | 8 |
+
+### Invalidate
+
+| Invalidate | ns/op | B/op | allocs/op |
+| --- | ---: | ---: | ---: |
+| CASCache local | 121 | 176 | 3 |
+| CASCache Redis | 119,179 | 672 | 18 |
+| Plain Redis `DEL` | 133,926 | 168 | 6 |
+
+The Redis results are close enough to treat as the same range on this setup.
+Most of their time is spent on the trip to Redis. Plain Redis `DEL` does not
+provide the same invalidation behavior as CASCache. Run the benchmarks on the
+same machine before and after a change when you want to compare versions.

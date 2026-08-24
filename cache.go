@@ -167,9 +167,12 @@ func (c *Cache[V]) Invalidate(ctx context.Context, key string) error {
 }
 
 // Invalidator returns a handle that can invalidate keys without knowing V.
-func (c *Cache[V]) Invalidator() *Invalidator                { return c.inv }
-func (c *Cache[V]) observe(e Event)                          { c.inv.observe(e) }
+func (c *Cache[V]) Invalidator() *Invalidator { return c.inv }
+
+func (c *Cache[V]) observe(e Event) { c.inv.observe(e) }
+
 func (c *Cache[V]) opErr(op Op, key string, err error) error { return c.inv.opErr(op, key, err) }
+
 func (c *Cache[V]) observePanic(key string, value any, stack []byte) {
 	c.observe(Event{
 		Type: EventLoaderPanic,
