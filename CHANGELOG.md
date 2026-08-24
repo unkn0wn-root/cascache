@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.0.1](https://github.com/unkn0wn-root/cascache/compare/v4.0.0...v4.0.1) (2026-08-24)
+
+
+### Bug Fixes
+
+* **typed:** report metrics from invalidator handles ([d8e1ab1](https://github.com/unkn0wn-root/cascache/commit/d8e1ab1fbdf1f472aff5e26d7b141ac27264bfea))
+
 ## [4.0.0](https://github.com/unkn0wn-root/cascache/compare/v3.2.1...v4.0.0) (2026-08-24)
 
 
