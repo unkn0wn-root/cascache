@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [4.0.0](https://github.com/unkn0wn-root/cascache/compare/v3.2.1...v4.0.0) (2026-08-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cache:** add snapshot-based cache operations
+* **storage:** replace v3 storage with v4 keys
+* initialize the v4 module
+
+### Features
+
+* add simple benchmarks ([ac00f4d](https://github.com/unkn0wn-root/cascache/commit/ac00f4deebde16bdfbc423552c116a470cdae49f))
+* add typed caches, codecs, and providers ([a93537a](https://github.com/unkn0wn-root/cascache/commit/a93537a1fd41975492467829d43b1d8c1da1933e))
+* **backend:** add fence-aware backend contracts ([1d88033](https://github.com/unkn0wn-root/cascache/commit/1d880333992d35988f224c0937b49ba02bc9d8ee))
+* **cache:** add snapshot-based cache operations ([f8cb008](https://github.com/unkn0wn-root/cascache/commit/f8cb0080d32d1cb6c18f02c078906b68971e477c))
+* **load:** add coordinated loading and invalidation ([3b83efd](https://github.com/unkn0wn-root/cascache/commit/3b83efde99cf5b62b591f97f6dc627161d988afe))
+* **storage:** replace v3 storage with v4 keys ([d2675a2](https://github.com/unkn0wn-root/cascache/commit/d2675a2165e5a28e2973612fb39311cb90a21517))
+
+
+* initialize the v4 module ([7cff411](https://github.com/unkn0wn-root/cascache/commit/7cff4114b4e282f115a553e615740d8882ff621b))
+
 ### [3.2.1](https://github.com/unkn0wn-root/cascache/compare/v3.1.3...v3.2.1) (2026-05-27)
 
 
