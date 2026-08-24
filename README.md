@@ -1,6 +1,8 @@
 # cascache
 
 A Go cache that does not return a cached value after it has been invalidated.
+Values can be stored in process or in Redis. Replicated services can also keep
+values in process while sharing invalidation state through Redis.
 
 Every key has **invalidation state**, represented by a 128-bit token. Each
 cached value stores the token that was current when it was written. The value
@@ -11,6 +13,23 @@ other replicas. The `backend` package calls this token a *fence*.
 ```go
 import "github.com/unkn0wn-root/cascache/v4"
 ```
+
+> [!WARNING]
+> v4 is a complete redesign. If you're coming from v3, expect these breaking
+> changes:
+>
+> - The module path is now `github.com/unkn0wn-root/cascache/v4`.
+> - The cache API is built around `Cache[V]`, `Load`, `Snapshot`, and `Set`.
+>   Constructors, options, reads, and writes have changed.
+> - The batch and read-guard APIs have been removed.
+> - Backend contracts now live under `backend`, and Redis backends live under
+>   `backend/redis`. The old `redis` and `version` packages have been removed.
+> - Storage keys use the `cas:v4` prefix and entries use wire format version 4,
+>   so cached v3 entries are not reused.
+>
+> v4 is now the stable, long-lived API. Fixes and compatible
+> additions may be released within v4, but any future breaking API change would
+> require a new major version.
 
 ## Why
 
