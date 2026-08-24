@@ -9,25 +9,20 @@ import "fmt"
 // Typical use: protect against oversized/malicious inputs coming from a
 // shared cache or untrusted source.
 type LimitCodec[V any] struct {
-	// Inner is the underlying codec being wrapped. It must be set.
+	// Inner is the underlying codec being wrapped. It must be set; a nil Inner
+	// panics on first use.
 	Inner Codec[V]
+
 	// MaxDecode is the maximum permitted length (in bytes) of the incoming
 	// payload for Decode. If payload length exceeds MaxDecode, Decode returns
 	// an error without invoking Inner.
 	MaxDecode int
 }
 
-func (c LimitCodec[V]) Encode(v V) ([]byte, error) {
-	if c.Inner == nil {
-		return nil, ErrNilInnerCodec
-	}
-	return c.Inner.Encode(v)
-}
+var _ Codec[struct{}] = LimitCodec[struct{}]{}
+
+func (c LimitCodec[V]) Encode(v V) ([]byte, error) { return c.Inner.Encode(v) }
 func (c LimitCodec[V]) Decode(b []byte) (V, error) {
-	if c.Inner == nil {
-		var zero V
-		return zero, ErrNilInnerCodec
-	}
 	if c.MaxDecode > 0 && len(b) > c.MaxDecode {
 		var zero V
 		return zero, fmt.Errorf("payload too large: %d > %d", len(b), c.MaxDecode)

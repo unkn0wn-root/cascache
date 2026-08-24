@@ -1,227 +1,183 @@
 package cascache
 
 import (
+	"cmp"
 	"context"
-	"errors"
-	"fmt"
 	"time"
 
-	c "github.com/unkn0wn-root/cascache/v3/codec"
-	keyutil "github.com/unkn0wn-root/cascache/v3/internal/keys"
-	pr "github.com/unkn0wn-root/cascache/v3/provider"
-	"github.com/unkn0wn-root/cascache/v3/version"
+	"github.com/unkn0wn-root/cascache/v4/backend"
+	"github.com/unkn0wn-root/cascache/v4/codec"
+	"github.com/unkn0wn-root/cascache/v4/internal/flight"
+	"github.com/unkn0wn-root/cascache/v4/internal/keyspace"
+	"github.com/unkn0wn-root/cascache/v4/internal/typednil"
 )
 
-type cache[V any] struct {
-	ns       string
-	space    keyutil.Keyspace
-	provider pr.Provider
-	codec    c.Codec[V]
+// Cache stores values of type V and serves one only while no invalidation has
+// retired it. It is safe for concurrent use if its codec and callbacks are. The
+// caller owns its dependencies.
+type Cache[V any] struct {
+	// Invalidation does not depend on V.
+	inv *Invalidator
 
-	// Hooks receives operational notifications such as self-heals and
-	// version-store errors.
-	hooks   Hooks
-	enabled bool // When false, reads miss and writes are dropped.
+	codec      codec.Codec[V]
+	ttl        time.Duration
+	cost       SetCostFunc
+	computeTTL TTLFunc
+	onLoad     LoadFunc
 
-	defaultTTL time.Duration
-	batchTTL   time.Duration
-
-	computeSetCost SetCostFunc
-	versionStore   version.Store
-	adder          pr.Adder
-	readGuard      ReadGuardFunc[V]
-	batchReadGuard BatchReadGuardFunc[V]
-	keyReader      KeyReader
-	keyWriter      KeyWriter
-	keyInvalidator KeyInvalidator
-
-	// When false, reads fall back to per-key lookups and batch writes are skipped.
-	batchEnabled   bool
-	batchSeed      BatchReadSeedMode
-	batchWriteSeed BatchWriteSeedMode
+	fills flight.Group[fillResult[V]]
 }
 
-func newCache[V any](opts Options[V]) (*cache[V], error) {
-	if opts.Provider == nil {
-		return nil, fmt.Errorf("provider is required")
-	}
-	if opts.Codec == nil {
-		return nil, fmt.Errorf("codec is required")
-	}
-	if opts.Namespace == "" {
-		return nil, fmt.Errorf("namespace is required")
+// New creates a cache. The zero Cache is not usable.
+func New[V any](opts Options[V]) (*Cache[V], error) {
+	if err := opts.Validate(); err != nil {
+		return nil, err
 	}
 
-	c := &cache[V]{
-		ns:       opts.Namespace,
-		space:    keyutil.NewKeyspace(opts.Namespace),
-		provider: opts.Provider,
-		codec:    opts.Codec,
-		enabled:  !opts.Disabled,
+	c := &Cache[V]{
+		inv: &Invalidator{
+			space:    keyspace.New(opts.Namespace),
+			backend:  opts.Backend,
+			disabled: opts.Disabled,
+			observer: nilIfNil(opts.Observer),
+		},
+		codec:      opts.Codec,
+		ttl:        cmp.Or(opts.DefaultTTL, DefaultEntryTTL),
+		cost:       opts.ComputeSetCost,
+		computeTTL: opts.ComputeTTL,
+		onLoad:     opts.OnLoad,
+	}
+	if c.cost == nil {
+		c.cost = func(string, []byte) int64 { return 1 }
+	}
+	if c.computeTTL == nil {
+		c.computeTTL = func() (time.Duration, error) { return c.ttl, nil }
 	}
 
-	c.hooks = coalesce[Hooks](opts.Hooks, NopHooks{})
-	c.defaultTTL = coalesce(opts.DefaultTTL, 10*time.Minute)
-	c.batchTTL = coalesce(opts.BatchTTL, 10*time.Minute)
-
-	if opts.ComputeSetCost != nil {
-		c.computeSetCost = opts.ComputeSetCost
-	} else {
-		c.computeSetCost = func(_ string, _ []byte, _ bool, _ int) int64 { return 1 }
-	}
-
-	if opts.VersionStore != nil {
-		c.versionStore = opts.VersionStore
-	} else {
-		c.versionStore = version.NewLocal()
-	}
-
-	c.readGuard = opts.ReadGuard
-	c.batchReadGuard = opts.BatchReadGuard
-	c.batchEnabled = !opts.DisableBatch
-
-	if adder, ok := opts.Provider.(pr.Adder); ok {
-		c.adder = adder
-	}
-	if c.batchEnabled && opts.BatchReadSeed == BatchReadSeedIfMissing {
-		if c.adder == nil {
-			return nil, ErrBatchReadSeedNeedsAdder
-		}
-	}
-
-	c.batchSeed = opts.BatchReadSeed
-	c.batchWriteSeed = opts.BatchWriteSeed
-	if c.batchEnabled && isLocalVersionStore(c.versionStore) {
-		c.hooks.LocalVersionStoreWithBatch()
-	}
-
-	c.keyReader = opts.KeyReader
-	c.keyWriter = opts.KeyWriter
-	c.keyInvalidator = opts.KeyInvalidator
+	c.fills.Timeout = opts.LoadTimeout
+	c.fills.OnPanic = c.observePanic
 
 	return c, nil
 }
 
-// Enabled reports whether the cache is active.
-// When disabled, every Get returns a miss and every write is silently dropped.
-func (c *cache[V]) Enabled() bool { return c.enabled }
+// Catch typed nils during construction.
+func isNil(v any) bool { return typednil.Is(v) }
 
-// Close shuts down the version store then the provider.
-func (c *cache[V]) Close(ctx context.Context) error {
-	var errs []error
-	if c.versionStore != nil {
-		errs = append(errs, c.versionStore.Close(ctx))
+// Flatten typed nils so call sites need one nil check.
+func nilIfNil(o Observer) Observer {
+	if isNil(o) {
+		return nil
 	}
-	if c.provider != nil {
-		errs = append(errs, c.provider.Close(ctx))
-	}
-	return errors.Join(errs...)
+	return o
 }
 
-// loadSnapshot reads authoritative version state for one key. This is the
-// single point where per-key version-store errors are translated into hook calls,
-// so every caller gets consistent observability without duplicating that logic.
-func (c *cache[V]) loadSnapshot(ctx context.Context, cacheKey version.CacheKey) (version.Snapshot, error) {
-	snap, err := c.versionStore.Snapshot(ctx, cacheKey)
+// Enabled reports whether the cache stores and serves values.
+func (c *Cache[V]) Enabled() bool { return c != nil && !c.inv.disabled }
+
+// Get returns the cached value for key, if one is present and still current.
+// Invalid or outdated entries are misses and are removed when possible. Backend
+// read failures are returned as errors.
+func (c *Cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
+	var zero V
+	if c.inv.disabled {
+		return zero, false, nil
+	}
+
+	bkey := c.inv.space.Key(key)
+	r, err := c.inv.backend.Read(ctx, bkey)
 	if err != nil {
-		c.hooks.VersionSnapshotError(1, err)
-		return version.Snapshot{}, err
+		return zero, false, c.opErr(OpGet, key, err)
 	}
-	return snap, nil
+
+	e := c.decode(ctx, key, bkey, r)
+	return e.val, e.ok, nil
 }
 
-func (c *cache[V]) createSnapshot(ctx context.Context, cacheKey version.CacheKey) (version.Snapshot, bool, error) {
-	snap, created, err := c.versionStore.CreateIfMissing(ctx, cacheKey)
+// Snapshot returns the invalidation state to pair with [Cache.Set]. Take it
+// immediately before reading the source. An invalidation during that read makes
+// the snapshot stale and causes the later write to be refused.
+func (c *Cache[V]) Snapshot(ctx context.Context, key string) (Snapshot, error) {
+	if c.inv.disabled {
+		return Snapshot{}, nil
+	}
+
+	fence, err := c.inv.backend.Ensure(ctx, c.inv.space.Key(key), backend.NewFence())
 	if err != nil {
-		c.hooks.VersionCreateError(cacheKey, err)
-		return version.Snapshot{}, false, err
+		return Snapshot{}, c.opErr(OpSnapshot, key, err)
 	}
-	return snap, created, nil
+	if !fence.Valid() {
+		return Snapshot{}, c.opErr(OpSnapshot, key, ErrBackendContract)
+	}
+	return Snapshot{fence: fence}, nil
 }
 
-// checkSnapshot returns the authoritative snapshot for a single-key write.
-// ok reports whether the caller's observed version still allows the write.
-func (c *cache[V]) checkSnapshot(
+// Set stores value while snapshot is still current, at the cache's own TTL: the
+// one [Options.ComputeTTL] returns, or [Options.DefaultTTL] when it is not set.
+// It is the TTL [Cache.Load] gives its fills.
+// A snapshot that is no longer current returns [SetOutcomeConflict], not an
+// error: the value was already stale when it arrived, and declining to cache it
+// is the point.
+func (c *Cache[V]) Set(
 	ctx context.Context,
-	cacheKey version.CacheKey,
-	observed Version,
-) (version.Snapshot, bool, error) {
-	if observed.IsMissing() {
-		return c.createSnapshot(ctx, cacheKey)
+	key string,
+	value V,
+	snapshot Snapshot,
+) (SetResult, error) {
+	if c.inv.disabled {
+		return SetResult{Outcome: SetOutcomeDisabled}, nil
 	}
 
-	snap, err := c.loadSnapshot(ctx, cacheKey)
+	ttl, err := c.computeTTL()
 	if err != nil {
-		return version.Snapshot{}, false, err
+		return SetResult{}, c.opErr(OpComputeTTL, key, wrapComputeTTL(err))
 	}
-	if !snapshotMatchesVersion(snap, observed) {
-		return version.Snapshot{}, false, nil
-	}
-	return snap, true, nil
+	return c.SetWithTTL(ctx, key, value, snapshot, ttl)
 }
 
-// versionKey maps one logical key to the canonical version-store key used
-// for all single-key freshness checks.
-func (c *cache[V]) versionKey(key string) version.CacheKey {
-	return toVersionCacheKey(c.space.SingleCacheKey(key))
-}
+// SetWithTTL is [Cache.Set] at a TTL of the caller's choosing. A zero ttl uses
+// [Options.DefaultTTL] and [NoExpiration] asks for no expiry; the backend may
+// shorten either so a value cannot outlive the invalidation state that judges it.
+func (c *Cache[V]) SetWithTTL(
+	ctx context.Context,
+	key string,
+	value V,
+	snapshot Snapshot,
+	ttl time.Duration,
+) (SetResult, error) {
+	if c.inv.disabled {
+		return SetResult{Outcome: SetOutcomeDisabled}, nil
+	}
 
-// advanceVersion advances authoritative version state for a canonical single-key
-// identity and reports any failure through hooks. This is the write-side
-// counterpart of loadSnapshot.
-func (c *cache[V]) advanceVersion(ctx context.Context, cacheKey version.CacheKey) (version.Snapshot, error) {
-	s, err := c.versionStore.Advance(ctx, cacheKey)
+	req, err := c.prepareWrite(key, value, snapshot, ttl)
 	if err != nil {
-		c.hooks.VersionAdvanceError(cacheKey, err)
-		return version.Snapshot{}, err
+		return SetResult{}, c.opErr(OpSet, key, err)
 	}
-	return s, nil
-}
 
-// refreshVersion keeps an already matched non-missing version record alive
-// before writing its value. Stores without expiring authoritative metadata do
-// not need this step and are treated as successfully refreshed.
-// refreshed=false means the record disappeared between compare and write so
-// callers must treat the write as a version mismatch.
-func (c *cache[V]) refreshVersion(ctx context.Context, cacheKey version.CacheKey) (bool, error) {
-	refresher, ok := c.versionStore.(version.Refresher)
-	if !ok {
-		return true, nil
-	}
-	refreshed, err := refresher.Refresh(ctx, cacheKey)
+	res, err := c.inv.backend.CompareAndStore(ctx, req)
 	if err != nil {
-		c.hooks.VersionSnapshotError(1, err)
-		return false, err
+		return SetResult{}, c.opErr(OpSet, key, err)
 	}
-	return refreshed, nil
+	return c.setResult(key, res)
 }
 
-// toVersionCacheKey bridges the internal key builder and the public VersionStore API.
-// The VersionStore boundary is intentionally typed so custom implementations cannot
-// silently keep treating canonical identities as plain logical strings.
-func toVersionCacheKey(cacheKey keyutil.CacheKey) version.CacheKey {
-	return version.NewCacheKey(cacheKey.String())
+// Invalidate makes the cached value for key unusable. See
+// [Invalidator.Invalidate].
+func (c *Cache[V]) Invalidate(ctx context.Context, key string) error {
+	return c.inv.Invalidate(ctx, key)
 }
 
-func isLocalVersionStore(store version.Store) bool {
-	_, ok := store.(*version.LocalStore)
-	return ok
-}
+// Invalidator returns a handle that can invalidate keys without knowing V.
+func (c *Cache[V]) Invalidator() *Invalidator { return c.inv }
 
-func snapshotMatchesVersion(snap version.Snapshot, version Version) bool {
-	if version.IsMissing() {
-		return !snap.Exists
-	}
-	if !snap.Exists {
-		return false
-	}
-	return snap.Fence.Equal(version.fence)
-}
+func (c *Cache[V]) observe(e Event) { c.inv.observe(e) }
 
-func coalesce[T comparable](v, def T) T {
-	var zero T
-	if v == zero {
-		return def
-	}
-	return v
+func (c *Cache[V]) opErr(op Op, key string, err error) error { return c.inv.opErr(op, key, err) }
+
+func (c *Cache[V]) observePanic(key string, value any, stack []byte) {
+	c.observe(Event{
+		Type: EventLoaderPanic,
+		Op:   OpLoad,
+		Key:  key,
+		Err:  &PanicError{Value: value, Stack: stack},
+	})
 }

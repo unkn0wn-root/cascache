@@ -3,340 +3,189 @@ package wire
 import (
 	"bytes"
 	"encoding/binary"
-	"math"
-	"strings"
+	"errors"
 	"testing"
 
-	"github.com/unkn0wn-root/cascache/v3/version"
+	"github.com/unkn0wn-root/cascache/v4/backend"
 )
 
-func fenceForVersionID(id uint64) version.Fence {
-	var token [16]byte
-	token[0] = 0xA5
-	binary.BigEndian.PutUint64(token[8:], id)
-	fence, err := version.ParseFenceBinary(token[:])
-	if err != nil {
-		panic(err)
-	}
-	return fence
-}
-
-func fenceForGen(gen uint64) version.Fence {
-	return fenceForVersionID(gen)
-}
-
-func mustDecodeSingle(t *testing.T, b []byte) (version.Fence, []byte) {
+func mustEncode(t testing.TB, fence backend.Fence, payload []byte) []byte {
 	t.Helper()
-	fence, p, err := DecodeSingle(b)
+	b, err := Encode(fence, payload)
 	if err != nil {
-		t.Fatalf("DecodeSingle error: %v", err)
-	}
-	return fence, p
-}
-
-func mustEncodeSingle(t *testing.T, fence version.Fence, payload []byte) []byte {
-	t.Helper()
-	b, err := EncodeSingle(fence, payload)
-	if err != nil {
-		t.Fatalf("EncodeSingle error: %v", err)
+		t.Fatalf("Encode(%v, %d bytes): %v", fence, len(payload), err)
 	}
 	return b
 }
 
-func mustDecodeBatch(t *testing.T, b []byte) []BatchItem {
-	t.Helper()
-	it, err := DecodeBatch(b)
-	if err != nil {
-		t.Fatalf("DecodeBatch error: %v", err)
-	}
-	return it
+func rawFrame(fence, payload []byte) []byte {
+	b := make([]byte, headerLen+len(payload))
+	copy(b[offMagic:offVersion], magic)
+	b[offVersion] = version
+	b[offKind] = kindSingle
+	copy(b[offFence:offVLen], fence)
+	binary.BigEndian.PutUint32(b[offVLen:offCRC], uint32(len(payload)))
+	copy(b[headerLen:], payload)
+	binary.BigEndian.PutUint32(b[offCRC:headerLen], checksum(b[offFence:offVLen], payload))
+	return b
 }
 
-func TestSingleRTEmptyAndNonEmpty(t *testing.T) {
+func TestHeaderLayoutIsStable(t *testing.T) {
+	// Keep the persisted layout stable.
+	if headerLen != 30 {
+		t.Fatalf("header length = %d, want 30", headerLen)
+	}
+	if version != 4 || kindSingle != 1 {
+		t.Fatalf("frame identity changed: version=%d kind=%d", version, kindSingle)
+	}
+}
+
+func TestRoundTrip(t *testing.T) {
 	cases := []struct {
-		gen     uint64
+		name    string
 		payload []byte
 	}{
-		{0, nil},
-		{42, []byte("hello")},
-		{math.MaxUint64, []byte{0, 1, 2, 3, 4}},
+		{"nil", nil},
+		{"empty", []byte{}},
+		{"small", []byte("hello")},
+		{"binary", []byte{0, 1, 2, 3, 0xff, 0}},
+		{"large", bytes.Repeat([]byte("x"), 64<<10)},
 	}
 	for _, tc := range cases {
-		fence := fenceForVersionID(tc.gen)
-		enc := mustEncodeSingle(t, fence, tc.payload)
-		gotFence, p := mustDecodeSingle(t, enc)
-		if !gotFence.Equal(fence) {
-			t.Fatalf("fence mismatch: got %+v want %+v", gotFence, fence)
-		}
-		if !bytes.Equal(p, tc.payload) {
-			t.Fatalf("payload mismatch: got %x want %x", p, tc.payload)
-		}
-	}
-}
+		t.Run(tc.name, func(t *testing.T) {
+			fence := backend.NewFence()
+			frame := mustEncode(t, fence, tc.payload)
 
-func TestSingleRejectsTrailingBytes(t *testing.T) {
-	enc := mustEncodeSingle(t, fenceForVersionID(7), []byte("x"))
-	enc = append(enc, 0xDE, 0xAD) // add junk
-	if _, _, err := DecodeSingle(enc); err == nil {
-		t.Fatalf("expected error on trailing bytes")
-	}
-}
-
-func TestSingleCorruptHeadersAndLengths(t *testing.T) {
-	enc := mustEncodeSingle(t, fenceForVersionID(1), []byte("abc"))
-
-	// bad magic
-	badMagic := append([]byte(nil), enc...)
-	badMagic[0] = 'X'
-	if _, _, err := DecodeSingle(badMagic); err == nil {
-		t.Fatalf("expected error on bad magic")
-	}
-
-	// wrong version
-	badVer := append([]byte(nil), enc...)
-	badVer[4] = wireVersion + 1
-	if _, _, err := DecodeSingle(badVer); err == nil {
-		t.Fatalf("expected error on bad version")
-	}
-
-	// wrong kind
-	badKind := append([]byte(nil), enc...)
-	badKind[5] = kindBatch
-	if _, _, err := DecodeSingle(badKind); err == nil {
-		t.Fatalf("expected error on bad kind")
-	}
-
-	// vlen too large (announce more than available)
-	tooLong := append([]byte(nil), enc...)
-	// vlen is at offset 22..25 (4 magic +1 ver +1 kind +16 fence)
-	binary.BigEndian.PutUint32(tooLong[22:26], uint32(len("abc")+1))
-	if _, _, err := DecodeSingle(tooLong); err == nil {
-		t.Fatalf("expected error on vlen beyond buffer")
-	}
-
-	// truncated buffer
-	trunc := enc[:len(enc)-1]
-	if _, _, err := DecodeSingle(trunc); err == nil {
-		t.Fatalf("expected error on truncated buffer")
-	}
-}
-
-func TestSingleZeroCopyPayload(t *testing.T) {
-	enc := mustEncodeSingle(t, fenceForVersionID(1), []byte("Z"))
-	_, p := mustDecodeSingle(t, enc)
-	if len(p) != 1 {
-		t.Fatalf("unexpected payload len")
-	}
-	// mutate payload slice. should mutate underlying enc bytes (zero-copy)
-	p[0] = 'Q'
-	_, p2 := mustDecodeSingle(t, enc)
-	if p2[0] != 'Q' {
-		t.Fatalf("expected zero-copy slice into enc buffer")
-	}
-}
-
-func TestSingleRejectsHighBitVlen(t *testing.T) {
-	enc := mustEncodeSingle(t, fenceForVersionID(1), []byte("abc"))
-	badVlen := append([]byte(nil), enc...)
-	binary.BigEndian.PutUint32(badVlen[22:26], ^uint32(0))
-	if _, _, err := DecodeSingle(badVlen); err == nil {
-		t.Fatalf("expected error on high-bit vlen")
-	}
-}
-
-func TestCheckedUint32(t *testing.T) {
-	got, err := checkedUint32(maxUint32Wire, "payload length")
-	if err != nil {
-		t.Fatalf("checkedUint32 boundary error: %v", err)
-	}
-	if got != ^uint32(0) {
-		t.Fatalf("checkedUint32 boundary mismatch: got %d want %d", got, ^uint32(0))
-	}
-
-	if _, err := checkedUint32(maxUint32Wire+1, "payload length"); err == nil {
-		t.Fatalf("checkedUint32 should reject values above uint32")
-	}
-}
-
-func TestBatchRoundTrip(t *testing.T) {
-	cases := [][]BatchItem{
-		nil, // n=0
-		{{Key: "a", Fence: fenceForVersionID(1), Payload: []byte("x")}},
-		{
-			{Key: "a", Fence: fenceForVersionID(1), Payload: []byte("x")},
-			{Key: "b", Fence: fenceForVersionID(2), Payload: nil}, // empty payload
-			{Key: "c", Fence: fenceForVersionID(3), Payload: []byte{9, 8, 7}},
-		},
-		// duplicates allowed. decoder preserves both
-		{
-			{Key: "dup", Fence: fenceForVersionID(1), Payload: []byte("old")},
-			{Key: "dup", Fence: fenceForVersionID(2), Payload: []byte("new")},
-		},
-	}
-	for _, items := range cases {
-		enc, err := EncodeBatch(items)
-		if err != nil {
-			t.Fatalf("EncodeBatch error: %v", err)
-		}
-		got := mustDecodeBatch(t, enc)
-		if len(got) != len(items) {
-			t.Fatalf("len mismatch: got %d want %d", len(got), len(items))
-		}
-		for i := range items {
-			if got[i].Key != items[i].Key || !got[i].Fence.Equal(items[i].Fence) ||
-				!bytes.Equal(got[i].Payload, items[i].Payload) {
-				t.Fatalf("item %d mismatch: got=%+v want=%+v", i, got[i], items[i])
+			got, payload, err := Decode(frame)
+			if err != nil {
+				t.Fatalf("Decode rejected a frame Encode produced: %v", err)
 			}
+			if !got.Equal(fence) {
+				t.Fatalf("fence = %v, want %v", got, fence)
+			}
+			if !bytes.Equal(payload, tc.payload) {
+				t.Fatalf("payload = %q, want %q", payload, tc.payload)
+			}
+		})
+	}
+}
+
+func TestDecodeReturnsAViewOfItsInput(t *testing.T) {
+	frame := mustEncode(t, backend.NewFence(), []byte("payload"))
+
+	_, payload, err := Decode(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) == 0 || &payload[0] != &frame[headerLen] {
+		t.Fatal("Decode must return a subslice of its input, not a copy")
+	}
+}
+
+func TestEncodeRejectsInvalidFence(t *testing.T) {
+	_, err := Encode(backend.Fence{}, []byte("payload"))
+	if !errors.Is(err, ErrInvalidFrame) || !errors.Is(err, backend.ErrInvalidFence) {
+		t.Fatalf("Encode(zero fence) error = %v, want ErrInvalidFrame wrapping ErrInvalidFence", err)
+	}
+}
+
+func TestDecodeClassifiesFailures(t *testing.T) {
+	fence := backend.NewFence()
+	payload := []byte("payload")
+
+	damage := func(fn func([]byte) []byte) []byte {
+		return fn(mustEncode(t, fence, payload))
+	}
+
+	cases := []struct {
+		name string
+		in   []byte
+		want error
+	}{
+		{"nil", nil, ErrInvalidFrame},
+		{"shorter than identity", []byte("CAS"), ErrInvalidFrame},
+		{"foreign bytes", []byte("not a cascache frame at all, honestly"), ErrInvalidFrame},
+		{"bad magic", damage(func(b []byte) []byte { b[0] = 'X'; return b }), ErrInvalidFrame},
+		{
+			"future version",
+			damage(func(b []byte) []byte { b[offVersion] = version + 1; return b }),
+			ErrUnsupportedFormat,
+		},
+		{"past version", damage(func(b []byte) []byte { b[offVersion] = version - 1; return b }), ErrUnsupportedFormat},
+		{"unknown kind", damage(func(b []byte) []byte { b[offKind] = kindSingle + 1; return b }), ErrUnsupportedFormat},
+		{"header truncated", damage(func(b []byte) []byte { return b[:headerLen-1] }), ErrInvalidFrame},
+		{"body truncated", damage(func(b []byte) []byte { return b[:len(b)-1] }), ErrInvalidFrame},
+		{"trailing bytes", damage(func(b []byte) []byte { return append(b, 0) }), ErrInvalidFrame},
+		{"payload corrupted", damage(func(b []byte) []byte { b[headerLen]++; return b }), ErrInvalidFrame},
+		{"fence corrupted", damage(func(b []byte) []byte { b[offFence]++; return b }), ErrInvalidFrame},
+		{"length field lies", damage(func(b []byte) []byte {
+			binary.BigEndian.PutUint32(b[offVLen:offCRC], uint32(len(payload)+1))
+			return b
+		}), ErrInvalidFrame},
+		{"zero fence with a valid checksum", rawFrame(make([]byte, backend.FenceSize), payload), ErrInvalidFrame},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := Decode(tc.in)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Decode error = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestChecksumCoversFence(t *testing.T) {
+	payload := []byte("payload")
+	frame := mustEncode(t, backend.NewFence(), payload)
+
+	other := backend.NewFence()
+	copy(frame[offFence:offVLen], other.Bytes())
+
+	if _, _, err := Decode(frame); !errors.Is(err, ErrInvalidFrame) {
+		t.Fatalf("Decode of a frame with a swapped fence = %v, want ErrInvalidFrame", err)
+	}
+}
+
+func FuzzDecode(f *testing.F) {
+	fence := backend.NewFence()
+	f.Add(mustEncode(f, fence, nil))
+	f.Add(mustEncode(f, fence, []byte("payload")))
+	f.Add([]byte("CASC"))
+	f.Add([]byte(nil))
+
+	f.Fuzz(func(t *testing.T, b []byte) {
+		got, payload, err := Decode(b)
+		if err != nil {
+			return
+		}
+		again, err := Encode(got, payload)
+		if err != nil {
+			t.Fatalf("Encode rejected a decoded frame: %v", err)
+		}
+		if !bytes.Equal(again, b) {
+			t.Fatalf("re-encode mismatch:\n got %x\nwant %x", again, b)
+		}
+	})
+}
+
+func BenchmarkEncode(b *testing.B) {
+	fence := backend.NewFence()
+	payload := bytes.Repeat([]byte("x"), 1024)
+	b.ReportAllocs()
+	for range b.N {
+		if _, err := Encode(fence, payload); err != nil {
+			b.Fatal(err)
 		}
 	}
 }
 
-func TestBatchRejectsTrailingBytes(t *testing.T) {
-	enc, err := EncodeBatch(
-		[]BatchItem{{Key: "k", Fence: fenceForVersionID(1), Payload: []byte("v")}},
-	)
-	if err != nil {
-		t.Fatalf("EncodeBatch: %v", err)
-	}
-	enc = append(enc, 0xBE, 0xEF)
-	if _, err := DecodeBatch(enc); err == nil {
-		t.Fatalf("expected error on trailing bytes")
-	}
-}
-
-func TestBatchWrongAndTruncation(t *testing.T) {
-	// Wrong n (very large) with no items -> must error, not panic.
-	var buf bytes.Buffer
-	buf.Write([]byte{'C', 'A', 'S', 'C'})
-	buf.WriteByte(wireVersion)
-	buf.WriteByte(kindBatch)
-	var u4 [4]byte
-	binary.BigEndian.PutUint32(u4[:], ^uint32(0)) // n = 0xFFFFFFFF
-	buf.Write(u4[:])
-	if _, err := DecodeBatch(buf.Bytes()); err == nil {
-		t.Fatalf("expected error on bogus n with insufficient bytes")
-	}
-
-	// Declare n=1 but provide no item body -> error
-	buf.Reset()
-	buf.Write([]byte{'C', 'A', 'S', 'C'})
-	buf.WriteByte(wireVersion)
-	buf.WriteByte(kindBatch)
-	binary.BigEndian.PutUint32(u4[:], 1)
-	buf.Write(u4[:])
-	if _, err := DecodeBatch(buf.Bytes()); err == nil {
-		t.Fatalf("expected error on truncated item list")
-	}
-}
-
-func TestBatchKeyLengthValidation(t *testing.T) {
-	// empty key -> error
-	if _, err := EncodeBatch(
-		[]BatchItem{{Key: "", Fence: fenceForGen(1), Payload: []byte("x")}},
-	); err == nil {
-		t.Fatalf("expected error on empty key")
-	}
-	// too long key (65536) -> error
-	if _, err := EncodeBatch(
-		[]BatchItem{{Key: strings.Repeat("a", 0x10000), Fence: fenceForGen(1)}},
-	); err == nil {
-		t.Fatalf("expected error on key length > 0xFFFF")
-	}
-	// boundary (65535) -> ok
-	if _, err := EncodeBatch(
-		[]BatchItem{{Key: strings.Repeat("b", 0xFFFF), Fence: fenceForGen(1)}},
-	); err != nil {
-		t.Fatalf("boundary key length should succeed: %v", err)
-	}
-}
-
-func TestBatchCorruptHeadersAndLengths(t *testing.T) {
-	enc, err := EncodeBatch([]BatchItem{
-		{Key: "k", Fence: fenceForGen(9), Payload: []byte("xyz")},
-	})
-	if err != nil {
-		t.Fatalf("EncodeBatch: %v", err)
-	}
-
-	// bad magic
-	badMagic := append([]byte(nil), enc...)
-	badMagic[0] = 'X'
-	if _, err := DecodeBatch(badMagic); err == nil {
-		t.Fatalf("expected error on bad magic")
-	}
-
-	// wrong version
-	badVer := append([]byte(nil), enc...)
-	badVer[4] = wireVersion + 1
-	if _, err := DecodeBatch(badVer); err == nil {
-		t.Fatalf("expected error on bad version")
-	}
-
-	// wrong kind
-	badKind := append([]byte(nil), enc...)
-	badKind[5] = kindSingle
-	if _, err := DecodeBatch(badKind); err == nil {
-		t.Fatalf("expected error on bad kind")
-	}
-
-	// vlen beyond remaining
-	// Locate first item's vlen field:
-	// header: 4 magic +1 ver +1 kind +4 n = 10 bytes
-	// item: 2 klen + klen + 16 fence + 4 vlen + payload
-	klen := 1                    // "k"
-	offset := 10 + 2 + klen + 16 // start of vlen
-	badVlen := append([]byte(nil), enc...)
-	binary.BigEndian.PutUint32(badVlen[offset:offset+4], uint32(len("xyz")+1))
-	if _, err := DecodeBatch(badVlen); err == nil {
-		t.Fatalf("expected error on vlen beyond buffer")
-	}
-
-	// klen too large (announce more than available)
-	badKlen := append([]byte(nil), enc...)
-	// set klen=5 while only 1 byte of key is present
-	binary.BigEndian.PutUint16(badKlen[10:12], uint16(5))
-	if _, err := DecodeBatch(badKlen); err == nil {
-		t.Fatalf("expected error on klen beyond buffer")
-	}
-}
-
-func TestBatchRejectsHighBitVlen(t *testing.T) {
-	enc, err := EncodeBatch([]BatchItem{
-		{Key: "k", Fence: fenceForGen(9), Payload: []byte("xyz")},
-	})
-	if err != nil {
-		t.Fatalf("EncodeBatch: %v", err)
-	}
-
-	klen := 1
-	offset := 10 + 2 + klen + 16
-	badVlen := append([]byte(nil), enc...)
-	binary.BigEndian.PutUint32(badVlen[offset:offset+4], ^uint32(0))
-	if _, err := DecodeBatch(badVlen); err == nil {
-		t.Fatalf("expected error on high-bit vlen")
-	}
-}
-
-func TestBatchZeroCopyPayloadSlices(t *testing.T) {
-	items := []BatchItem{
-		{Key: "a", Fence: fenceForGen(1), Payload: []byte("X")},
-		{Key: "b", Fence: fenceForGen(2), Payload: []byte("Y")},
-	}
-	enc, err := EncodeBatch(items)
-	if err != nil {
-		t.Fatalf("EncodeBatch: %v", err)
-	}
-	got := mustDecodeBatch(t, enc)
-	if len(got) != 2 || len(got[0].Payload) != 1 {
-		t.Fatalf("unexpected decoded items")
-	}
-
-	// mutate decoded payload. should mutate underlying enc bytes
-	got[0].Payload[0] = 'Q'
-
-	// re-decode from the same enc buffer. change should be visible
-	got2 := mustDecodeBatch(t, enc)
-	if got2[0].Payload[0] != 'Q' {
-		t.Fatalf("expected zero-copy payload subslices into enc buffer")
+func BenchmarkDecode(b *testing.B) {
+	frame := mustEncode(b, backend.NewFence(), bytes.Repeat([]byte("x"), 1024))
+	b.ReportAllocs()
+	for range b.N {
+		if _, _, err := Decode(frame); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

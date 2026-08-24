@@ -1,128 +1,102 @@
-// Package sloghook provides a slog-based implementation of cascache.Hooks.
-// It is optional: the core cascache package has no logging dependency.
+// Package sloghook logs cascache health events with log/slog.
 package sloghook
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"sync/atomic"
 
-	"github.com/unkn0wn-root/cascache/v3"
-	"github.com/unkn0wn-root/cascache/v3/version"
+	"github.com/unkn0wn-root/cascache/v4"
 )
 
-// Options configures the slog-based Hooks.
+// Options configure the returned observer.
 type Options struct {
-	// Sampling to avoid log floods; 0 or 1 = log every event.
-	SelfHealEvery    uint64
-	BatchRejectEvery uint64
+	// RejectEvery logs every Nth rejected entry. Zero logs all entries.
+	RejectEvery uint64
 
-	// Optional key redactor. If nil, a short SHA-256 prefix is used.
+	// Redact rewrites logged keys. Nil logs a short SHA-256 prefix.
 	Redact func(string) string
 }
 
-// Hooks is a slog-backed implementation of cascache.Hooks.
-type Hooks struct {
-	l    *slog.Logger
+// New returns an observer that logs to l. A nil logger returns nil, which the
+// cache accepts and skips.
+func New(l *slog.Logger, opts Options) cascache.Observer {
+	if l == nil {
+		return nil
+	}
+	return &observer{log: l, opts: opts}
+}
+
+type observer struct {
+	log  *slog.Logger
 	opts Options
 
-	selfHealCtr    atomic.Uint64
-	batchRejectCtr atomic.Uint64
+	rejects atomic.Uint64
 }
 
-var _ cascache.Hooks = (*Hooks)(nil)
-
-// New creates a slog-based Hooks.
-func New(l *slog.Logger, opts Options) *Hooks {
-	return &Hooks{l: l, opts: opts}
-}
-
-func (h *Hooks) redact(k string) string {
-	if h.opts.Redact != nil {
-		return h.opts.Redact(k)
+func (o *observer) Observe(e cascache.Event) {
+	switch e.Type {
+	case cascache.EventEntryRejected:
+		o.rejected(e)
+	case cascache.EventStoreRejected:
+		o.log.Warn("cascache.store_rejected",
+			"op", e.Op.String(),
+			"key", o.redact(e.Key))
+	case cascache.EventCleanupFailed:
+		o.log.Warn("cascache.cleanup_failed",
+			"op", e.Op.String(),
+			"key", o.redact(e.Key),
+			"err", e.Err)
+	case cascache.EventOperationFailed:
+		o.log.Error("cascache.operation_failed",
+			"op", e.Op.String(),
+			"key", o.redact(e.Key),
+			"err", e.Err)
+	case cascache.EventLoaderPanic:
+		o.panicked(e)
+	default:
+		// Ignore event types added by newer versions.
 	}
-	sum := sha256.Sum256([]byte(k))
-	return hex.EncodeToString(sum[:8]) // short prefix
 }
 
-func sample(n uint64, ctr *atomic.Uint64) bool {
-	if n == 0 || n == 1 {
-		return true
-	}
-	// Log the Nth, 2N-th, ... event.
-	return ctr.Add(1)%n == 0
-}
-
-func (h *Hooks) SelfHealSingle(storageKey string, reason cascache.SelfHealReason) {
-	if h.l == nil || !sample(h.opts.SelfHealEvery, &h.selfHealCtr) {
+func (o *observer) rejected(e cascache.Event) {
+	if n := o.opts.RejectEvery; n > 1 && o.rejects.Add(1)%n != 0 {
 		return
 	}
-	h.l.Debug("cascache.self_heal_single",
-		"key", h.redact(storageKey),
-		"reason", string(reason))
+
+	// Missing fences usually mean the fence TTL is too short.
+	level := slog.LevelDebug
+	if e.Reason == cascache.RejectStateMissing {
+		level = slog.LevelWarn
+	}
+	o.log.Log(context.Background(), level, "cascache.entry_rejected",
+		"op", e.Op.String(),
+		"key", o.redact(e.Key),
+		"reason", e.Reason.String(),
+		"err", e.Err)
 }
 
-func (h *Hooks) BatchRejected(ns string, requested int, reason cascache.BatchRejectReason) {
-	if h.l == nil || !sample(h.opts.BatchRejectEvery, &h.batchRejectCtr) {
-		return
+func (o *observer) panicked(e cascache.Event) {
+	attrs := []any{"key", o.redact(e.Key), "err", e.Err}
+
+	var panicErr *cascache.PanicError
+	if errors.As(e.Err, &panicErr) {
+		attrs = []any{
+			"key", o.redact(e.Key),
+			"panic", panicErr.Value,
+			"stack", string(panicErr.Stack),
+		}
 	}
-	h.l.Info("cascache.batch_rejected",
-		"ns", ns,
-		"requested", requested,
-		"reason", string(reason))
+	o.log.Error("cascache.loader_panic", attrs...)
 }
 
-func (h *Hooks) ProviderSetRejected(storageKey string, isBatch bool) {
-	if h.l == nil {
-		return
+func (o *observer) redact(key string) string {
+	if o.opts.Redact != nil {
+		return o.opts.Redact(key)
 	}
-	h.l.Warn("cascache.provider_set_rejected",
-		"key", h.redact(storageKey),
-		"is_batch", isBatch)
-}
-
-func (h *Hooks) VersionSnapshotError(count int, err error) {
-	if h.l == nil {
-		return
-	}
-	h.l.Warn("cascache.version_snapshot_error",
-		"count", count,
-		"err", err)
-}
-
-func (h *Hooks) VersionCreateError(cacheKey version.CacheKey, err error) {
-	if h.l == nil {
-		return
-	}
-	h.l.Warn("cascache.version_create_error",
-		"key", h.redact(cacheKey.String()),
-		"err", err)
-}
-
-func (h *Hooks) VersionAdvanceError(cacheKey version.CacheKey, err error) {
-	if h.l == nil {
-		return
-	}
-	h.l.Warn("cascache.version_advance_error",
-		"key", h.redact(cacheKey.String()),
-		"err", err)
-}
-
-func (h *Hooks) InvalidateOutage(key string, bumpErr, delErr error) {
-	if h.l == nil {
-		return
-	}
-	h.l.Error("cascache.invalidate_outage",
-		"key", h.redact(key),
-		"bump_err", bumpErr,
-		"del_err", delErr)
-}
-
-func (h *Hooks) LocalVersionStoreWithBatch() {
-	if h.l == nil {
-		return
-	}
-	h.l.Warn("cascache.local_version_store_with_batch",
-		"msg", "batch enabled with local version store; stale batches possible in multi-replica")
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:8])
 }

@@ -17,3 +17,5 @@ func (JSON[V]) Decode(b []byte) (V, error) {
 	err := json.Unmarshal(b, &v)
 	return v, err
 }
+
+var _ Codec[struct{}] = JSON[struct{}]{}
