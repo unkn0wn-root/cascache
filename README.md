@@ -12,6 +12,23 @@ other replicas. The `backend` package calls this token a *fence*.
 import "github.com/unkn0wn-root/cascache/v4"
 ```
 
+## Why
+
+A normal cache-aside write can restore old data after an invalidation:
+
+1. Request A starts reading a value from the source.
+2. Request B updates the source and invalidates the cache.
+3. Request A finishes later and writes its older value into the cache.
+
+With an ordinary cache `SET`, the older write can silently win. CASCache takes
+a snapshot of the key's invalidation state before reading the source and checks
+it again before storing the result. If the key changed while the read was in
+progress, the write is refused.
+
+A successful invalidation also makes older cached copies unusable, even when
+deleting them fails. CASCache only knows about changes followed by a successful
+`Invalidate` call, and it cannot make an old response from the source current.
+
 ## Safe failure behavior
 
 If the cache cannot confirm that a value is current, it treats the value as a
@@ -127,10 +144,10 @@ inv, err := cascache.NewInvalidator(cascache.InvalidatorOptions{
 
 `Cache.Invalidator()` returns the same handle for a cache you already have.
 
-## Reads and writes by hand
+## Manual cache fills
 
-To load and write a value manually, take the snapshot **before** reading the
-source:
+`Load` handles the normal cache-fill sequence. When you need to manage that
+sequence yourself, take the snapshot **before** reading the source:
 
 ```go
 snapshot, err := cache.Snapshot(ctx, key)
@@ -292,7 +309,7 @@ writes attributed to the load, and timing.
 ```go
 cache, err := typed.NewRedis(client, typed.Options[uuid.UUID, Frame]{
 	Config: typed.Config{
-		Namespace: "device-gw:family",
+		Namespace: "gw:users",
 		MaxTTL:    10 * time.Minute,
 		MinTTL:    8 * time.Minute,
 		Jitter:    0.2,
