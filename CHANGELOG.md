@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [4.1.0](https://github.com/unkn0wn-root/cascache/compare/v4.0.0...v4.1.0) (2026-08-26)
+
+
+### Bug Fixes
+
+* **load:** enforce timeout before cache admission ([073fd47](https://github.com/unkn0wn-root/cascache/commit/073fd47d97b6e4a0988772c967d4092c763ea41e))
+* **typed:** report metrics from invalidator handles ([d8e1ab1](https://github.com/unkn0wn-root/cascache/commit/d8e1ab1fbdf1f472aff5e26d7b141ac27264bfea))
+
 ### [4.0.1](https://github.com/unkn0wn-root/cascache/compare/v4.0.0...v4.0.1) (2026-08-24)
 
 
