@@ -279,7 +279,7 @@ func (c *Cache[V]) fill(key string, load Loader[V]) func(context.Context) (fillR
 		// SetWithTTL refuses again at admission; this skips the encoding first.
 		if err := ctx.Err(); err != nil {
 			res.fillErr = &OpError{Op: OpSet, Key: key, Err: err}
-			return res, nil
+			return res, nil //nolint:nilerr // the loader succeeded; only the fill did not
 		}
 
 		if snapshotErr != nil {
