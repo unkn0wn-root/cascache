@@ -136,6 +136,81 @@ func TestWaiterHonorsItsOwnContext(t *testing.T) {
 	}
 }
 
+func TestCanceledContextDoesNotStartACall(t *testing.T) {
+	var g Group[int]
+	var called atomic.Bool
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, role, err := g.Do(ctx, "k", func(context.Context) (int, error) {
+		called.Store(true)
+		return 1, nil
+	})
+	if role != Abandoned {
+		t.Fatalf("role = %v, want Abandoned", role)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	for range 1000 {
+		if called.Load() {
+			t.Fatal("a canceled caller started a call")
+		}
+		runtime.Gosched()
+	}
+	if called.Load() {
+		t.Fatal("a canceled caller started a call")
+	}
+}
+
+func TestCallThatOutlivesItsTimeoutDoesNotHoldTheKey(t *testing.T) {
+	g, joins := joinRecorder[int](1)
+	g.Timeout = 20 * time.Millisecond
+
+	release := make(chan struct{})
+	expired := make(chan struct{})
+	stuck := make(chan struct{})
+	defer func() {
+		close(release)
+		<-stuck
+	}()
+
+	go func() {
+		defer close(stuck)
+		_, _, _ = g.Do(context.Background(), "k", func(ctx context.Context) (int, error) {
+			<-ctx.Done()
+			close(expired)
+			<-release
+			return 1, nil
+		})
+	}()
+	<-expired
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var ran atomic.Bool
+	v, role, err := g.Do(ctx, "k", func(context.Context) (int, error) {
+		ran.Store(true)
+		return 2, nil
+	})
+	if err != nil {
+		t.Fatalf("Do = %v, %v, %v; want a fresh call", v, role, err)
+	}
+	if !ran.Load() {
+		t.Fatal("the second caller joined a call whose context had ended")
+	}
+	if v != 2 || role != Owned {
+		t.Fatalf("Do = %v, %v; want 2, Owned", v, role)
+	}
+	select {
+	case key := <-joins:
+		t.Fatalf("joined the expired call for %q", key)
+	default:
+	}
+}
+
 func TestAbandonedCallDoesNotEndItForRemainingCallers(t *testing.T) {
 	g, joins := joinRecorder[int](1)
 	started := make(chan struct{})

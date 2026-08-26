@@ -50,16 +50,20 @@ const (
 )
 
 type Group[V any] struct {
+	// Timeout bounds one call's context. Zero means no timeout. It does not stop
+	// a call that ignores its context, but such a call no longer takes joiners.
 	Timeout time.Duration
 
-	OnJoin  func(key string)
-	OnPanic func(key string, value any, stack []byte)
+	OnJoin   func(key string)
+	OnPanic  func(key string, value any, stack []byte)
+	OnGoexit func(key string)
 
 	mu    sync.Mutex
 	calls map[string]*call[V]
 }
 
 type call[V any] struct {
+	ctx    context.Context
 	done   chan struct{}
 	cancel context.CancelFunc
 	// Guarded by Group.mu. The call is canceled when waiters reaches zero.
@@ -74,14 +78,19 @@ type call[V any] struct {
 // waiting without canceling fn for the others. Panics and Goexit become errors.
 // Exactly one caller of a completed call receives [Owned].
 // A finished call leaves the group before waiters wake. A caller that calls Do
-// again therefore joins a newer call.
+// again therefore joins a newer call. A call whose context has ended is never
+// joined, so a run that outlives its [Group.Timeout] does not hold its key.
 func (g *Group[V]) Do(
 	ctx context.Context,
 	key string,
 	fn func(context.Context) (V, error),
 ) (v V, role Role, err error) {
+	if err := ctx.Err(); err != nil {
+		return v, Abandoned, err
+	}
+
 	g.mu.Lock()
-	if c, ok := g.calls[key]; ok {
+	if c, ok := g.calls[key]; ok && c.ctx.Err() == nil {
 		c.waiters++
 		g.mu.Unlock()
 
@@ -92,7 +101,7 @@ func (g *Group[V]) Do(
 	}
 
 	callCtx, cancel := g.callContext(ctx)
-	c := &call[V]{done: make(chan struct{}), cancel: cancel, waiters: 1}
+	c := &call[V]{ctx: callCtx, done: make(chan struct{}), cancel: cancel, waiters: 1}
 	if g.calls == nil {
 		g.calls = make(map[string]*call[V])
 	}
@@ -182,6 +191,9 @@ func (g *Group[V]) run(
 		case !returned:
 			// Goexit has no panic value.
 			c.err = ErrGoexit
+			if g.OnGoexit != nil {
+				g.OnGoexit(key)
+			}
 		}
 
 		g.mu.Lock()

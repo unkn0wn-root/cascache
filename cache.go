@@ -56,6 +56,7 @@ func New[V any](opts Options[V]) (*Cache[V], error) {
 
 	c.fills.Timeout = opts.LoadTimeout
 	c.fills.OnPanic = c.observePanic
+	c.fills.OnGoexit = c.observeGoexit
 
 	return c, nil
 }
@@ -153,6 +154,13 @@ func (c *Cache[V]) SetWithTTL(
 		return SetResult{}, c.opErr(OpSet, key, err)
 	}
 
+	// Preparation runs the caller's codec and cost func, so admit only while the
+	// context is still live. This is the last point a write can be refused: once
+	// CompareAndStore is under way, [backend.Backend] does not promise a rollback.
+	if err := ctx.Err(); err != nil {
+		return SetResult{}, c.opErr(OpSet, key, err)
+	}
+
 	res, err := c.inv.backend.CompareAndStore(ctx, req)
 	if err != nil {
 		return SetResult{}, c.opErr(OpSet, key, err)
@@ -180,4 +188,8 @@ func (c *Cache[V]) observePanic(key string, value any, stack []byte) {
 		Key:  key,
 		Err:  &PanicError{Value: value, Stack: stack},
 	})
+}
+
+func (c *Cache[V]) observeGoexit(key string) {
+	c.observe(Event{Type: EventLoaderPanic, Op: OpLoad, Key: key, Err: ErrLoaderGoexit})
 }

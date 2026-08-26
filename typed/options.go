@@ -33,7 +33,14 @@ type Options[K comparable, V any] struct {
 	// ComputeSetCost returns the admission cost of a stored frame. Nil uses 1.
 	ComputeSetCost cascache.SetCostFunc
 
-	// LoadTimeout bounds a shared loader run. Zero means no timeout.
+	// LoadTimeout bounds a shared loader run. Zero means no timeout; negative
+	// values are invalid. Cancellation is cooperative, so loaders must honor the
+	// context passed to them. After a timeout, later callers may start another
+	// loader for the same key while the expired loader is still running.
+	//
+	// A run whose context ends before backend admission begins still returns its
+	// value to waiting callers, but attempts no fill. A write already under way may
+	// still commit; [backend.Backend] permits that.
 	LoadTimeout time.Duration
 
 	// Observer receives health events, alongside the ones Metrics consumes.
@@ -50,6 +57,8 @@ func (opts Options[K, V]) Validate() error {
 		return errors.New("typed: key func is required")
 	case opts.Codec == nil:
 		return errors.New("typed: codec is required")
+	case opts.LoadTimeout < 0:
+		return fmt.Errorf("typed: invalid load timeout %v", opts.LoadTimeout)
 	}
 	return nil
 }

@@ -248,6 +248,11 @@ func TestNewValidatesOptions(t *testing.T) {
 		{"no backend", func(o *cascache.Options[user]) { o.Backend = nil }, cascache.ErrNoBackend},
 		{"no codec", func(o *cascache.Options[user]) { o.Codec = nil }, cascache.ErrNoCodec},
 		{"negative TTL", func(o *cascache.Options[user]) { o.DefaultTTL = -time.Second }, cascache.ErrInvalidTTL},
+		{
+			"negative load timeout",
+			func(o *cascache.Options[user]) { o.LoadTimeout = -time.Second },
+			cascache.ErrInvalidLoadTimeout,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

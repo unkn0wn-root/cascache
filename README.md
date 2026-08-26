@@ -127,8 +127,17 @@ current, the caller starts or joins another call. Changes made without calling
 
 A caller can stop waiting without canceling a loader call that other callers
 are still using. `Options.LoadTimeout` applies to each loader call, so it may
-apply twice when a value has to be loaded again. A loader panic is returned as
-a `*PanicError`, which unwraps to `ErrLoaderPanic` and includes the stack.
+apply twice when a value has to be loaded again. Context cancellation is
+cooperative, so loaders must honor the context passed to them. After a loader's
+timeout expires, later callers may start another loader call for the same key
+even if the expired call is still running. Those calls can overlap and increase
+load on the source when a loader ignores cancellation.
+
+A loader that finishes after its call ended can still return its value to
+waiting callers, but attempts no fill. A write already under way may still
+commit, since the backend contract does not promise a rollback on cancellation.
+A loader panic is returned as a `*PanicError`, which unwraps to
+`ErrLoaderPanic` and includes the stack.
 
 ## Invalidation
 

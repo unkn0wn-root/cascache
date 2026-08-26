@@ -87,8 +87,12 @@ type LoadFunc func(ctx context.Context, info LoadInfo)
 // Cache lookup and fill errors do not hide a value returned by the loader. They
 // are reported through [LoadInfo].
 // Canceling one caller does not cancel a run still used by others. The run ends
-// when no callers remain or [Options.LoadTimeout] expires. Loader panics return
-// a [*PanicError]. A disabled cache calls load with the caller's context.
+// when no callers remain or [Options.LoadTimeout] expires. Cancellation is
+// cooperative: load must honor its context. Once a run expires, a later caller
+// may start another run for the same key while the expired loader is still
+// running, so loader executions can overlap. A run that ends before backend
+// admission keeps its value but attempts no fill. Loader panics return a
+// [*PanicError]. A disabled cache calls load with the caller's context.
 func (c *Cache[V]) Load(ctx context.Context, key string, load Loader[V]) (V, error) {
 	var zero V
 	if load == nil {
@@ -240,6 +244,9 @@ type fillResult[V any] struct {
 func (c *Cache[V]) fill(key string, load Loader[V]) func(context.Context) (fillResult[V], error) {
 	return func(ctx context.Context) (fillResult[V], error) {
 		var res fillResult[V]
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
 
 		// Another run may have filled the cache while this one waited.
 		res.currentAt = time.Now()
@@ -255,6 +262,9 @@ func (c *Cache[V]) fill(key string, load Loader[V]) func(context.Context) (fillR
 
 		// Snapshot before loading so an invalidation can refuse the later write.
 		snapshot, snapshotErr := c.Snapshot(ctx, key)
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
 
 		res.ranLoader = true
 		res.currentAt = time.Now()
@@ -263,6 +273,14 @@ func (c *Cache[V]) fill(key string, load Loader[V]) func(context.Context) (fillR
 			return res, err
 		}
 		res.value = v
+
+		// The run is over, so refuse a write that would give an arbitrarily old
+		// value a fresh TTL. The loader still succeeded, so keep its value.
+		// SetWithTTL refuses again at admission; this skips the encoding first.
+		if err := ctx.Err(); err != nil {
+			res.fillErr = &OpError{Op: OpSet, Key: key, Err: err}
+			return res, nil
+		}
 
 		if snapshotErr != nil {
 			// Return the value and report only the fill error.

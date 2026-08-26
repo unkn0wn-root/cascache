@@ -55,7 +55,7 @@ const (
 	// EventOperationFailed means an operation returned an error to its caller.
 	EventOperationFailed
 	// EventLoaderPanic means the loader panicked or exited without returning.
-	// Event.Err is a [*PanicError] for a panic.
+	// Event.Err is a [*PanicError] for a panic and [ErrLoaderGoexit] for Goexit.
 	EventLoaderPanic
 )
 
