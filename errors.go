@@ -15,6 +15,8 @@ var (
 	ErrInvalidSnapshot = errors.New("cascache: invalid snapshot")
 	// ErrInvalidTTL reports a negative TTL other than [NoExpiration].
 	ErrInvalidTTL = errors.New("cascache: invalid TTL")
+	// ErrInvalidLoadTimeout reports a negative [Options.LoadTimeout].
+	ErrInvalidLoadTimeout = errors.New("cascache: invalid load timeout")
 	// ErrInvalidCost reports a nonpositive admission cost.
 	ErrInvalidCost = errors.New("cascache: invalid cost")
 )

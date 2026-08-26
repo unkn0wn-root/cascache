@@ -101,7 +101,14 @@ type Options[V any] struct {
 	// ComputeSetCost returns the admission cost of a stored frame. Nil uses 1.
 	ComputeSetCost SetCostFunc
 
-	// LoadTimeout bounds a shared loader run. Zero means no timeout.
+	// LoadTimeout bounds a shared loader run. Zero means no timeout; negative
+	// values are invalid. Cancellation is cooperative, so loaders must honor the
+	// context passed to them. After a timeout, later callers may start another
+	// loader for the same key while the expired loader is still running.
+	//
+	// A run whose context ends before backend admission begins still returns its
+	// value to waiting callers, but attempts no fill. A write already under way may
+	// still commit; [backend.Backend] permits that.
 	LoadTimeout time.Duration
 
 	// Disabled makes the cache a pass-through.
@@ -125,6 +132,8 @@ func (o Options[V]) Validate() error {
 		return ErrNoCodec
 	case o.DefaultTTL < 0 && o.DefaultTTL != NoExpiration:
 		return ErrInvalidTTL
+	case o.LoadTimeout < 0:
+		return ErrInvalidLoadTimeout
 	}
 	return nil
 }

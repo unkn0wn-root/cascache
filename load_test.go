@@ -326,6 +326,11 @@ func TestLoadReportsALoaderThatExitsItsGoroutine(t *testing.T) {
 	if !errors.Is(err, cascache.ErrLoaderGoexit) {
 		t.Fatalf("Load error = %v, want ErrLoaderGoexit", err)
 	}
+
+	e, found := lh.events.find(cascache.EventLoaderPanic)
+	if !found || e.Key != "42" || !errors.Is(e.Err, cascache.ErrLoaderGoexit) {
+		t.Fatalf("events = %+v, want a loader_panic with ErrLoaderGoexit for key 42", lh.events.all())
+	}
 }
 
 func TestLoadTimeoutBoundsTheLoader(t *testing.T) {
@@ -339,6 +344,131 @@ func TestLoadTimeoutBoundsTheLoader(t *testing.T) {
 	})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Load error = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+func TestLoadTimeoutRefusesTheFillFromALateLoader(t *testing.T) {
+	lh := newLoadHarness(t, func(o *cascache.Options[user]) {
+		o.LoadTimeout = 20 * time.Millisecond
+	})
+
+	got, err := lh.cache.Load(context.Background(), "42", func(ctx context.Context) (user, error) {
+		<-ctx.Done()
+		return ada, nil
+	})
+	// The caller waited for the loader, so it keeps the value it produced.
+	if err != nil || got != ada {
+		t.Fatalf("Load = %+v, %v; want %+v and no error", got, err, ada)
+	}
+	if _, ok := lh.mustGet(t, "42"); ok {
+		t.Fatal("a loader that returned after its timeout filled the cache")
+	}
+
+	fillErr := onlyFill(t, lh.reports()[0]).Err
+	if !errors.Is(fillErr, context.DeadlineExceeded) {
+		t.Fatalf("fill error = %v, want context.DeadlineExceeded", fillErr)
+	}
+}
+
+func TestLoadTimeoutRefusesAFillAfterASlowComputeTTL(t *testing.T) {
+	var runCtx context.Context
+	ready := make(chan struct{})
+
+	lh := newLoadHarness(t, func(o *cascache.Options[user]) {
+		o.LoadTimeout = 20 * time.Millisecond
+		o.ComputeTTL = func() (time.Duration, error) {
+			<-ready
+			<-runCtx.Done()
+			return time.Hour, nil
+		}
+	})
+
+	got, err := lh.cache.Load(context.Background(), "42", func(ctx context.Context) (user, error) {
+		runCtx = ctx
+		close(ready)
+		return ada, nil
+	})
+	if err != nil || got != ada {
+		t.Fatalf("Load = %+v, %v; want %+v and no error", got, err, ada)
+	}
+	if _, ok := lh.mustGet(t, "42"); ok {
+		t.Fatal("a fill started after the run's deadline had passed")
+	}
+
+	fillErr := onlyFill(t, lh.reports()[0]).Err
+	if !errors.Is(fillErr, context.DeadlineExceeded) {
+		t.Fatalf("fill error = %v, want context.DeadlineExceeded", fillErr)
+	}
+}
+
+func TestLoadTimeoutRefusesAFillAfterASlowSetCost(t *testing.T) {
+	var runCtx context.Context
+	ready := make(chan struct{})
+
+	lh := newLoadHarness(t, func(o *cascache.Options[user]) {
+		o.LoadTimeout = 20 * time.Millisecond
+		o.ComputeSetCost = func(string, []byte) int64 {
+			<-ready
+			<-runCtx.Done()
+			return 1
+		}
+	})
+
+	got, err := lh.cache.Load(context.Background(), "42", func(ctx context.Context) (user, error) {
+		runCtx = ctx
+		close(ready)
+		return ada, nil
+	})
+	if err != nil || got != ada {
+		t.Fatalf("Load = %+v, %v; want %+v and no error", got, err, ada)
+	}
+	if _, ok := lh.mustGet(t, "42"); ok {
+		t.Fatal("a write was admitted after the run's deadline had passed")
+	}
+
+	fillErr := onlyFill(t, lh.reports()[0]).Err
+	if !errors.Is(fillErr, context.DeadlineExceeded) {
+		t.Fatalf("fill error = %v, want context.DeadlineExceeded", fillErr)
+	}
+}
+
+func TestLoadTimeoutFreesTheKeyForLaterCallers(t *testing.T) {
+	lh := newLoadHarness(t, func(o *cascache.Options[user]) {
+		o.LoadTimeout = 20 * time.Millisecond
+	})
+
+	release := make(chan struct{})
+	expired := make(chan struct{})
+	stuck := make(chan struct{})
+	defer func() {
+		close(release)
+		<-stuck
+	}()
+
+	go func() {
+		defer close(stuck)
+		_, _ = lh.cache.Load(context.Background(), "42", func(ctx context.Context) (user, error) {
+			<-ctx.Done()
+			close(expired)
+			<-release
+			return user{}, ctx.Err()
+		})
+	}()
+	<-expired
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var ran atomic.Bool
+	got, err := lh.cache.Load(ctx, "42", func(context.Context) (user, error) {
+		ran.Store(true)
+		return ada, nil
+	})
+	if err != nil || got != ada {
+		t.Fatalf("Load = %+v, %v; want %+v and no error", got, err, ada)
+	}
+	if !ran.Load() {
+		t.Fatal("a later caller joined the run that outlived its timeout")
 	}
 }
 

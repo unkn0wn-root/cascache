@@ -196,6 +196,13 @@ func TestNewRequiresKeyFuncAndCodec(t *testing.T) {
 		t.Fatalf("New without a key func = %v", err)
 	}
 
+	negativeTimeout := base
+	negativeTimeout.LoadTimeout = -time.Second
+	if _, err := typed.New(negativeTimeout); err == nil ||
+		!strings.Contains(err.Error(), "load timeout") {
+		t.Fatalf("New with a negative load timeout = %v", err)
+	}
+
 	noCodec := base
 	noCodec.Codec = nil
 	if _, err := typed.New(noCodec); err == nil || !strings.Contains(err.Error(), "codec") {
