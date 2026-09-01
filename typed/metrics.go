@@ -61,7 +61,6 @@ type Metrics struct {
 	LoaderPanic func()
 }
 
-// Build an observer only when a health callback is set.
 func (m Metrics) observer() cascache.Observer {
 	if m.EntryRejected == nil && m.StoreRejected == nil &&
 		m.CleanupFailed == nil && m.LoaderPanic == nil {
@@ -70,8 +69,6 @@ func (m Metrics) observer() cascache.Observer {
 	return cascache.ObserverFunc(m.observe)
 }
 
-// Build a load callback only when a load metric is set.
-// A nil one lets the core skip its own reporting too, not just this dispatch.
 func (m Metrics) loadFunc() cascache.LoadFunc {
 	if m.Hit == nil && m.Miss == nil &&
 		m.Fill == nil && m.SetSkipped == nil &&

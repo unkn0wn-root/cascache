@@ -1,5 +1,4 @@
-// Package cascache caches values that an invalidation retires everywhere at
-// once, including copies this process cannot reach.
+// Package cascache caches values until their invalidation state changes.
 //
 // Every key carries invalidation state, and a stored value is served only while
 // the state it was written under is still current. Invalidating a key replaces

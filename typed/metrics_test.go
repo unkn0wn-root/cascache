@@ -9,14 +9,10 @@ import (
 	"github.com/unkn0wn-root/cascache/v4"
 )
 
-// Every callback reaches the cache through exactly one hook: the observer for
-// health events, the load func for the load path, or a direct call from the
-// operation that records it. A callback missing from the hook that dispatches it
-// would be set by the caller and never called. Every field of Metrics must
-// appear below, which the table checks against Metrics itself.
+// Cover every Metrics field and record which hook dispatches it.
 func TestEveryCallbackIsWiredToTheHookThatDispatchesIt(t *testing.T) {
 	cases := []struct {
-		field        string // the Metrics callback this case sets
+		field        string
 		metrics      Metrics
 		wantObserver bool
 		wantLoad     bool
@@ -37,7 +33,7 @@ func TestEveryCallbackIsWiredToTheHookThatDispatchesIt(t *testing.T) {
 		// EventOperationFailed, so Error needs no observer.
 		{field: "Error", metrics: Metrics{Error: func(cascache.Op, error) {}}, wantLoad: true},
 
-		// Health events reach a callback only through the observer.
+		// Cache events reach a callback only through the observer.
 		{
 			field:        "EntryRejected",
 			metrics:      Metrics{EntryRejected: func(cascache.RejectReason) {}},

@@ -6,7 +6,7 @@ import (
 	"github.com/unkn0wn-root/cascache/v4/backend"
 )
 
-// One MGET reads the value and fence from their shared cluster slot.
+// Read gets the value and fence with one MGET from their shared cluster slot.
 func (b *Backend) Read(ctx context.Context, key backend.Key) (backend.ReadResult, error) {
 	if err := checkKey(b.client, key); err != nil {
 		return backend.ReadResult{}, err
@@ -59,7 +59,7 @@ func (b *Backend) CompareAndStore(ctx context.Context, req backend.StoreRequest)
 	}
 }
 
-// The script changes the fence and deletes the value atomically.
+// Invalidate changes the fence and deletes the value atomically.
 func (b *Backend) Invalidate(
 	ctx context.Context,
 	key backend.Key,

@@ -22,7 +22,7 @@ const NoExpiration = backend.NoExpiration
 //
 // Snapshots are opaque. The zero Snapshot is invalid.
 type Snapshot struct {
-	_     [0]func() // Keep representation changes from becoming API breaks.
+	_     [0]func() // Keep future representation changes compatible.
 	fence backend.Fence
 }
 
@@ -101,14 +101,13 @@ type Options[V any] struct {
 	// ComputeSetCost returns the admission cost of a stored frame. Nil uses 1.
 	ComputeSetCost SetCostFunc
 
-	// LoadTimeout bounds a shared loader run. Zero means no timeout; negative
-	// values are invalid. Cancellation is cooperative, so loaders must honor the
-	// context passed to them. After a timeout, later callers may start another
-	// loader for the same key while the expired loader is still running.
+	// LoadTimeout limits a shared loader run. Zero means no timeout; negative
+	// values are invalid. Loaders must honor their context. After a timeout,
+	// another run for the same key may start before the old one returns.
 	//
-	// A run whose context ends before backend admission begins still returns its
-	// value to waiting callers, but attempts no fill. A write already under way may
-	// still commit; [backend.Backend] permits that.
+	// If the context ends before the write starts, callers still receive the
+	// loaded value but the cache is not filled. A write already in progress may
+	// still finish.
 	LoadTimeout time.Duration
 
 	// Disabled makes the cache a pass-through.
@@ -117,7 +116,7 @@ type Options[V any] struct {
 	// OnLoad observes completed loads.
 	OnLoad LoadFunc
 
-	// Observer receives health events.
+	// Observer receives cache events.
 	Observer Observer
 }
 

@@ -104,7 +104,7 @@ func TestSubmitAfterCloseIsDropped(t *testing.T) {
 }
 
 func TestCloseIsIdempotent(t *testing.T) {
-	q := asynchook.New(0, 0) // defaults
+	q := asynchook.New(0, 0)
 	for range 3 {
 		q.Close()
 	}

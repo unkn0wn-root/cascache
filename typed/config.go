@@ -7,7 +7,7 @@ import (
 	"github.com/unkn0wn-root/cascache/v4"
 )
 
-// Config holds settings shared by all storage arrangements.
+// Config holds settings used by [New] and [NewRedis].
 type Config struct {
 	// Namespace must be unique among caches sharing a backend.
 	Namespace string

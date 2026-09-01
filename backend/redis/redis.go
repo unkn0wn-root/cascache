@@ -42,10 +42,8 @@ type Options struct {
 	// Value TTLs are limited to this duration.
 	InvalidationTTL time.Duration
 
-	// AllowReplicaReads permits reads that may be served by a replica. Enabling
-	// it gives up the guarantee that a completed invalidation is immediately
-	// visible to later reads. It is not recommended for freshness-critical
-	// caches.
+	// AllowReplicaReads accepts clients that may read from replicas. Later reads
+	// may not see a completed invalidation until replication catches up.
 	AllowReplicaReads bool
 }
 
@@ -95,8 +93,7 @@ func newFenceStore(client goredis.UniversalClient, opts Options) (*fenceStore, e
 }
 
 // Shared keeps values in a caller-owned store and invalidation state in Redis.
-// Reads never leave the process, and an invalidation still reaches every
-// replica.
+// Instances that share the Redis state observe the same invalidations.
 type Shared struct {
 	backend *backend.Composite
 }
@@ -171,7 +168,6 @@ func readsFromReplicas(client goredis.UniversalClient) bool {
 
 func (f *fenceStore) Lifetime() time.Duration { return f.fenceTTL }
 
-// Shared argument checks for the Redis backends.
 func checkClient(client goredis.UniversalClient) error {
 	if typednil.Is(client) {
 		return ErrNilClient

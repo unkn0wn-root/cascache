@@ -2,10 +2,8 @@ package codec
 
 import "google.golang.org/protobuf/proto"
 
-// Protobuf is a Codec for protocol buffer messages. Requires a constructor
-// for the concrete message type T so Decode can allocate a new instance.
-//
-// The zero value is NOT ready to use. Build with NewProtobuf.
+// Protobuf encodes protocol buffer messages. Create it with [NewProtobuf]; the
+// zero value is not usable.
 //
 // Example:
 //
@@ -15,8 +13,7 @@ type Protobuf[T proto.Message] struct {
 	newMessage func() T
 }
 
-// NewProtobuf constructs a Protobuf codec for the given message type T.
-// Provide a constructor that returns a new instance of T.
+// NewProtobuf returns a codec that uses ctor to allocate messages for decoding.
 func NewProtobuf[T proto.Message](ctor func() T) Protobuf[T] {
 	return Protobuf[T]{newMessage: ctor}
 }

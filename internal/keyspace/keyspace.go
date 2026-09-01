@@ -20,7 +20,6 @@ func New(namespace string) Space {
 func (s Space) Key(userKey string) backend.Key {
 	k, err := backend.NewKey(s.prefix + userKey)
 	if err != nil {
-		// The prefix makes this unreachable; backends still reject the zero key.
 		return backend.Key{}
 	}
 	return k

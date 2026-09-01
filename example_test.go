@@ -12,7 +12,6 @@ import (
 	"github.com/unkn0wn-root/cascache/v4/provider"
 )
 
-// Minimal value store for the examples.
 type memoryStore struct {
 	mu      sync.Mutex
 	entries map[string][]byte

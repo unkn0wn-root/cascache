@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-// Defaults for [LocalOptions].
 const (
 	// DefaultInvalidationTTL is how long invalidation state lives by default.
 	DefaultInvalidationTTL = 24 * time.Hour
@@ -42,12 +41,10 @@ type memoryShard struct {
 	entries map[string]memoryEntry
 }
 
-// memoryFenceStore keeps fences in this process.
 type memoryFenceStore struct {
 	seed      maphash.Seed
 	retention time.Duration
 	shards    [memoryShards]memoryShard
-	// now is replaced in tests so expiry can be exercised without waiting.
 	now       func() time.Time
 	stop      chan struct{}
 	wg        sync.WaitGroup
@@ -99,7 +96,6 @@ func (s *memoryFenceStore) shard(key Key) *memoryShard {
 	return &s.shards[maphash.String(s.seed, key.ID())%memoryShards]
 }
 
-// Check whether e is still current at now.
 func (s *memoryFenceStore) live(e memoryEntry, now time.Time) bool {
 	return s.retention <= 0 || now.Sub(e.writtenAt) < s.retention
 }
@@ -175,8 +171,6 @@ func (s *memoryFenceStore) Replace(_ context.Context, key Key, next Fence) error
 	return nil
 }
 
-// Cleanup removes fences past their retention. It does nothing when fences do
-// not expire.
 func (s *memoryFenceStore) cleanupExpired() {
 	if s.retention > 0 {
 		s.cleanup(s.now())
@@ -196,7 +190,6 @@ func (s *memoryFenceStore) cleanup(now time.Time) {
 	}
 }
 
-// Len reports how many fences are held. It is intended for tests and metrics.
 func (s *memoryFenceStore) len() int {
 	var n int
 	for i := range s.shards {
@@ -208,7 +201,6 @@ func (s *memoryFenceStore) len() int {
 	return n
 }
 
-// Close stops the background sweep. It is safe to call more than once.
 func (s *memoryFenceStore) close() error {
 	if s == nil || s.stop == nil {
 		return nil

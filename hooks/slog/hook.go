@@ -1,4 +1,4 @@
-// Package sloghook logs cascache health events with log/slog.
+// Package sloghook logs cascache events with log/slog.
 package sloghook
 
 import (

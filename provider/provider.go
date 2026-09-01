@@ -1,6 +1,5 @@
-// Package provider defines byte stores used by cascache. Stores hold opaque
-// frames and may evict, expire, or reject them; fences decide whether a value is
-// current.
+// Package provider defines stores for cached byte slices. Stores may evict,
+// expire, or reject values; backend fences decide whether a value is current.
 package provider
 
 import (
@@ -8,7 +7,7 @@ import (
 	"time"
 )
 
-// Store is a byte-transparent value store.
+// Store reads and writes byte slices without interpreting them.
 type Store interface {
 	// Get returns the stored value. A missing key is (nil, false, nil).
 	Get(ctx context.Context, key string) ([]byte, bool, error)

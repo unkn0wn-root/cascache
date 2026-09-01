@@ -11,6 +11,7 @@ import (
 	pr "github.com/unkn0wn-root/cascache/v4/provider"
 )
 
+// ErrNilClient reports a missing Redis client.
 var ErrNilClient = errors.New("redis provider: nil client")
 
 // Redis is a value-only [pr.Store]. Use backend/redis when values and fences
@@ -24,8 +25,11 @@ var _ pr.Store = (*Redis)(nil)
 
 // Config configures a [Redis] store.
 type Config struct {
-	Client      goredis.UniversalClient
-	CloseClient bool // set true only if this provider exclusively owns the client
+	Client goredis.UniversalClient
+
+	// CloseClient makes [Redis.Close] close Client. Set it only when the provider
+	// owns the client.
+	CloseClient bool
 }
 
 // New returns a Redis-backed store.

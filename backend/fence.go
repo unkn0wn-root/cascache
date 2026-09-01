@@ -12,7 +12,7 @@ const (
 	// FenceSize is the fixed binary size of a fence.
 	FenceSize     = 16
 	fenceTextSize = FenceSize * 2
-	// Buffer entropy to avoid a system call for each fence.
+	// Buffer random bytes to reduce system calls.
 	fenceBlockSize = 4096
 )
 
@@ -27,7 +27,6 @@ type Fence struct {
 	token [FenceSize]byte
 }
 
-// Serve tokens from buffered entropy.
 type fenceSource struct {
 	block [fenceBlockSize]byte
 	left  []byte
@@ -35,10 +34,9 @@ type fenceSource struct {
 
 var fenceSources = sync.Pool{New: func() any { return new(fenceSource) }}
 
-// NewFence returns a fresh, unguessable fence.
+// NewFence returns a new random fence.
 //
-// It panics if the operating system cannot supply entropy; there is no safe
-// fallback for a version token.
+// It panics if the operating system cannot supply random bytes.
 func NewFence() Fence {
 	src := fenceSources.Get().(*fenceSource)
 	defer fenceSources.Put(src)

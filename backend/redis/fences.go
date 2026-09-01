@@ -54,7 +54,7 @@ func (f *fenceStore) Retain(ctx context.Context, key backend.Key, expected backe
 	return reply == 1, nil
 }
 
-// SET replaces both the fence and its old TTL.
+// Replace uses SET to replace both the fence and its old TTL.
 func (f *fenceStore) Replace(ctx context.Context, key backend.Key, next backend.Fence) error {
 	if err := checkKeyFence(f.client, key, next); err != nil {
 		return err

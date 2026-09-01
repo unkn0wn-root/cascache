@@ -33,21 +33,20 @@ type Options[K comparable, V any] struct {
 	// ComputeSetCost returns the admission cost of a stored frame. Nil uses 1.
 	ComputeSetCost cascache.SetCostFunc
 
-	// LoadTimeout bounds a shared loader run. Zero means no timeout; negative
-	// values are invalid. Cancellation is cooperative, so loaders must honor the
-	// context passed to them. After a timeout, later callers may start another
-	// loader for the same key while the expired loader is still running.
+	// LoadTimeout limits a shared loader run. Zero means no timeout; negative
+	// values are invalid. Loaders must honor their context. After a timeout,
+	// another run for the same key may start before the old one returns.
 	//
-	// A run whose context ends before backend admission begins still returns its
-	// value to waiting callers, but attempts no fill. A write already under way may
-	// still commit; [backend.Backend] permits that.
+	// If the context ends before the write starts, callers still receive the
+	// loaded value but the cache is not filled. A write already in progress may
+	// still finish.
 	LoadTimeout time.Duration
 
-	// Observer receives health events, alongside the ones Metrics consumes.
+	// Observer receives cache events alongside the ones Metrics consumes.
 	Observer cascache.Observer
 }
 
-// Validate checks the fields every arrangement needs.
+// Validate checks the fields used by every cache.
 func (opts Options[K, V]) Validate() error {
 	if err := opts.Config.Validate(); err != nil {
 		return err
@@ -63,7 +62,6 @@ func (opts Options[K, V]) Validate() error {
 	return nil
 }
 
-// Include the backend default when checking how long invalidation state lives.
 func (opts Options[K, V]) checkInvalidationTTL(defaultTTL time.Duration) error {
 	lifetime := opts.InvalidationTTL
 	switch {

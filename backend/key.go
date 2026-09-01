@@ -20,9 +20,7 @@ const (
 )
 
 const (
-	// tagSize is the hex width of the Redis Cluster hash tag.
-	tagSize = 8
-	// slotSize covers "{" + tag + "}:".
+	tagSize  = 8
 	slotSize = 1 + tagSize + 2
 	idAt     = len(ValueRoot) + slotSize
 )

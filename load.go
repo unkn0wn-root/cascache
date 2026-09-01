@@ -76,23 +76,18 @@ type LoadInfo struct {
 // Implementations must be safe for concurrent use and must not block.
 type LoadFunc func(ctx context.Context, info LoadInfo)
 
-// Load returns a cached value or calls load after a miss. If several callers
-// request the same missing key at the same time, Load calls the loader once and
-// returns the result to all of them.
-// Load takes a snapshot before calling the loader and checks it before caching
-// the result. An invalidation during the load therefore prevents the fill.
-// A caller never accepts a shared value retired before the call began. If an
-// older run cannot prove its value is current, the caller joins a new run.
-// Changes made without an invalidation are governed by the TTL.
-// Cache lookup and fill errors do not hide a value returned by the loader. They
+// Load returns a cached value or calls load after a miss. Concurrent calls for
+// the same missing key share one loader run.
+//
+// An invalidation during the load prevents the cache write. A caller also
+// rejects a shared result that may predate the call and joins a new run instead.
+// Cache read and write errors do not hide a value returned by the loader; they
 // are reported through [LoadInfo].
-// Canceling one caller does not cancel a run still used by others. The run ends
-// when no callers remain or [Options.LoadTimeout] expires. Cancellation is
-// cooperative: load must honor its context. Once a run expires, a later caller
-// may start another run for the same key while the expired loader is still
-// running, so loader executions can overlap. A run that ends before backend
-// admission keeps its value but attempts no fill. Loader panics return a
-// [*PanicError]. A disabled cache calls load with the caller's context.
+//
+// Canceling one caller does not cancel a run that has other callers. The run
+// ends when no callers remain or [Options.LoadTimeout] expires. Loaders must
+// honor their context. A later run may overlap a loader that ignored
+// cancellation. Loader panics return a [*PanicError].
 func (c *Cache[V]) Load(ctx context.Context, key string, load Loader[V]) (V, error) {
 	var zero V
 	if load == nil {
@@ -158,7 +153,6 @@ func (l *loadCall[V]) run(ctx context.Context) (V, error) {
 	return res.value, nil
 }
 
-// Join or start a loader run and record this caller's role in it.
 func (l *loadCall[V]) attempt(ctx context.Context) (fillResult[V], error) {
 	res, role, err := l.cache.fills.Do(ctx, l.key, l.cache.fill(l.key, l.load))
 
@@ -196,7 +190,6 @@ func (l *loadCall[V]) lookup(ctx context.Context) (V, bool) {
 	return zero, false
 }
 
-// Copy the work assigned to this caller from the shared run.
 func (l *loadCall[V]) adopt(ctx context.Context, res fillResult[V]) {
 	if res.missed {
 		l.info.Missed = true
@@ -204,7 +197,6 @@ func (l *loadCall[V]) adopt(ctx context.Context, res fillResult[V]) {
 	if res.lookupErr != nil {
 		l.noteLookupErr(ctx, res.lookupErr)
 	}
-	// Hits and loader errors do not attempt a fill.
 	if res.fill.Outcome != SetOutcomeUnknown || res.fillErr != nil {
 		l.info.Fills = append(l.info.Fills, LoadFill{Result: res.fill, Err: res.fillErr})
 	}
@@ -274,23 +266,20 @@ func (c *Cache[V]) fill(key string, load Loader[V]) func(context.Context) (fillR
 		}
 		res.value = v
 
-		// The run is over, so refuse a write that would give an arbitrarily old
-		// value a fresh TTL. The loader still succeeded, so keep its value.
-		// SetWithTTL refuses again at admission; this skips the encoding first.
+		// Do not give a late loader result a fresh TTL. SetWithTTL checks the
+		// context again, but checking here avoids encoding the value.
 		if err := ctx.Err(); err != nil {
 			res.fillErr = &OpError{Op: OpSet, Key: key, Err: err}
 			return res, nil //nolint:nilerr // the loader succeeded; only the fill did not
 		}
 
 		if snapshotErr != nil {
-			// Return the value and report only the fill error.
 			res.fillErr = snapshotErr
 			return res, nil //nolint:nilerr // the loader succeeded; only the fill did not
 		}
 
 		ttl, err := c.computeTTL()
 		if err != nil {
-			// TTL errors stop the fill, not the successful load.
 			res.fillErr = &OpError{Op: OpComputeTTL, Key: key, Err: wrapComputeTTL(err)}
 			return res, nil
 		}
@@ -314,7 +303,6 @@ func wrapComputeTTL(err error) error {
 	return fmt.Errorf("%w: %w", ErrComputeTTL, err)
 }
 
-// Preserve panic details while translating flight errors to the public API.
 func (c *Cache[V]) loaderError(err error) error {
 	var panicErr *flight.PanicError
 	switch {

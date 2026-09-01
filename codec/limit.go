@@ -2,20 +2,13 @@ package codec
 
 import "fmt"
 
-// LimitCodec wraps another codec to enforce a maximum allowed payload size
-// at Decode time. Encode is forwarded to Inner unchanged.
-// If MaxDecode <= 0, size limiting is disabled.
-//
-// Typical use: protect against oversized/malicious inputs coming from a
-// shared cache or untrusted source.
+// LimitCodec rejects payloads larger than MaxDecode before decoding them.
+// A nonpositive MaxDecode disables the limit. Encode passes values to Inner.
 type LimitCodec[V any] struct {
-	// Inner is the underlying codec being wrapped. It must be set; a nil Inner
-	// panics on first use.
+	// Inner is the wrapped codec. It must not be nil.
 	Inner Codec[V]
 
-	// MaxDecode is the maximum permitted length (in bytes) of the incoming
-	// payload for Decode. If payload length exceeds MaxDecode, Decode returns
-	// an error without invoking Inner.
+	// MaxDecode is the largest payload Decode accepts, in bytes.
 	MaxDecode int
 }
 
