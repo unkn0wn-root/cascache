@@ -6,8 +6,6 @@ import (
 	"github.com/unkn0wn-root/cascache/v4/backend"
 )
 
-// Parse the [value, fence] returned by MGET. Preserve a missing fence so the
-// caller can reject the value.
 func readResult(values []any) (backend.ReadResult, error) {
 	if len(values) != 2 {
 		return backend.ReadResult{}, errReplyLength

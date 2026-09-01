@@ -5,12 +5,15 @@ import (
 	"fmt"
 )
 
-// Construction and input errors.
 var (
+	// ErrNoNamespace reports a missing cache namespace.
 	ErrNoNamespace = errors.New("cascache: namespace is required")
-	ErrNoBackend   = errors.New("cascache: backend is required")
-	ErrNoCodec     = errors.New("cascache: codec is required")
-	ErrNoLoader    = errors.New("cascache: loader is required")
+	// ErrNoBackend reports a missing cache backend.
+	ErrNoBackend = errors.New("cascache: backend is required")
+	// ErrNoCodec reports a missing value codec.
+	ErrNoCodec = errors.New("cascache: codec is required")
+	// ErrNoLoader reports a missing loader.
+	ErrNoLoader = errors.New("cascache: loader is required")
 	// ErrInvalidSnapshot reports a zero snapshot passed to a write.
 	ErrInvalidSnapshot = errors.New("cascache: invalid snapshot")
 	// ErrInvalidTTL reports a negative TTL other than [NoExpiration].
@@ -61,7 +64,8 @@ func (e *OpError) Unwrap() error {
 	return e.Err
 }
 
-// PanicError carries what a loader panicked with, and where. It unwraps to [ErrLoaderPanic].
+// PanicError records a loader's panic value and stack. It unwraps to
+// [ErrLoaderPanic].
 type PanicError struct {
 	Value any
 	Stack []byte

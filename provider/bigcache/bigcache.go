@@ -77,7 +77,6 @@ func (p *BigCache) Get(_ context.Context, key string) ([]byte, bool, error) {
 }
 
 func (p *BigCache) Set(_ context.Context, key string, value []byte, _ int64, _ time.Duration) (bool, error) {
-	// Per-entry TTL not supported; LifeWindow applies.
 	if err := p.c.Set(key, value); err != nil {
 		return false, err
 	}

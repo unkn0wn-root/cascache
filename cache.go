@@ -16,7 +16,6 @@ import (
 // retired it. It is safe for concurrent use if its codec and callbacks are. The
 // caller owns its dependencies.
 type Cache[V any] struct {
-	// Invalidation does not depend on V.
 	inv *Invalidator
 
 	codec      codec.Codec[V]
@@ -61,10 +60,8 @@ func New[V any](opts Options[V]) (*Cache[V], error) {
 	return c, nil
 }
 
-// Catch typed nils during construction.
 func isNil(v any) bool { return typednil.Is(v) }
 
-// Flatten typed nils so call sites need one nil check.
 func nilIfNil(o Observer) Observer {
 	if isNil(o) {
 		return nil
@@ -112,12 +109,9 @@ func (c *Cache[V]) Snapshot(ctx context.Context, key string) (Snapshot, error) {
 	return Snapshot{fence: fence}, nil
 }
 
-// Set stores value while snapshot is still current, at the cache's own TTL: the
-// one [Options.ComputeTTL] returns, or [Options.DefaultTTL] when it is not set.
-// It is the TTL [Cache.Load] gives its fills.
-// A snapshot that is no longer current returns [SetOutcomeConflict], not an
-// error: the value was already stale when it arrived, and declining to cache it
-// is the point.
+// Set stores value while snapshot is still current. It uses the TTL returned by
+// [Options.ComputeTTL], or [Options.DefaultTTL] when no function is set. A stale
+// snapshot returns [SetOutcomeConflict], not an error.
 func (c *Cache[V]) Set(
 	ctx context.Context,
 	key string,
@@ -154,9 +148,8 @@ func (c *Cache[V]) SetWithTTL(
 		return SetResult{}, c.opErr(OpSet, key, err)
 	}
 
-	// Preparation runs the caller's codec and cost func, so admit only while the
-	// context is still live. This is the last point a write can be refused: once
-	// CompareAndStore is under way, [backend.Backend] does not promise a rollback.
+	// The codec and cost function run before the backend call. Once
+	// CompareAndStore starts, the backend does not promise a rollback.
 	if err := ctx.Err(); err != nil {
 		return SetResult{}, c.opErr(OpSet, key, err)
 	}

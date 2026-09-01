@@ -10,8 +10,8 @@
 //
 // # Available backends
 //
-// [Backend] defines the interface. Test implementations with
-// [backend/backendtest.TestBackend].
+// [Backend] defines the interface. Use [backend/backendtest.TestBackend] to test
+// an implementation.
 //
 // [Local] combines a caller-owned value store with process-local invalidation
 // state. [Composite] and [FenceStore] can be used to build another backend. The

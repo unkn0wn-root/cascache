@@ -13,7 +13,6 @@ import (
 
 const compositeShards = 256
 
-// Constructor errors.
 var (
 	// ErrNilStore reports a missing or typed-nil value store.
 	ErrNilStore = errors.New("cascache/backend: nil value store")
@@ -21,13 +20,10 @@ var (
 	ErrNilFenceStore = errors.New("cascache/backend: nil fence store")
 )
 
-// Composite combines a value store and a [FenceStore]. This supports local
-// values with either local or shared fences.
-//
-// # Atomicity
-//
-// Composite is not atomic across its stores. A race may waste a write or cause
-// a miss, but reads still require the value's stamped fence to be current.
+// Composite combines a value store with a [FenceStore]. It can pair local
+// values with local or shared fences. Operations are not atomic across the two
+// stores, so a race may waste a write or cause a miss. Reads still require the
+// value's fence to be current.
 //
 // Value operations are serialized per key so [Composite.Discard] cannot remove
 // a newer value. Prefer a native backend when the value store is remote.
@@ -52,7 +48,6 @@ func NewComposite(values provider.Store, fences FenceStore) (*Composite, error) 
 	return &Composite{values: values, fences: fences, seed: maphash.MakeSeed()}, nil
 }
 
-// Pick the lock for this key's value operations.
 func (b *Composite) shardLock(key Key) *sync.Mutex {
 	return &b.locks[maphash.String(b.seed, key.ID())%compositeShards]
 }

@@ -38,8 +38,7 @@ func New[K comparable, V any](opts Options[K, V]) (*Cache[K, V], error) {
 }
 
 // NewRedis creates a cache that stores values and invalidation state atomically
-// in Redis.
-// It does not close the client.
+// in Redis. It does not close the client.
 func NewRedis[K comparable, V any](
 	client goredis.UniversalClient,
 	opts Options[K, V],
@@ -167,8 +166,7 @@ func (c *Cache[K, V]) Invalidator() *Invalidator[K] {
 	}
 }
 
-// Invalidator retires entries of a cache whose value type it does not know. It
-// keeps the two callbacks it records rather than the whole [Metrics].
+// Invalidator retires entries without knowing the cache's value type.
 type Invalidator[K comparable] struct {
 	inv           *cascache.Invalidator
 	key           func(K) string

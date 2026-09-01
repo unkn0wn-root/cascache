@@ -15,7 +15,6 @@ type entry[V any] struct {
 	ok  bool
 }
 
-// Resolve the public TTL rules to the backend form.
 func (c *Cache[V]) resolveTTL(ttl time.Duration) (time.Duration, error) {
 	if ttl == 0 {
 		ttl = c.ttl
@@ -48,7 +47,6 @@ func (c *Cache[V]) prepareWrite(
 		return backend.StoreRequest{}, err
 	}
 
-	// Store the fence with the value so reads can validate the pair.
 	raw, err := wire.Encode(snapshot.fence, payload)
 	if err != nil {
 		return backend.StoreRequest{}, err
@@ -82,8 +80,6 @@ func (c *Cache[V]) setResult(key string, res backend.StoreResult) (SetResult, er
 	}
 }
 
-// Decode and validate a read. Invalid entries become misses and are removed
-// when safe.
 func (c *Cache[V]) decode(ctx context.Context, key string, bkey backend.Key, r backend.ReadResult) entry[V] {
 	if !r.Found {
 		return entry[V]{}
@@ -120,7 +116,6 @@ func (c *Cache[V]) decode(ctx context.Context, key string, bkey backend.Key, r b
 	return entry[V]{val: val, ok: true}
 }
 
-// Report an unusable entry and remove those exact bytes if they are unchanged.
 func (c *Cache[V]) reject(
 	ctx context.Context,
 	key string,

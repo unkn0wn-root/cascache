@@ -64,7 +64,6 @@ func (s *Store) Get(_ context.Context, key string) ([]byte, bool, error) {
 		delete(s.entries, key)
 		return nil, false, nil
 	}
-	// Keep stored bytes isolated from tests.
 	return bytes.Clone(e.value), true, nil
 }
 

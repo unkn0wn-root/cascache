@@ -543,8 +543,6 @@ func TestInvalidatorRetiresThroughTheSameKeyFunc(t *testing.T) {
 	}
 }
 
-// failingInvalidate is a backend whose invalidations fail; everything else
-// behaves normally.
 type failingInvalidate struct {
 	backend.Backend
 	err error
@@ -601,7 +599,6 @@ func TestInvalidatorRecordsTheSameMetricsAsTheCache(t *testing.T) {
 	}
 }
 
-// A disabled cache does nothing, so its invalidator records nothing.
 func TestDisabledInvalidatorRecordsNothing(t *testing.T) {
 	ctx := context.Background()
 	cache, c, _ := newCache(t, func(o *typed.Options[string, user]) { o.Disabled = true })

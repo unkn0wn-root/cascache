@@ -115,8 +115,8 @@ func (r RejectReason) String() string {
 	}
 }
 
-// Event describes something worth observing. Use keyed fields when building one
-// because later releases may add data.
+// Event reports a cache event. Use keyed fields because later releases may add
+// data.
 type Event struct {
 	Type EventType
 	Op   Op
@@ -132,8 +132,8 @@ type Event struct {
 }
 
 // Observer receives cache events on the calling goroutine. Implementations must
-// be safe for concurrent use and must not block. The hooks/async package can
-// move observation off the operation path.
+// be safe for concurrent use and must not block. The hooks/async package can run
+// observers in the background.
 //
 // New event types and reasons are added over time, so an Observer should ignore
 // values it does not recognize rather than treat them as errors.

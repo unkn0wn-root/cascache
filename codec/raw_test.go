@@ -16,7 +16,6 @@ func TestBytesDecodeCopies(t *testing.T) {
 		t.Fatalf("Decode = %q, want %q", out, stored)
 	}
 
-	// mutating the returned slice must not reach the stored buffer
 	out[0] = 'X'
 	if stored[0] != 'c' {
 		t.Fatalf("stored buffer mutated to %q, want unchanged", stored)

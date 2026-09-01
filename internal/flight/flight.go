@@ -146,7 +146,6 @@ func (g *Group[V]) wait(ctx context.Context, key string, c *call[V]) (V, Role, e
 	return zero, Abandoned, ctx.Err()
 }
 
-// Give the first caller ownership of the completed call.
 func (g *Group[V]) settle(c *call[V]) Role {
 	g.mu.Lock()
 	defer g.mu.Unlock()

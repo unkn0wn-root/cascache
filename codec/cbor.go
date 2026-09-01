@@ -4,13 +4,8 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-// CBOR is a Codec that serializes values using fxamacker/cbor.
-// The zero value is NOT ready to use. Construct with NewCBOR or MustCBOR.
-//
-// Use deterministic=true for canonical encoding (RFC 8949 Core Deterministic)
-// when you need byte-for-byte stable outputs (e.g., hashing/content addressing).
-// Otherwise PreferredUnsortedEncOptions are used (sensible defaults).
-// Time values are encoded as RFC3339Nano for stable, human-readable timestamps.
+// CBOR encodes values with fxamacker/cbor. Create it with [NewCBOR] or
+// [MustCBOR]; the zero value is not usable.
 type CBOR[V any] struct {
 	enc cbor.EncMode
 	dec cbor.DecMode
@@ -18,11 +13,9 @@ type CBOR[V any] struct {
 
 var _ Codec[struct{}] = CBOR[struct{}]{}
 
-// NewCBOR constructs a CBOR codec.
-//   - Deterministic is true, uses CoreDetEncOptions (RFC 8949).
-//   - Otherwise uses PreferredUnsortedEncOptions (smaller/faster defaults).
-//
-// Also sets time encoding to RFC3339Nano.
+// NewCBOR returns a CBOR codec. When deterministic is true, it uses RFC 8949
+// deterministic encoding. Otherwise it uses the library's preferred unsorted
+// encoding. Times are encoded as RFC3339Nano.
 func NewCBOR[V any](deterministic bool) (CBOR[V], error) {
 	var eo cbor.EncOptions
 	if deterministic {
@@ -43,8 +36,7 @@ func NewCBOR[V any](deterministic bool) (CBOR[V], error) {
 	return CBOR[V]{enc: em, dec: dm}, nil
 }
 
-// MustCBOR is like NewCBOR but panics on error.
-// Should not use for prod just handy for package-level variables in tests/examples.
+// MustCBOR is like [NewCBOR] but panics if the codec cannot be created.
 func MustCBOR[V any](deterministic bool) CBOR[V] {
 	c, err := NewCBOR[V](deterministic)
 	if err != nil {
@@ -53,12 +45,12 @@ func MustCBOR[V any](deterministic bool) CBOR[V] {
 	return c
 }
 
-// Encode encodes v as CBOR using the configured EncMode.
+// Encode encodes v as CBOR.
 func (c CBOR[V]) Encode(v V) ([]byte, error) {
 	return c.enc.Marshal(v)
 }
 
-// Decode decodes b into a V using the configured DecMode.
+// Decode decodes CBOR into a V.
 func (c CBOR[V]) Decode(b []byte) (V, error) {
 	var v V
 	err := c.dec.Unmarshal(b, &v)

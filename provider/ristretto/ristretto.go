@@ -18,7 +18,8 @@ type Ristretto struct {
 
 var _ pr.Store = (*Ristretto)(nil)
 
-// Config sizes the underlying cache. All three fields are required.
+// Config configures the underlying cache. NumCounters, MaxCost, and BufferItems
+// must be positive.
 type Config struct {
 	// NumCounters is how many keys to track for admission.
 	NumCounters int64
@@ -84,8 +85,8 @@ func (p *Ristretto) Del(_ context.Context, key string) error {
 func (p *Ristretto) Wait() { p.c.Wait() }
 
 func (p *Ristretto) Close(_ context.Context) error {
-	p.c.Wait()  // flush pending sets
-	p.c.Close() // release resources
+	p.c.Wait()
+	p.c.Close()
 	return nil
 }
 

@@ -5,10 +5,9 @@ import (
 	"time"
 )
 
-// FenceStore is the advanced storage contract used by [Composite]. It holds the
-// current fence for each key and may be shared by replicas whose values are
-// stored locally. Implementations must be safe for concurrent use and follow
-// the fence guarantees in [Backend].
+// FenceStore stores the current fence for each key. [Composite] uses it to pair
+// a value store with local or shared invalidation state. Implementations must be
+// safe for concurrent use and follow the fence guarantees in [Backend].
 //
 // Writes refresh fence retention; reads do not. Value TTLs must be limited to
 // [FenceStore.Lifetime] so a value cannot outlive its fence.

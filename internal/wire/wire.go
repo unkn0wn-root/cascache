@@ -59,7 +59,6 @@ func Encode(fence backend.Fence, payload []byte) ([]byte, error) {
 	copy(b[offMagic:offVersion], magic)
 	b[offVersion] = version
 	b[offKind] = kindSingle
-	// Append into b's spare capacity.
 	_ = fence.AppendBinary(b[:offFence])
 	binary.BigEndian.PutUint32(b[offVLen:offCRC], uint32(len(payload)))
 	copy(b[headerLen:], payload)
@@ -85,7 +84,6 @@ func Decode(b []byte) (backend.Fence, []byte, error) {
 	}
 	head, body := b[:headerLen], b[headerLen:]
 
-	// Reject truncation and trailing bytes.
 	if uint64(binary.BigEndian.Uint32(head[offVLen:offCRC])) != uint64(len(body)) {
 		return backend.Fence{}, nil, ErrInvalidFrame
 	}
@@ -97,7 +95,6 @@ func Decode(b []byte) (backend.Fence, []byte, error) {
 
 	fence, err := backend.ParseFence(raw)
 	if err != nil {
-		// An invalid fence makes the frame unusable.
 		return backend.Fence{}, nil, ErrInvalidFrame
 	}
 	return fence, body, nil

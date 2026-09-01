@@ -14,7 +14,6 @@ const (
 	DefaultQueueSize = 1024
 )
 
-// Keep the observer with its queued event.
 type queued struct {
 	observer cascache.Observer
 	event    cascache.Event
