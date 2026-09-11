@@ -25,17 +25,6 @@ func (e *PanicError) Error() string {
 
 func (e *PanicError) Unwrap() error { return ErrPanic }
 
-func (r Role) String() string {
-	switch r {
-	case Owned:
-		return "owned"
-	case Shared:
-		return "shared"
-	default:
-		return "abandoned"
-	}
-}
-
 // Role says how a caller left Do.
 type Role uint8
 
@@ -49,6 +38,20 @@ const (
 	Shared
 )
 
+func (r Role) String() string {
+	switch r {
+	case Owned:
+		return "owned"
+	case Shared:
+		return "shared"
+	default:
+		return "abandoned"
+	}
+}
+
+// Group runs one call per key and shares its result with the other callers.
+// Timeout and the hooks are read without holding the lock, so set them before
+// the first Do.
 type Group[V any] struct {
 	// Timeout bounds one call's context. Zero means no timeout. It does not stop
 	// a call that ignores its context, but such a call no longer takes joiners.
@@ -108,7 +111,7 @@ func (g *Group[V]) Do(
 	g.calls[key] = c
 	g.mu.Unlock()
 
-	go g.run(callCtx, key, c, fn)
+	go g.run(key, c, fn)
 
 	return g.wait(ctx, key, c)
 }
@@ -172,12 +175,7 @@ func (g *Group[V]) abandon(key string, c *call[V]) {
 	}
 }
 
-func (g *Group[V]) run(
-	ctx context.Context,
-	key string,
-	c *call[V],
-	fn func(context.Context) (V, error),
-) {
+func (g *Group[V]) run(key string, c *call[V], fn func(context.Context) (V, error)) {
 	returned := false
 	defer func() {
 		switch r := recover(); {
@@ -206,6 +204,6 @@ func (g *Group[V]) run(
 		c.cancel()
 	}()
 
-	c.val, c.err = fn(ctx)
+	c.val, c.err = fn(c.ctx)
 	returned = true
 }

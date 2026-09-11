@@ -272,3 +272,37 @@ func TestMemoryFenceStoreCloseIsIdempotent(t *testing.T) {
 		t.Fatalf("Close on a nil store: %v", err)
 	}
 }
+
+func TestMemoryFenceStoreReadsTheClockUnderTheShardLock(t *testing.T) {
+	fences, c := newTestFences(t, time.Hour)
+	key := testKey(t, "clock")
+	fence := NewFence()
+	sh := fences.shard(key)
+
+	var unlocked atomic.Bool
+	fences.now = func() time.Time {
+		if sh.mu.TryLock() {
+			unlocked.Store(true)
+			sh.mu.Unlock()
+		}
+		return c.Now()
+	}
+
+	ctx := context.Background()
+	if _, err := fences.Ensure(ctx, key, fence); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if _, _, err := fences.Read(ctx, key); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if _, err := fences.Retain(ctx, key, fence); err != nil {
+		t.Fatalf("Retain: %v", err)
+	}
+	if err := fences.Replace(ctx, key, NewFence()); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+
+	if unlocked.Load() {
+		t.Fatal("the clock was read without the shard lock, so an entry can lapse before the decision that uses it")
+	}
+}

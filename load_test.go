@@ -562,6 +562,11 @@ func TestLoadReturnsTheValueWhenComputeTTLFails(t *testing.T) {
 	if _, ok := lh.storedBytes(t, "42"); ok {
 		t.Fatal("a value with no TTL decision was cached")
 	}
+
+	e, found := lh.events.find(cascache.EventOperationFailed)
+	if !found || e.Op != cascache.OpComputeTTL {
+		t.Fatalf("observed %+v, want an operation_failed for compute_ttl", lh.events.all())
+	}
 }
 
 func TestLoadOutcomeString(t *testing.T) {

@@ -233,6 +233,11 @@ type fillResult[V any] struct {
 	fillErr   error
 }
 
+// fill takes key and load as arguments even though the calling loadCall holds
+// both. It runs in the shared run's goroutine and must not capture one caller's
+// loadCall: the caller that reports a run may not be the one that started it, so
+// both would write the same LoadInfo. Results come back through fillResult, and
+// adopt copies them into the reporting caller's info.
 func (c *Cache[V]) fill(key string, load Loader[V]) func(context.Context) (fillResult[V], error) {
 	return func(ctx context.Context) (fillResult[V], error) {
 		var res fillResult[V]
@@ -266,8 +271,7 @@ func (c *Cache[V]) fill(key string, load Loader[V]) func(context.Context) (fillR
 		}
 		res.value = v
 
-		// Do not give a late loader result a fresh TTL. SetWithTTL checks the
-		// context again, but checking here avoids encoding the value.
+		// Skip late fills and report cancellation through LoadInfo.
 		if err := ctx.Err(); err != nil {
 			res.fillErr = &OpError{Op: OpSet, Key: key, Err: err}
 			return res, nil //nolint:nilerr // the loader succeeded; only the fill did not
@@ -280,7 +284,7 @@ func (c *Cache[V]) fill(key string, load Loader[V]) func(context.Context) (fillR
 
 		ttl, err := c.computeTTL()
 		if err != nil {
-			res.fillErr = &OpError{Op: OpComputeTTL, Key: key, Err: wrapComputeTTL(err)}
+			res.fillErr = c.opErr(OpComputeTTL, key, wrapComputeTTL(err))
 			return res, nil
 		}
 

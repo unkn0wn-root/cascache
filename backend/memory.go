@@ -96,6 +96,7 @@ func (s *memoryFenceStore) shard(key Key) *memoryShard {
 	return &s.shards[maphash.String(s.seed, key.ID())%memoryShards]
 }
 
+// live reports whether e is within retention at now.
 func (s *memoryFenceStore) live(e memoryEntry, now time.Time) bool {
 	return s.retention <= 0 || now.Sub(e.writtenAt) < s.retention
 }
@@ -107,10 +108,11 @@ func (s *memoryFenceStore) Ensure(_ context.Context, key Key, candidate Fence) (
 		return Fence{}, err
 	}
 	id, sh := key.ID(), s.shard(key)
-	now := s.now()
 
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
+
+	now := s.now()
 
 	// Do not revive an expired fence; install the new candidate.
 	if e, ok := sh.entries[id]; ok && s.live(e, now) {
@@ -127,9 +129,9 @@ func (s *memoryFenceStore) Read(_ context.Context, key Key) (Fence, bool, error)
 		return Fence{}, false, err
 	}
 	sh := s.shard(key)
-	now := s.now()
 
 	sh.mu.RLock()
+	now := s.now()
 	e, ok := sh.entries[key.ID()]
 	sh.mu.RUnlock()
 
@@ -144,10 +146,11 @@ func (s *memoryFenceStore) Retain(_ context.Context, key Key, expected Fence) (b
 		return false, err
 	}
 	id, sh := key.ID(), s.shard(key)
-	now := s.now()
 
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
+
+	now := s.now()
 
 	e, ok := sh.entries[id]
 	if !ok || !s.live(e, now) || !e.fence.Equal(expected) {
@@ -163,10 +166,9 @@ func (s *memoryFenceStore) Replace(_ context.Context, key Key, next Fence) error
 		return err
 	}
 	sh := s.shard(key)
-	now := s.now()
 
 	sh.mu.Lock()
-	sh.entries[key.ID()] = memoryEntry{fence: next, writtenAt: now}
+	sh.entries[key.ID()] = memoryEntry{fence: next, writtenAt: s.now()}
 	sh.mu.Unlock()
 	return nil
 }
@@ -177,6 +179,9 @@ func (s *memoryFenceStore) cleanupExpired() {
 	}
 }
 
+// cleanup takes now from its caller, which reads it outside the shard locks. A
+// stale now only leaves an expired entry in place for another sweep, and every
+// operation above still treats it as gone.
 func (s *memoryFenceStore) cleanup(now time.Time) {
 	for i := range s.shards {
 		sh := &s.shards[i]
