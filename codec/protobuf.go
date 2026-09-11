@@ -5,10 +5,7 @@ import "google.golang.org/protobuf/proto"
 // Protobuf encodes protocol buffer messages. Create it with [NewProtobuf]; the
 // zero value is not usable.
 //
-// Example:
-//
-//	type UserPB = *mypb.User
-//	pbCodec := codec.NewProtobuf(func() UserPB { return &mypb.User{} })
+//	pbCodec := codec.NewProtobuf(func() *mypb.User { return &mypb.User{} })
 type Protobuf[T proto.Message] struct {
 	newMessage func() T
 }

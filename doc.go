@@ -1,58 +1,24 @@
 // Package cascache caches values until their invalidation state changes.
 //
-// Every key carries invalidation state, and a stored value is served only while
-// the state it was written under is still current. Invalidating a key replaces
-// that state, so copies of the old value stop being served without being
-// touched.
+// Each value carries a token called a fence. Invalidating a key changes its
+// fence, so all copies of the old value become unreadable.
 //
-// # Reading
+// Cache methods can be called from multiple goroutines. Custom backends, stores,
+// codecs, and callbacks must handle this too.
 //
 // [Cache.Load] returns a cached value or calls the loader after a miss.
-// Concurrent callers for the same key share one loader run:
+// Concurrent calls for the same key share one loader run. A later load cannot
+// undo an invalidation. Without invalidation, old values can stay until expiry.
 //
-//	user, err := cache.Load(ctx, id, func(ctx context.Context) (User, error) {
-//	    return db.FindUser(ctx, id)
-//	})
+// For manual writes, take a [Cache.Snapshot] before reading the source, then
+// pass it to [Cache.Set]. An invalidation between those calls blocks the write.
 //
-// A completed invalidation is not undone by a later load. Changes made without
-// an invalidation are governed by the TTL.
+// Fences have no valid zero and are never reused. A missing fence means a miss.
+// A counter cannot tell a lost record from a key that was never invalidated.
 //
-// # Filling by hand
-//
-// Manual writes take a snapshot before reading the source:
-//
-//	snapshot, err := cache.Snapshot(ctx, key)
-//	if err != nil {
-//	    return err
-//	}
-//	value, err := loadFromSource(ctx, key)
-//	if err != nil {
-//	    return err
-//	}
-//	_, err = cache.Set(ctx, key, value, snapshot)
-//
-// An invalidation between the snapshot and the write makes the snapshot stale,
-// so the write is refused.
-//
-// # Why a token rather than a counter
-//
-// Invalidation state is an opaque token, which the [backend] layer calls a
-// fence. It has no valid zero and is never reused, so a value whose token is
-// gone cannot be proved current and becomes a miss. A counter cannot make that
-// distinction once its record is lost, because "never invalidated" and "record
-// gone" read the same.
-//
-// Redis replica reads are unsafe because lag can return an old value together
-// with the matching old token. The Redis backend rejects them unless explicitly
-// allowed.
-//
-// # Arrangements
-//
-// A [backend.Backend] supports three common arrangements:
-//
-//   - one process, values and invalidation state both in memory, with
-//     backend.NewLocal;
-//   - many replicas sharing values and invalidation state in Redis, atomically,
-//     with redis.New;
-//   - local values behind shared invalidation state, with redis.NewShared.
+// Use backend.NewLocal for one process, redis.New to keep values and fences
+// together in Redis, or redis.NewShared for local values with shared fences.
+// Redis reads must reach the primary: a replica can return an old value with
+// its matching old fence. The Redis backend rejects known replica reads unless
+// explicitly allowed.
 package cascache

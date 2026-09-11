@@ -1,25 +1,13 @@
 // Package backend defines how cascache stores values and invalidation state.
 //
-// # How it works
+// Values carry a [Fence] and are served only while it matches the current fence.
+// Invalidation replaces the fence. A missing fence means a cache miss; zero
+// fences are invalid and old fences are never reused.
 //
-// Each cached value is stored with a [Fence]. A read returns the value only if
-// its fence is still current. Invalidating a key creates a new fence, which
-// makes values stored with the previous fence invalid. Fences have no valid
-// zero value and are never reused. If fence state is missing, the cache returns
-// a miss instead of an old value.
+// [Local] keeps fences in one process. The redis subpackage shares fences across
+// processes and can also store values. [Composite] pairs a value store with a
+// [FenceStore] to build other backends.
 //
-// # Available backends
-//
-// [Backend] defines the interface. Use [backend/backendtest.TestBackend] to test
-// an implementation.
-//
-// [Local] combines a caller-owned value store with process-local invalidation
-// state. [Composite] and [FenceStore] can be used to build another backend. The
-// redis subpackage can store values and invalidation state together in Redis,
-// or combine local values with invalidation state stored in Redis.
-//
-// # Storage layout
-//
-// Backends use [StorageKeys] so implementations sharing a store use the same
-// layout.
+// Implement [Backend], use [StorageKeys] for the shared key layout, and check
+// the implementation with backend/backendtest.TestBackend.
 package backend

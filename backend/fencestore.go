@@ -5,12 +5,10 @@ import (
 	"time"
 )
 
-// FenceStore stores the current fence for each key. [Composite] uses it to pair
-// a value store with local or shared invalidation state. Implementations must be
-// safe for concurrent use and follow the fence guarantees in [Backend].
+// FenceStore holds current fences for [Composite] and follows [Backend]'s rules.
 //
-// Writes refresh fence retention; reads do not. Value TTLs must be limited to
-// [FenceStore.Lifetime] so a value cannot outlive its fence.
+// Writes extend a fence's lifetime; reads do not. Limit value TTLs to
+// [FenceStore.Lifetime] so values cannot outlive their fences.
 type FenceStore interface {
 	// Ensure returns the current fence, installing candidate if none exists. It
 	// refreshes retention without replacing a live fence.

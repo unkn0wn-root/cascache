@@ -77,12 +77,12 @@ type call[V any] struct {
 	err       error
 }
 
-// Do runs fn once for concurrent calls with the same key. One caller may stop
-// waiting without canceling fn for the others. Panics and Goexit become errors.
-// Exactly one caller of a completed call receives [Owned].
-// A finished call leaves the group before waiters wake. A caller that calls Do
-// again therefore joins a newer call. A call whose context has ended is never
-// joined, so a run that outlives its [Group.Timeout] does not hold its key.
+// Do shares fn's result among concurrent calls for the same key. Canceling one
+// caller leaves fn running for others. Panics and Goexit become errors; exactly
+// one caller receives [Owned] to report a completed call.
+//
+// Finished calls leave the group before waiters wake, so retries join newer calls.
+// New callers never join a call whose context has ended, including on timeout.
 func (g *Group[V]) Do(
 	ctx context.Context,
 	key string,

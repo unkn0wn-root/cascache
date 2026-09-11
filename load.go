@@ -37,7 +37,7 @@ func (o LoadOutcome) String() string {
 	}
 }
 
-// LoadFill reports one fill attempt. Result is set when the backend judged the
+// LoadFill reports one fill attempt. Result is set when the backend checked the
 // write; otherwise Err reports why the attempt stopped.
 type LoadFill struct {
 	Result SetResult
@@ -72,22 +72,20 @@ type LoadInfo struct {
 	Duration time.Duration
 }
 
-// LoadFunc observes completed loads. The context may already be done.
-// Implementations must be safe for concurrent use and must not block.
+// LoadFunc observes completed loads and must not block.
+// The context may already be done.
 type LoadFunc func(ctx context.Context, info LoadInfo)
 
 // Load returns a cached value or calls load after a miss. Concurrent calls for
 // the same missing key share one loader run.
 //
-// An invalidation during the load prevents the cache write. A caller also
-// rejects a shared result that may predate the call and joins a new run instead.
-// Cache read and write errors do not hide a value returned by the loader; they
-// are reported through [LoadInfo].
+// Invalidation during a load blocks the cache write. An older shared result is
+// retried unless confirmed current after this call began. Cache errors go to
+// [LoadInfo]; callers still receive the loaded value.
 //
-// Canceling one caller does not cancel a run that has other callers. The run
-// ends when no callers remain or [Options.LoadTimeout] expires. Loaders must
-// honor their context. A later run may overlap a loader that ignored
-// cancellation. Loader panics return a [*PanicError].
+// A run is canceled when no callers remain or [Options.LoadTimeout] expires.
+// Loaders must honor cancellation or may overlap a new run. Loader panics return
+// a [*PanicError].
 func (c *Cache[V]) Load(ctx context.Context, key string, load Loader[V]) (V, error) {
 	var zero V
 	if load == nil {
@@ -141,10 +139,8 @@ func (l *loadCall[V]) run(ctx context.Context) (V, error) {
 		return res.value, nil
 	}
 
-	// This result predates the call and was not proved current. Join a new run
-	// rather than return a value an invalidation may have retired. Finished runs
-	// leave the group before waking waiters, so the next run starts after this
-	// call and its result cannot predate it.
+	// This result may predate an invalidation. Retry with a newer run; the old
+	// run left the group before waking us, so we cannot join it again.
 	l.info.Reloaded = true
 	res, err = l.attempt(ctx)
 	if err != nil {
@@ -221,8 +217,8 @@ func (l *loadCall[V]) report(ctx context.Context, err error) {
 type fillResult[V any] struct {
 	value V
 
-	// Lower bound for when the value was known current. It is recorded before
-	// the read or fence check, so it can only make freshness look older.
+	// Time before the read, load, or fence check. Recording it first avoids
+	// treating an older value as newer than it is.
 	currentAt time.Time
 
 	ranLoader bool
@@ -233,11 +229,8 @@ type fillResult[V any] struct {
 	fillErr   error
 }
 
-// fill takes key and load as arguments even though the calling loadCall holds
-// both. It runs in the shared run's goroutine and must not capture one caller's
-// loadCall: the caller that reports a run may not be the one that started it, so
-// both would write the same LoadInfo. Results come back through fillResult, and
-// adopt copies them into the reporting caller's info.
+// fill must not capture a loadCall: another caller may report this shared run,
+// causing concurrent writes to LoadInfo. Return a fillResult for adopt to copy.
 func (c *Cache[V]) fill(key string, load Loader[V]) func(context.Context) (fillResult[V], error) {
 	return func(ctx context.Context) (fillResult[V], error) {
 		var res fillResult[V]

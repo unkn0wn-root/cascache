@@ -8,9 +8,8 @@ import (
 	"github.com/unkn0wn-root/cascache/v4"
 )
 
-// Metrics contains optional callbacks. They must be safe for concurrent use and
-// must not block. Use keyed fields because later releases may add callbacks.
-// A failed lookup records an error, not a hit or miss.
+// Metrics contains optional callbacks that must not block. Use keyed fields
+// because later releases may add callbacks. A failed lookup records only an error.
 type Metrics struct {
 	// Hit records a successful cache lookup.
 	Hit func()
@@ -45,9 +44,8 @@ type Metrics struct {
 	// a new run.
 	LoadReloaded func()
 
-	// EntryRejected records an entry that failed validation. Repeated
-	// [cascache.RejectStateMissing] events usually mean invalidation state expires
-	// before the values it judges.
+	// EntryRejected records a failed validation. Repeated
+	// [cascache.RejectStateMissing] events usually mean fences expire before values.
 	EntryRejected func(reason cascache.RejectReason)
 
 	// StoreRejected records a write the backend declined under its own

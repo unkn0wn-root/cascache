@@ -54,10 +54,9 @@ func NewInvalidator(opts InvalidatorOptions) (*Invalidator, error) {
 // Enabled reports whether the invalidator does anything.
 func (i *Invalidator) Enabled() bool { return i != nil && !i.disabled }
 
-// Invalidate makes the cached value for key unusable.
-// It changes the invalidation state before removing the value, so an in-flight
-// load cannot restore an old value. Callers should retry errors. Delete failures
-// are reported as [EventCleanupFailed], but the old value is already unreadable.
+// Invalidate changes the fence before deleting the value, so a running load
+// cannot restore an old value. Retry returned errors. Delete failures emit
+// [EventCleanupFailed]; the old value stays unreadable.
 func (i *Invalidator) Invalidate(ctx context.Context, key string) error {
 	if i.disabled {
 		return nil

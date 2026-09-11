@@ -14,7 +14,7 @@ type ReadResult struct {
 	Value []byte
 	Found bool
 
-	// Fence is the authoritative fence for the key.
+	// Fence is the key's current fence.
 	Fence Fence
 
 	// FenceFound reports whether the key has a fence. A value without one must
@@ -87,42 +87,25 @@ type InvalidateResult struct {
 
 // Backend stores values and their fences.
 //
-// # Required guarantees
+// Read and CompareAndStore must see invalidations completed before they start.
+// An old fence must never become current again. Values and fences may live in
+// separate stores, but a race between stores must not allow stale reads.
 //
-// Implementations must guarantee:
-//
-//  1. Concurrent Ensure calls for a key without a fence all return the same
-//     fence.
-//  2. A fence installed by Invalidate is visible to every Read and
-//     CompareAndStore that starts afterwards.
-//  3. A retired fence never becomes current again.
-//  4. Discard removes a value only while its bytes still equal the ones the
-//     caller judged invalid.
-//  5. Read observes the value no later than the fence.
-//  6. CompareAndStore checks the fence before admission policy, so
-//     StoreRejected still proves the expected fence was current.
-//
-// # What is not required
-//
-// The value and fence may live in separate stores. A read serves a value only
-// when its stamped fence is current, so a cross-store race may waste work but
-// must not return stale data.
-//
-// # Errors and ownership
-//
-// An error or canceled context does not imply rollback. Backends treat values
-// as opaque bytes, and neither side modifies a value after passing it across
-// this interface.
+// Errors and cancellation do not guarantee rollback. Backends do not interpret
+// value bytes. Neither side may change the bytes after passing them to the other.
 type Backend interface {
-	// Read returns the value and the fence that judges it.
+	// Read returns the value and the key's current fence. It must read the value
+	// before or at the same time as the fence.
 	Read(context.Context, Key) (ReadResult, error)
 
-	// Ensure returns the current fence for a key, installing candidate when
-	// none exists. It refreshes fence retention but never replaces a fence
-	// that is already there.
+	// Ensure returns the current fence, installing candidate only if none exists.
+	// Concurrent calls for a missing fence must agree. It refreshes the fence's
+	// lifetime without replacing it.
 	Ensure(context.Context, Key, Fence) (Fence, error)
 
 	// CompareAndStore stores a value only while its expected fence is current.
+	// Check the fence before admission policy so StoreRejected also proves it
+	// was current.
 	CompareAndStore(context.Context, StoreRequest) (StoreResult, error)
 
 	// Invalidate installs a new fence and then removes the value. Failing to

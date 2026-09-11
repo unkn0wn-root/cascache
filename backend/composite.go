@@ -20,13 +20,12 @@ var (
 	ErrNilFenceStore = errors.New("cascache/backend: nil fence store")
 )
 
-// Composite combines a value store with a [FenceStore]. It can pair local
-// values with local or shared fences. Operations are not atomic across the two
-// stores, so a race may waste a write or cause a miss. Reads still require the
-// value's fence to be current.
+// Composite pairs a value store with local or shared fences in a [FenceStore].
+// The two stores are not updated atomically. Races may waste writes or cause
+// misses, but reads still require a current fence.
 //
-// Value operations are serialized per key so [Composite.Discard] cannot remove
-// a newer value. Prefer a native backend when the value store is remote.
+// Value operations for each key share a lock so [Composite.Discard] cannot
+// delete a newer value. Prefer a native backend for remote value stores.
 type Composite struct {
 	values provider.Store
 	fences FenceStore

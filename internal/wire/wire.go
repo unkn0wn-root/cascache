@@ -66,10 +66,9 @@ func Encode(fence backend.Fence, payload []byte) ([]byte, error) {
 	return b, nil
 }
 
-// Decode validates a frame and returns its fence and a read-only view of its
-// payload. ErrInvalidFrame means the entry is safe to delete;
-// ErrUnsupportedFormat may have been written by another supported version and
-// must not be deleted.
+// Decode checks a frame and returns its fence and a read-only view of its payload.
+// ErrInvalidFrame allows deletion. ErrUnsupportedFormat does not: another
+// version may still read the entry.
 func Decode(b []byte) (backend.Fence, []byte, error) {
 	if len(b) < identityLen || string(b[offMagic:offVersion]) != magic {
 		return backend.Fence{}, nil, ErrInvalidFrame

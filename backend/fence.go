@@ -19,10 +19,9 @@ const (
 // ErrInvalidFence reports a missing, zero, or malformed fence.
 var ErrInvalidFence = errors.New("cascache/backend: invalid fence")
 
-// Fence is an opaque token that identifies the current version of a key. It can
-// only be tested for equality. The zero value is invalid, and generated fences
-// are not reused. A missing fence therefore causes a miss instead of making an
-// old value current again.
+// Fence is a key's version token. Tokens support equality checks only; zero is
+// invalid and tokens are never reused. A missing fence causes a cache miss,
+// so losing a fence cannot make an old value current again.
 type Fence struct {
 	token [FenceSize]byte
 }
@@ -35,7 +34,6 @@ type fenceSource struct {
 var fenceSources = sync.Pool{New: func() any { return new(fenceSource) }}
 
 // NewFence returns a new random fence.
-//
 // It panics if the operating system cannot supply random bytes.
 func NewFence() Fence {
 	src := fenceSources.Get().(*fenceSource)

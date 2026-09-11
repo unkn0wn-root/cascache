@@ -435,8 +435,7 @@ func TestFrameFromAnotherVersionIsLeftInPlace(t *testing.T) {
 		t.Fatal("nothing was stored")
 	}
 
-	// Byte 4 is the format version. A frame from a build that is not this one
-	// is unreadable here, but perfectly readable there.
+	// Byte 4 is the format version. Another version may still read this frame.
 	raw[4]++
 	if _, err := h.store.Set(ctx, backend.ValueKey(h.space("42")), raw, 1, time.Hour); err != nil {
 		t.Fatal(err)

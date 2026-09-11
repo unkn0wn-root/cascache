@@ -36,10 +36,9 @@ var (
 
 // Options configures Redis backends. The client stays caller-owned.
 type Options struct {
-	// InvalidationTTL is how long a key's invalidation state lives after a
-	// write to it. Zero uses [DefaultInvalidationTTL]; [backend.NoExpiration]
-	// keeps it forever.
-	// Value TTLs are limited to this duration.
+	// InvalidationTTL is a fence's lifetime after a write. Zero uses
+	// [DefaultInvalidationTTL]; [backend.NoExpiration] keeps fences forever.
+	// Value TTLs cannot exceed this lifetime.
 	InvalidationTTL time.Duration
 
 	// AllowReplicaReads accepts clients that may read from replicas. Later reads

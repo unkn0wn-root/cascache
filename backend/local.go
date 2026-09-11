@@ -7,8 +7,7 @@ import (
 )
 
 // Local combines a caller-owned value store with process-local invalidation
-// state. It is safe for concurrent use within one process. Replicas that share
-// values must use shared invalidation state instead, such as Redis.
+// state. Replicas sharing values must share invalidation state, such as Redis.
 type Local struct {
 	backend *Composite
 	fences  *memoryFenceStore

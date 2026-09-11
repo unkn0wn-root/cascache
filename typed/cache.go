@@ -20,13 +20,9 @@ type Cache[K comparable, V any] struct {
 	metrics Metrics
 }
 
-// New creates a cache over a caller-owned backend. For a process-local backend:
-//
-//	b, err := backend.NewLocal(store, backend.LocalOptions{})
-//
-// For local values with shared invalidation:
-//
-//	b, err := redis.NewShared(store, client, redis.Options{})
+// New creates a cache over a backend owned by the caller. Use
+// [backend.NewLocal] for one process or [redisbackend.NewShared] for local values
+// with shared invalidation state.
 func New[K comparable, V any](opts Options[K, V]) (*Cache[K, V], error) {
 	if err := opts.Validate(); err != nil {
 		return nil, err
@@ -109,8 +105,8 @@ func (c *Cache[K, V]) Snapshot(ctx context.Context, key K) (cascache.Snapshot, e
 	return snapshot, err
 }
 
-// Set stores value while snapshot is still current, at the cache's own jittered
-// TTL. It is the TTL [Cache.Load] gives its fills.
+// Set stores value while snapshot is current. It uses the same jittered TTL as
+// [Cache.Load].
 func (c *Cache[K, V]) Set(
 	ctx context.Context,
 	key K,
@@ -122,8 +118,7 @@ func (c *Cache[K, V]) Set(
 	return res, err
 }
 
-// SetWithTTL is [Cache.Set] at a TTL of the caller's choosing. A zero ttl uses
-// MaxTTL.
+// SetWithTTL is [Cache.Set] with an explicit TTL. Zero uses MaxTTL.
 func (c *Cache[K, V]) SetWithTTL(
 	ctx context.Context,
 	key K,

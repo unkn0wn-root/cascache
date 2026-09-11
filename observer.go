@@ -131,12 +131,8 @@ type Event struct {
 	Err error
 }
 
-// Observer receives cache events on the calling goroutine. Implementations must
-// be safe for concurrent use and must not block. The hooks/async package can run
-// observers in the background.
-//
-// New event types and reasons are added over time, so an Observer should ignore
-// values it does not recognize rather than treat them as errors.
+// Observer receives events on the calling goroutine and must not block.
+// Use hooks/async for background delivery. Ignore unknown event types and reasons.
 type Observer interface {
 	Observe(Event)
 }

@@ -21,8 +21,7 @@ type Options[K comparable, V any] struct {
 	// Codec encodes and decodes cached values.
 	Codec codec.Codec[V]
 
-	// Backend is required by [New] and unused by [NewRedis]. It stays the
-	// caller's to close.
+	// Backend is required by [New] and unused by [NewRedis]. The caller closes it.
 	Backend backend.Backend
 
 	// InvalidationTTL is used only by [NewRedis]. Zero uses the backend default;
@@ -34,12 +33,10 @@ type Options[K comparable, V any] struct {
 	ComputeSetCost cascache.SetCostFunc
 
 	// LoadTimeout limits a shared loader run. Zero means no timeout; negative
-	// values are invalid. Loaders must honor their context. After a timeout,
-	// another run for the same key may start before the old one returns.
+	// values are invalid. Loaders must honor cancellation or may overlap a new run.
 	//
-	// If the context ends before the write starts, callers still receive the
-	// loaded value but the cache is not filled. A write already in progress may
-	// still finish.
+	// Cancellation before a write skips the fill but keeps the loaded result.
+	// A write already started may still finish.
 	LoadTimeout time.Duration
 
 	// Observer receives cache events alongside the ones Metrics consumes.

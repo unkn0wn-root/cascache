@@ -12,9 +12,8 @@ import (
 	"github.com/unkn0wn-root/cascache/v4/internal/typednil"
 )
 
-// Cache stores values of type V and serves one only while no invalidation has
-// retired it. It is safe for concurrent use if its codec and callbacks are. The
-// caller owns its dependencies.
+// Cache stores values of type V. Invalidated values are never served.
+// The caller owns its dependencies.
 type Cache[V any] struct {
 	inv *Invalidator
 
@@ -91,9 +90,8 @@ func (c *Cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
 	return e.val, e.ok, nil
 }
 
-// Snapshot returns the invalidation state to pair with [Cache.Set]. Take it
-// immediately before reading the source. An invalidation during that read makes
-// the snapshot stale and causes the later write to be refused.
+// Snapshot captures the state needed by [Cache.Set]. Take it immediately before
+// reading the source so an invalidation during the read blocks the later write.
 func (c *Cache[V]) Snapshot(ctx context.Context, key string) (Snapshot, error) {
 	if c.inv.disabled {
 		return Snapshot{}, nil
@@ -129,9 +127,8 @@ func (c *Cache[V]) Set(
 	return c.SetWithTTL(ctx, key, value, snapshot, ttl)
 }
 
-// SetWithTTL is [Cache.Set] at a TTL of the caller's choosing. A zero ttl uses
-// [Options.DefaultTTL] and [NoExpiration] asks for no expiry; the backend may
-// shorten either so a value cannot outlive the invalidation state that judges it.
+// SetWithTTL is [Cache.Set] with an explicit TTL. Zero uses [Options.DefaultTTL];
+// [NoExpiration] asks for no expiry. The backend limits TTLs to the fence lifetime.
 func (c *Cache[V]) SetWithTTL(
 	ctx context.Context,
 	key string,

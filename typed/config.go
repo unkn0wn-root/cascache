@@ -12,12 +12,10 @@ type Config struct {
 	// Namespace must be unique among caches sharing a backend.
 	Namespace string
 
-	// MaxTTL is the longest a cached value lives, and the TTL a write with no
-	// TTL of its own gets.
+	// MaxTTL is the default TTL and the upper limit for jittered TTLs.
 	MaxTTL time.Duration
 
-	// MinTTL is the shortest a jittered TTL may be. Zero lets jitter reach down
-	// to nothing.
+	// MinTTL is the lower limit for jittered TTLs. Zero lets jitter reach zero.
 	MinTTL time.Duration
 
 	// Jitter is a fraction from 0 to 1. At 0.2, TTLs vary over 20% of the range

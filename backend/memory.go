@@ -96,7 +96,7 @@ func (s *memoryFenceStore) shard(key Key) *memoryShard {
 	return &s.shards[maphash.String(s.seed, key.ID())%memoryShards]
 }
 
-// live reports whether e is within retention at now.
+// live reports whether e has not expired at now.
 func (s *memoryFenceStore) live(e memoryEntry, now time.Time) bool {
 	return s.retention <= 0 || now.Sub(e.writtenAt) < s.retention
 }
@@ -179,9 +179,8 @@ func (s *memoryFenceStore) cleanupExpired() {
 	}
 }
 
-// cleanup takes now from its caller, which reads it outside the shard locks. A
-// stale now only leaves an expired entry in place for another sweep, and every
-// operation above still treats it as gone.
+// cleanup uses a time read before locking. An older time may delay deletion,
+// but reads and writes still treat expired entries as missing.
 func (s *memoryFenceStore) cleanup(now time.Time) {
 	for i := range s.shards {
 		sh := &s.shards[i]
