@@ -486,3 +486,16 @@ func TestWaitPrefersACompletedResultOverCancellation(t *testing.T) {
 		t.Fatalf("role = %v, want Owned: the completed call went unaccounted for", role)
 	}
 }
+
+func TestTickFollowsNow(t *testing.T) {
+	var g Group[int]
+
+	before := g.Now("k")
+	tick := g.Tick("k")
+	if tick <= before {
+		t.Fatalf("Tick = %d after Now = %d, want greater", tick, before)
+	}
+	if now := g.Now("k"); now < tick {
+		t.Fatalf("Now = %d after Tick = %d, want at least as great", now, tick)
+	}
+}

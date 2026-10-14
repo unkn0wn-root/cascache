@@ -4,10 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+const clockSlots = 256
+
+var clockSeed = maphash.MakeSeed()
 
 var (
 	ErrGoexit = errors.New("flight: call exited without returning")
@@ -63,6 +69,12 @@ type Group[V any] struct {
 
 	mu    sync.Mutex
 	calls map[string]*call[V]
+
+	clocks [clockSlots]slotClock
+}
+
+type slotClock struct {
+	now atomic.Uint64
 }
 
 type call[V any] struct {
@@ -114,6 +126,19 @@ func (g *Group[V]) Do(
 	go g.run(key, c, fn)
 
 	return g.wait(ctx, key, c)
+}
+
+// Stamp orders events for one key within a Group.
+type Stamp uint64
+
+// Now returns the key's current stamp without advancing it.
+func (g *Group[V]) Now(key string) Stamp { return Stamp(g.clockOf(key).now.Load()) }
+
+// Tick advances the key's stamp and returns it.
+func (g *Group[V]) Tick(key string) Stamp { return Stamp(g.clockOf(key).now.Add(1)) }
+
+func (g *Group[V]) clockOf(key string) *slotClock {
+	return &g.clocks[maphash.String(clockSeed, key)%clockSlots]
 }
 
 func (g *Group[V]) Len() int {

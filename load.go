@@ -96,8 +96,10 @@ func (c *Cache[V]) Load(ctx context.Context, key string, load Loader[V]) (V, err
 		cache: c,
 		key:   key,
 		load:  load,
-		start: time.Now(),
 		info:  LoadInfo{Key: key},
+	}
+	if c.onLoad != nil {
+		l.start = time.Now()
 	}
 	v, err := l.run(ctx)
 	if err != nil {
@@ -112,8 +114,10 @@ type loadCall[V any] struct {
 	key   string
 	load  Loader[V]
 
-	// A shared result must have been known current after this time.
 	start time.Time
+
+	// Shared results must be newer than since.
+	since flight.Stamp
 
 	info LoadInfo
 }
@@ -126,6 +130,7 @@ func (l *loadCall[V]) run(ctx context.Context) (V, error) {
 		return l.load(ctx)
 	}
 
+	l.since = l.cache.fills.Now(l.key)
 	if v, ok := l.lookup(ctx); ok {
 		l.info.Outcome = LoadOutcomeHit
 		return v, nil
@@ -135,7 +140,7 @@ func (l *loadCall[V]) run(ctx context.Context) (V, error) {
 	if err != nil {
 		return zero, err
 	}
-	if !res.currentAt.Before(l.start) {
+	if res.current > l.since {
 		return res.value, nil
 	}
 
@@ -217,9 +222,8 @@ func (l *loadCall[V]) report(ctx context.Context, err error) {
 type fillResult[V any] struct {
 	value V
 
-	// Time before the read, load, or fence check. Recording it first avoids
-	// treating an older value as newer than it is.
-	currentAt time.Time
+	// Stamp before the read, load, or fence check. Zero forces a retry.
+	current flight.Stamp
 
 	ranLoader bool
 
@@ -239,7 +243,7 @@ func (c *Cache[V]) fill(key string, load Loader[V]) func(context.Context) (fillR
 		}
 
 		// Another run may have filled the cache while this one waited.
-		res.currentAt = time.Now()
+		res.current = c.fills.Tick(key)
 		switch v, ok, err := c.Get(ctx, key); {
 		case err != nil:
 			res.lookupErr = err
@@ -257,7 +261,7 @@ func (c *Cache[V]) fill(key string, load Loader[V]) func(context.Context) (fillR
 		}
 
 		res.ranLoader = true
-		res.currentAt = time.Now()
+		res.current = c.fills.Tick(key)
 		v, err := load(ctx)
 		if err != nil {
 			return res, err
@@ -281,10 +285,10 @@ func (c *Cache[V]) fill(key string, load Loader[V]) func(context.Context) (fillR
 			return res, nil
 		}
 
-		attempted := time.Now()
+		attempted := c.fills.Tick(key)
 		res.fill, res.fillErr = c.SetWithTTL(ctx, key, v, snapshot, ttl)
 		if provenCurrent(res.fill.Outcome) {
-			res.currentAt = attempted
+			res.current = attempted
 		}
 		return res, nil
 	}
