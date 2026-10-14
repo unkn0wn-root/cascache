@@ -499,3 +499,100 @@ func TestTickFollowsNow(t *testing.T) {
 		t.Fatalf("Now = %d after Tick = %d, want at least as great", now, tick)
 	}
 }
+
+func TestEndedSinceReportsAReturnedCall(t *testing.T) {
+	var g Group[int]
+	before := g.Now("k")
+
+	if _, _, err := g.Do(context.Background(), "k", func(context.Context) (int, error) {
+		return 1, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !g.EndedSince("k", before) {
+		t.Fatal("a call that returned after the stamp was not reported")
+	}
+	if g.EndedSince("k", g.Now("k")) {
+		t.Fatal("a call that returned before the stamp was reported")
+	}
+}
+
+func TestEndedSinceReportsAnAbandonedCallUntilItReturns(t *testing.T) {
+	var g Group[int]
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	returned := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		<-started
+		cancel()
+	}()
+	_, role, err := g.Do(ctx, "k", func(context.Context) (int, error) {
+		defer close(returned)
+		close(started)
+		<-release
+		return 1, nil
+	})
+	if role != Abandoned || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Do = %v, %v; want Abandoned, context.Canceled", role, err)
+	}
+
+	if !g.EndedSince("k", g.Now("k")) {
+		t.Fatal("an abandoned call that is still running was not reported")
+	}
+
+	close(release)
+	<-returned
+	waitFor(t, func() bool { return !g.EndedSince("k", g.Now("k")) })
+}
+
+func TestEndedSinceReportsAReplacedCallUntilItReturns(t *testing.T) {
+	g := &Group[int]{Timeout: 10 * time.Millisecond}
+
+	expired := make(chan struct{})
+	release := make(chan struct{})
+	stuck := make(chan struct{})
+	go func() {
+		defer close(stuck)
+		_, _, _ = g.Do(context.Background(), "k", func(ctx context.Context) (int, error) {
+			<-ctx.Done()
+			close(expired)
+			<-release
+			return 0, ctx.Err()
+		})
+	}()
+	<-expired
+
+	if g.EndedSince("k", g.Now("k")) {
+		t.Fatal("reported a call that is still in the group")
+	}
+
+	if _, _, err := g.Do(context.Background(), "k", func(context.Context) (int, error) {
+		if !g.EndedSince("k", g.Now("k")) {
+			t.Error("the replaced call was not reported while it still runs")
+		}
+		return 1, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	close(release)
+	<-stuck
+	if g.EndedSince("k", g.Now("k")) {
+		t.Fatal("reported calls that all returned earlier")
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met in time")
+		}
+		runtime.Gosched()
+	}
+}
