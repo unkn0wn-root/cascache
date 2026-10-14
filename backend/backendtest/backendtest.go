@@ -160,6 +160,33 @@ func TestBackend(t *testing.T, newBackend Factory) {
 		}
 	})
 
+	t.Run("a-fence-reported-on-a-miss-is-current", func(t *testing.T) {
+		b := newBackend(t)
+		key := Key(t, "miss-fence")
+
+		check := func(stage string, want backend.Fence) {
+			t.Helper()
+			read, err := b.Read(ctx(t), key)
+			if err != nil {
+				t.Fatalf("Read %s: %v", stage, err)
+			}
+			if read.Found {
+				t.Fatalf("Read %s = %+v, want a miss", stage, read)
+			}
+			if read.FenceFound && !read.Fence.Equal(want) {
+				t.Fatalf("Read %s reported fence %v on a miss, want the current %v", stage, read.Fence, want)
+			}
+		}
+
+		check("after Ensure", ensure(t, b, key))
+
+		next := backend.NewFence()
+		if _, err := b.Invalidate(ctx(t), key, next); err != nil {
+			t.Fatalf("Invalidate: %v", err)
+		}
+		check("after Invalidate", next)
+	})
+
 	t.Run("rejects-invalid-arguments", func(t *testing.T) {
 		b := newBackend(t)
 		key := Key(t, "arguments")

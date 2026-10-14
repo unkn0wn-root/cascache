@@ -10,25 +10,28 @@ func readResult(values []any) (backend.ReadResult, error) {
 	if len(values) != 2 {
 		return backend.ReadResult{}, errReplyLength
 	}
-	if values[0] == nil {
-		return backend.ReadResult{}, nil
-	}
 
-	value, ok := asBytes(values[0])
-	if !ok {
-		return backend.ReadResult{}, errReplyType
+	var out backend.ReadResult
+	if values[0] != nil {
+		value, ok := asBytes(values[0])
+		if !ok {
+			return backend.ReadResult{}, errReplyType
+		}
+		out.Value, out.Found = value, true
 	}
-	out := backend.ReadResult{Value: value, Found: true}
 
 	if values[1] == nil {
 		return out, nil
 	}
 	fence, err := parseFence(values[1])
 	if err != nil {
-		return backend.ReadResult{}, err
+		if out.Found {
+			return backend.ReadResult{}, err
+		}
+		// Leave malformed fences on misses for Ensure to report.
+		return out, nil
 	}
-	out.Fence = fence
-	out.FenceFound = true
+	out.Fence, out.FenceFound = fence, true
 	return out, nil
 }
 
