@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [4.2.0](https://github.com/unkn0wn-root/cascache/compare/v4.1.0...v4.2.0) (2026-10-15)
+
+
+### Features
+
+* **redis:** report the fence on a read miss ([a19d307](https://github.com/unkn0wn-root/cascache/commit/a19d307c6e64454aa2ad5ead0d20fd1306f9ae28))
+
+
+### Bug Fixes
+
+* **load:** order shared results by stamps, not the clock ([340f6c3](https://github.com/unkn0wn-root/cascache/commit/340f6c3311bd564e175ea5fb266fcba92358eda7))
+* prevent expired local fences from becoming current again ([89baeb6](https://github.com/unkn0wn-root/cascache/commit/89baeb6afb4a8759a9a041c9c9c7e886618b394f))
+
+
+### Performance Improvements
+
+* **load:** skip the fill re-read and Ensure on a miss ([a77a828](https://github.com/unkn0wn-root/cascache/commit/a77a828b99ee33add05771927e24d783f6518707))
+
 ## [4.1.0](https://github.com/unkn0wn-root/cascache/compare/v4.0.0...v4.1.0) (2026-08-26)
 
 
