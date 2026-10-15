@@ -80,14 +80,24 @@ func (c *Cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
 		return zero, false, nil
 	}
 
+	e, _, err := c.get(ctx, key)
+	if err != nil {
+		return zero, false, err
+	}
+	return e.val, e.ok, nil
+}
+
+func (c *Cache[V]) get(ctx context.Context, key string) (entry[V], backend.Fence, error) {
 	bkey := c.inv.space.Key(key)
 	r, err := c.inv.backend.Read(ctx, bkey)
 	if err != nil {
-		return zero, false, c.opErr(OpGet, key, err)
+		return entry[V]{}, backend.Fence{}, c.opErr(OpGet, key, err)
 	}
-
-	e := c.decode(ctx, key, bkey, r)
-	return e.val, e.ok, nil
+	var fence backend.Fence
+	if r.FenceFound {
+		fence = r.Fence
+	}
+	return c.decode(ctx, key, bkey, r), fence, nil
 }
 
 // Snapshot captures the state needed by [Cache.Set]. Take it immediately before

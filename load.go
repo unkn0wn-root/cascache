@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/unkn0wn-root/cascache/v4/backend"
 	"github.com/unkn0wn-root/cascache/v4/internal/flight"
 )
 
@@ -122,6 +123,15 @@ type loadCall[V any] struct {
 	info LoadInfo
 }
 
+type miss struct {
+	ok bool
+
+	// since was taken before the lookup.
+	since flight.Stamp
+
+	fence backend.Fence
+}
+
 func (l *loadCall[V]) run(ctx context.Context) (V, error) {
 	var zero V
 
@@ -131,12 +141,13 @@ func (l *loadCall[V]) run(ctx context.Context) (V, error) {
 	}
 
 	l.since = l.cache.fills.Now(l.key)
-	if v, ok := l.lookup(ctx); ok {
+	v, seen, ok := l.lookup(ctx)
+	if ok {
 		l.info.Outcome = LoadOutcomeHit
 		return v, nil
 	}
 
-	res, err := l.attempt(ctx)
+	res, err := l.attempt(ctx, seen)
 	if err != nil {
 		return zero, err
 	}
@@ -144,18 +155,18 @@ func (l *loadCall[V]) run(ctx context.Context) (V, error) {
 		return res.value, nil
 	}
 
-	// This result may predate an invalidation. Retry with a newer run; the old
-	// run left the group before waking us, so we cannot join it again.
+	// This result may predate an invalidation. Retry without reusing the miss;
+	// the old run has already left the group.
 	l.info.Reloaded = true
-	res, err = l.attempt(ctx)
+	res, err = l.attempt(ctx, miss{})
 	if err != nil {
 		return zero, err
 	}
 	return res.value, nil
 }
 
-func (l *loadCall[V]) attempt(ctx context.Context) (fillResult[V], error) {
-	res, role, err := l.cache.fills.Do(ctx, l.key, l.cache.fill(l.key, l.load))
+func (l *loadCall[V]) attempt(ctx context.Context, seen miss) (fillResult[V], error) {
+	res, role, err := l.cache.fills.Do(ctx, l.key, l.cache.fill(l.key, l.load, seen))
 
 	// Classify errors too, so only one caller accounts for a failed run.
 	switch role {
@@ -178,17 +189,19 @@ func (l *loadCall[V]) attempt(ctx context.Context) (fillResult[V], error) {
 	return res, nil
 }
 
-func (l *loadCall[V]) lookup(ctx context.Context) (V, bool) {
-	switch v, ok, err := l.cache.Get(ctx, l.key); {
+func (l *loadCall[V]) lookup(ctx context.Context) (V, miss, bool) {
+	var seen miss
+	switch e, fence, err := l.cache.get(ctx, l.key); {
 	case err != nil:
 		l.noteLookupErr(ctx, err)
-	case ok:
-		return v, true
+	case e.ok:
+		return e.val, seen, true
 	default:
 		l.info.Missed = true
+		seen = miss{ok: true, since: l.since, fence: fence}
 	}
 	var zero V
-	return zero, false
+	return zero, seen, false
 }
 
 func (l *loadCall[V]) adopt(ctx context.Context, res fillResult[V]) {
@@ -235,27 +248,33 @@ type fillResult[V any] struct {
 
 // fill must not capture a loadCall: another caller may report this shared run,
 // causing concurrent writes to LoadInfo. Return a fillResult for adopt to copy.
-func (c *Cache[V]) fill(key string, load Loader[V]) func(context.Context) (fillResult[V], error) {
+func (c *Cache[V]) fill(key string, load Loader[V], seen miss) func(context.Context) (fillResult[V], error) {
 	return func(ctx context.Context) (fillResult[V], error) {
 		var res fillResult[V]
 		if err := ctx.Err(); err != nil {
 			return res, err
 		}
 
-		// Another run may have filled the cache while this one waited.
-		res.current = c.fills.Tick(key)
-		switch v, ok, err := c.Get(ctx, key); {
-		case err != nil:
-			res.lookupErr = err
-		case ok:
-			res.value = v
-			return res, nil
-		default:
-			res.missed = true
+		fence := seen.fence
+		// Reuse the miss unless an earlier fill in this Cache may have written.
+		if !seen.ok || c.fills.EndedSince(key, seen.since) {
+			res.current = c.fills.Tick(key)
+			e, f, err := c.get(ctx, key)
+			if e.ok {
+				res.value = e.val
+				return res, nil
+			}
+			fence, res.lookupErr = f, err
 		}
+		res.missed = res.lookupErr == nil
 
-		// Snapshot before loading so an invalidation can refuse the later write.
-		snapshot, snapshotErr := c.Snapshot(ctx, key)
+		// Reusing the read's fence skips the TTL refresh. Expiry during the load
+		// will reject the fill.
+		snapshot := Snapshot{fence: fence}
+		var snapshotErr error
+		if !fence.Valid() {
+			snapshot, snapshotErr = c.Snapshot(ctx, key)
+		}
 		if err := ctx.Err(); err != nil {
 			return res, err
 		}
