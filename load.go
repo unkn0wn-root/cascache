@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/unkn0wn-root/cascache/v4/backend"
 	"github.com/unkn0wn-root/cascache/v4/internal/flight"
 )
 
@@ -96,8 +97,10 @@ func (c *Cache[V]) Load(ctx context.Context, key string, load Loader[V]) (V, err
 		cache: c,
 		key:   key,
 		load:  load,
-		start: time.Now(),
 		info:  LoadInfo{Key: key},
+	}
+	if c.onLoad != nil {
+		l.start = time.Now()
 	}
 	v, err := l.run(ctx)
 	if err != nil {
@@ -112,10 +115,21 @@ type loadCall[V any] struct {
 	key   string
 	load  Loader[V]
 
-	// A shared result must have been known current after this time.
 	start time.Time
 
+	// Shared results must be newer than since.
+	since flight.Stamp
+
 	info LoadInfo
+}
+
+type miss struct {
+	ok bool
+
+	// since was taken before the lookup.
+	since flight.Stamp
+
+	fence backend.Fence
 }
 
 func (l *loadCall[V]) run(ctx context.Context) (V, error) {
@@ -126,31 +140,33 @@ func (l *loadCall[V]) run(ctx context.Context) (V, error) {
 		return l.load(ctx)
 	}
 
-	if v, ok := l.lookup(ctx); ok {
+	l.since = l.cache.fills.Now(l.key)
+	v, seen, ok := l.lookup(ctx)
+	if ok {
 		l.info.Outcome = LoadOutcomeHit
 		return v, nil
 	}
 
-	res, err := l.attempt(ctx)
+	res, err := l.attempt(ctx, seen)
 	if err != nil {
 		return zero, err
 	}
-	if !res.currentAt.Before(l.start) {
+	if res.current > l.since {
 		return res.value, nil
 	}
 
-	// This result may predate an invalidation. Retry with a newer run; the old
-	// run left the group before waking us, so we cannot join it again.
+	// This result may predate an invalidation. Retry without reusing the miss;
+	// the old run has already left the group.
 	l.info.Reloaded = true
-	res, err = l.attempt(ctx)
+	res, err = l.attempt(ctx, miss{})
 	if err != nil {
 		return zero, err
 	}
 	return res.value, nil
 }
 
-func (l *loadCall[V]) attempt(ctx context.Context) (fillResult[V], error) {
-	res, role, err := l.cache.fills.Do(ctx, l.key, l.cache.fill(l.key, l.load))
+func (l *loadCall[V]) attempt(ctx context.Context, seen miss) (fillResult[V], error) {
+	res, role, err := l.cache.fills.Do(ctx, l.key, l.cache.fill(l.key, l.load, seen))
 
 	// Classify errors too, so only one caller accounts for a failed run.
 	switch role {
@@ -173,17 +189,19 @@ func (l *loadCall[V]) attempt(ctx context.Context) (fillResult[V], error) {
 	return res, nil
 }
 
-func (l *loadCall[V]) lookup(ctx context.Context) (V, bool) {
-	switch v, ok, err := l.cache.Get(ctx, l.key); {
+func (l *loadCall[V]) lookup(ctx context.Context) (V, miss, bool) {
+	var seen miss
+	switch e, fence, err := l.cache.get(ctx, l.key); {
 	case err != nil:
 		l.noteLookupErr(ctx, err)
-	case ok:
-		return v, true
+	case e.ok:
+		return e.val, seen, true
 	default:
 		l.info.Missed = true
+		seen = miss{ok: true, since: l.since, fence: fence}
 	}
 	var zero V
-	return zero, false
+	return zero, seen, false
 }
 
 func (l *loadCall[V]) adopt(ctx context.Context, res fillResult[V]) {
@@ -217,9 +235,8 @@ func (l *loadCall[V]) report(ctx context.Context, err error) {
 type fillResult[V any] struct {
 	value V
 
-	// Time before the read, load, or fence check. Recording it first avoids
-	// treating an older value as newer than it is.
-	currentAt time.Time
+	// Stamp before the read, load, or fence check. Zero forces a retry.
+	current flight.Stamp
 
 	ranLoader bool
 
@@ -231,33 +248,39 @@ type fillResult[V any] struct {
 
 // fill must not capture a loadCall: another caller may report this shared run,
 // causing concurrent writes to LoadInfo. Return a fillResult for adopt to copy.
-func (c *Cache[V]) fill(key string, load Loader[V]) func(context.Context) (fillResult[V], error) {
+func (c *Cache[V]) fill(key string, load Loader[V], seen miss) func(context.Context) (fillResult[V], error) {
 	return func(ctx context.Context) (fillResult[V], error) {
 		var res fillResult[V]
 		if err := ctx.Err(); err != nil {
 			return res, err
 		}
 
-		// Another run may have filled the cache while this one waited.
-		res.currentAt = time.Now()
-		switch v, ok, err := c.Get(ctx, key); {
-		case err != nil:
-			res.lookupErr = err
-		case ok:
-			res.value = v
-			return res, nil
-		default:
-			res.missed = true
+		fence := seen.fence
+		// Reuse the miss unless an earlier fill in this Cache may have written.
+		if !seen.ok || c.fills.EndedSince(key, seen.since) {
+			res.current = c.fills.Tick(key)
+			e, f, err := c.get(ctx, key)
+			if e.ok {
+				res.value = e.val
+				return res, nil
+			}
+			fence, res.lookupErr = f, err
 		}
+		res.missed = res.lookupErr == nil
 
-		// Snapshot before loading so an invalidation can refuse the later write.
-		snapshot, snapshotErr := c.Snapshot(ctx, key)
+		// Reusing the read's fence skips the TTL refresh. Expiry during the load
+		// will reject the fill.
+		snapshot := Snapshot{fence: fence}
+		var snapshotErr error
+		if !fence.Valid() {
+			snapshot, snapshotErr = c.Snapshot(ctx, key)
+		}
 		if err := ctx.Err(); err != nil {
 			return res, err
 		}
 
 		res.ranLoader = true
-		res.currentAt = time.Now()
+		res.current = c.fills.Tick(key)
 		v, err := load(ctx)
 		if err != nil {
 			return res, err
@@ -281,10 +304,10 @@ func (c *Cache[V]) fill(key string, load Loader[V]) func(context.Context) (fillR
 			return res, nil
 		}
 
-		attempted := time.Now()
+		attempted := c.fills.Tick(key)
 		res.fill, res.fillErr = c.SetWithTTL(ctx, key, v, snapshot, ttl)
 		if provenCurrent(res.fill.Outcome) {
-			res.currentAt = attempted
+			res.current = attempted
 		}
 		return res, nil
 	}

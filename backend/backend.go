@@ -8,7 +8,7 @@ import (
 // NoExpiration asks for a value or a fence that never expires.
 const NoExpiration time.Duration = -1
 
-// ReadResult is one backend read. Other fields are undefined when Found is false.
+// ReadResult is one backend read. Value is undefined when Found is false.
 type ReadResult struct {
 	// Value is the stored frame. Callers must not modify it.
 	Value []byte
@@ -17,8 +17,9 @@ type ReadResult struct {
 	// Fence is the key's current fence.
 	Fence Fence
 
-	// FenceFound reports whether the key has a fence. A value without one must
-	// not be served.
+	// FenceFound reports whether Read found the key's current fence.
+	// A value without a fence must not be served. On a miss, reporting the
+	// fence is optional; fills may use it instead of Ensure.
 	FenceFound bool
 }
 

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/unkn0wn-root/cascache/v4"
+	"github.com/unkn0wn-root/cascache/v4/backend"
 )
 
 type loadHarness struct {
@@ -726,4 +727,283 @@ func TestLoadNeverServesAVersionOlderThanTheCall(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+type probe struct {
+	backend.Backend
+	missFences backend.FenceStore
+
+	reads, ensures, stores atomic.Int64
+
+	// Set only when no reads are in flight.
+	onRead func(n int64)
+}
+
+func (p *probe) Read(ctx context.Context, key backend.Key) (backend.ReadResult, error) {
+	r, err := p.Backend.Read(ctx, key)
+	if err == nil && !r.Found && p.missFences != nil {
+		r.Fence, r.FenceFound, err = p.missFences.Read(ctx, key)
+	}
+	n := p.reads.Add(1)
+	if p.onRead != nil {
+		p.onRead(n)
+	}
+	return r, err
+}
+
+func (p *probe) Ensure(ctx context.Context, key backend.Key, candidate backend.Fence) (backend.Fence, error) {
+	p.ensures.Add(1)
+	return p.Backend.Ensure(ctx, key, candidate)
+}
+
+func (p *probe) CompareAndStore(ctx context.Context, req backend.StoreRequest) (backend.StoreResult, error) {
+	p.stores.Add(1)
+	return p.Backend.CompareAndStore(ctx, req)
+}
+
+func newProbedLoadHarness(
+	t testing.TB,
+	fenceOnMiss bool,
+	tweak func(*cascache.Options[user]),
+) (*loadHarness, *probe) {
+	p := &probe{}
+	lh := newLoadHarness(t, func(o *cascache.Options[user]) {
+		p.Backend = o.Backend
+		o.Backend = p
+		if tweak != nil {
+			tweak(o)
+		}
+	})
+	if fenceOnMiss {
+		p.missFences = lh.fences
+	}
+	return lh, p
+}
+
+func TestLoadMissReadsTheCacheOnce(t *testing.T) {
+	tests := []struct {
+		name        string
+		fenceOnMiss bool
+		fenced      bool
+		ensures     int64
+	}{
+		{name: "backend reports no fence on a miss", fenced: true, ensures: 1},
+		{name: "backend reports the fence on a miss", fenceOnMiss: true, fenced: true, ensures: 0},
+		{name: "key has no fence yet", fenceOnMiss: true, ensures: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lh, p := newProbedLoadHarness(t, tt.fenceOnMiss, nil)
+			ctx := context.Background()
+			if tt.fenced {
+				if err := lh.cache.Invalidate(ctx, "42"); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var calls atomic.Int64
+			if got, err := lh.cache.Load(ctx, "42", loaderFor(ada, &calls)); err != nil || got != ada {
+				t.Fatalf("Load = %+v, %v; want %+v", got, err, ada)
+			}
+
+			if n := p.reads.Load(); n != 1 {
+				t.Errorf("reads = %d, want 1: no other run could have filled the cache", n)
+			}
+			if n := p.ensures.Load(); n != tt.ensures {
+				t.Errorf("ensures = %d, want %d", n, tt.ensures)
+			}
+			if n := p.stores.Load(); n != 1 {
+				t.Errorf("stores = %d, want 1", n)
+			}
+			if got, ok := lh.mustGet(t, "42"); !ok || got != ada {
+				t.Fatalf("Get = %+v, %v; want the filled value", got, ok)
+			}
+			if n := calls.Load(); n != 1 {
+				t.Fatalf("the loader ran %d times, want 1", n)
+			}
+		})
+	}
+}
+
+func TestLoadLateCallerTakesTheValueItJustMissed(t *testing.T) {
+	for _, fenceOnMiss := range []bool{false, true} {
+		t.Run("fenceOnMiss="+strconv.FormatBool(fenceOnMiss), func(t *testing.T) {
+			lh, p := newProbedLoadHarness(t, fenceOnMiss, nil)
+			ctx := context.Background()
+
+			var calls atomic.Int64
+			loading := make(chan struct{})
+			release := make(chan struct{})
+			firstDone := make(chan struct{})
+			go func() {
+				defer close(firstDone)
+				got, err := lh.cache.Load(ctx, "42", func(context.Context) (user, error) {
+					calls.Add(1)
+					close(loading)
+					<-release
+					return ada, nil
+				})
+				if err != nil || got != ada {
+					t.Errorf("first Load = %+v, %v", got, err)
+				}
+			}()
+			<-loading
+
+			// Pause the late caller after its miss.
+			lookup := p.reads.Load() + 1
+			missed := make(chan struct{})
+			proceed := make(chan struct{})
+			p.onRead = func(n int64) {
+				if n == lookup {
+					close(missed)
+					<-proceed
+				}
+			}
+
+			late := make(chan user, 1)
+			go func() {
+				got, err := lh.cache.Load(ctx, "42", loaderFor(user{ID: "42", Name: "again"}, &calls))
+				if err != nil {
+					t.Errorf("late Load: %v", err)
+				}
+				late <- got
+			}()
+			<-missed
+
+			// Finish the first fill before letting the late caller join.
+			close(release)
+			<-firstDone
+			close(proceed)
+
+			if got := <-late; got != ada {
+				t.Fatalf("late Load = %+v, want the stored %+v", got, ada)
+			}
+			if n := calls.Load(); n != 1 {
+				t.Fatalf("the loader ran %d times, want 1", n)
+			}
+			if n := p.reads.Load(); n != lookup+1 {
+				t.Fatalf("reads = %d, want %d: the late run must read again", n, lookup+1)
+			}
+		})
+	}
+}
+
+func TestLoadFenceFromTheLookupRefusesALaterInvalidation(t *testing.T) {
+	tests := []struct {
+		name       string
+		invalidate func(t *testing.T, lh *loadHarness, p *probe) cascache.Loader[user]
+	}{
+		{
+			name: "between the lookup and the load",
+			invalidate: func(t *testing.T, lh *loadHarness, p *probe) cascache.Loader[user] {
+				p.onRead = func(int64) {
+					if err := lh.cache.Invalidate(context.Background(), "42"); err != nil {
+						t.Errorf("Invalidate: %v", err)
+					}
+				}
+				return loaderFor(user{ID: "42", Name: "old"}, nil)
+			},
+		},
+		{
+			name: "during the load",
+			invalidate: func(_ *testing.T, lh *loadHarness, _ *probe) cascache.Loader[user] {
+				return func(ctx context.Context) (user, error) {
+					if err := lh.cache.Invalidate(ctx, "42"); err != nil {
+						return user{}, err
+					}
+					return user{ID: "42", Name: "old"}, nil
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lh, p := newProbedLoadHarness(t, true, nil)
+			ctx := context.Background()
+			if err := lh.cache.Invalidate(ctx, "42"); err != nil {
+				t.Fatal(err)
+			}
+
+			load := tt.invalidate(t, lh, p)
+			if _, err := lh.cache.Load(ctx, "42", load); err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			p.onRead = nil
+
+			if fill := onlyFill(t, lh.reports()[0]); fill.Result.Outcome != cascache.SetOutcomeConflict {
+				t.Fatalf("fill outcome = %v, want conflict", fill.Result.Outcome)
+			}
+			if n := p.ensures.Load(); n != 0 {
+				t.Fatalf("ensures = %d, want the lookup's fence to be used", n)
+			}
+			if _, ok := lh.storedBytes(t, "42"); ok {
+				t.Fatal("a value loaded under a retired fence was cached")
+			}
+		})
+	}
+}
+
+func TestLoadReadsAgainAfterReplacingAnExpiredRun(t *testing.T) {
+	lh, p := newProbedLoadHarness(t, true, func(o *cascache.Options[user]) {
+		o.LoadTimeout = 20 * time.Millisecond
+	})
+
+	release := make(chan struct{})
+	expired := make(chan struct{})
+	stuck := make(chan struct{})
+	defer func() {
+		close(release)
+		<-stuck
+	}()
+
+	go func() {
+		defer close(stuck)
+		_, _ = lh.cache.Load(context.Background(), "42", func(ctx context.Context) (user, error) {
+			<-ctx.Done()
+			close(expired)
+			<-release
+			return user{}, ctx.Err()
+		})
+	}()
+	<-expired
+
+	before := p.reads.Load()
+	if got, err := lh.cache.Load(context.Background(), "42", loaderFor(ada, nil)); err != nil || got != ada {
+		t.Fatalf("Load = %+v, %v; want %+v", got, err, ada)
+	}
+	if n := p.reads.Load() - before; n != 2 {
+		t.Fatalf("reads = %d, want 2: the lookup and a second read", n)
+	}
+}
+
+type invalidMissFence struct{ *probe }
+
+func (b invalidMissFence) Read(ctx context.Context, key backend.Key) (backend.ReadResult, error) {
+	r, err := b.probe.Read(ctx, key)
+	if err == nil && !r.Found {
+		r.Fence, r.FenceFound = backend.Fence{}, true
+	}
+	return r, err
+}
+
+func TestLoadSnapshotsWhenAMissReportsAnInvalidFence(t *testing.T) {
+	p := &probe{}
+	lh := newLoadHarness(t, func(o *cascache.Options[user]) {
+		p.Backend = o.Backend
+		o.Backend = invalidMissFence{p}
+	})
+	ctx := context.Background()
+	if err := lh.cache.Invalidate(ctx, "42"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := lh.cache.Load(ctx, "42", loaderFor(ada, nil)); err != nil || got != ada {
+		t.Fatalf("Load = %+v, %v; want %+v", got, err, ada)
+	}
+	if n := p.ensures.Load(); n != 1 {
+		t.Fatalf("ensures = %d, want 1", n)
+	}
+	if fill := onlyFill(t, lh.reports()[0]); fill.Result.Outcome != cascache.SetOutcomeStored {
+		t.Fatalf("fill outcome = %v, want stored", fill.Result.Outcome)
+	}
 }

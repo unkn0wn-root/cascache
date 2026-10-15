@@ -6,7 +6,7 @@ import (
 	"github.com/unkn0wn-root/cascache/v4/backend"
 )
 
-// Read gets the value and fence with one MGET from their shared cluster slot.
+// Read fetches the value and fence with one MGET, even when the value is absent.
 func (b *Backend) Read(ctx context.Context, key backend.Key) (backend.ReadResult, error) {
 	if err := checkKey(b.client, key); err != nil {
 		return backend.ReadResult{}, err

@@ -1,7 +1,7 @@
 # Benchmarks
 
-These benchmarks use one 256-byte value. They cover reads, sets, and
-invalidations through a simple in-memory store and the CASCache Redis backend.
+Benchmarks use a 256-byte value and cover reads, sets, invalidations, and loads
+through an in-memory store and the CASCache Redis backend.
 Plain Redis `GET`, `SET`, and `DEL` calls use the same Go client as a reference.
 
 Run the local benchmark on its own:
@@ -23,6 +23,9 @@ invalidation benchmarks use the same key repeatedly, so the value is absent
 after the first call. CASCache still changes the fence and attempts the delete
 on every call. Plain Redis `DEL` does not provide the same guarantee and is
 included only as a reference.
+
+Reload benchmarks measure invalidation followed by a cache miss and fill.
+Redis results include round trips per cycle; plain Redis uses `DEL`, `GET`, and `SET`.
 
 Use a quiet machine and run the command several times when comparing changes.
 Redis results also depend on the server, network, and Docker setup.

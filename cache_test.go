@@ -1170,6 +1170,23 @@ func arrangements(t *testing.T) []arrangement {
 		},
 	}}
 
+	out = append(out, arrangement{
+		name: "per-replica values and shared process fences reported on a miss",
+		newReplicas: func(t testing.TB, n int) []*cascache.Cache[record] {
+			fences := newFakeFences()
+
+			caches := make([]*cascache.Cache[record], n)
+			for i := range caches {
+				b, err := backend.NewComposite(memstore.New(memstore.Options{}), fences)
+				if err != nil {
+					t.Fatal(err)
+				}
+				caches[i] = newReplicaCache(t, &probe{Backend: b, missFences: fences})
+			}
+			return caches
+		},
+	})
+
 	addr := os.Getenv("CASCACHE_TEST_REDIS")
 	if addr == "" {
 		t.Log("set CASCACHE_TEST_REDIS to also check the Redis arrangements")

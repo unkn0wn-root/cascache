@@ -64,6 +64,41 @@ func TestHybridConformance(t *testing.T) {
 	})
 }
 
+func TestReadReportsTheFenceOnAMiss(t *testing.T) {
+	client := dial(t)
+	b := newBackend(t, redis.Options{})
+	key := backendtest.Key(t, "miss")
+	ctx := context.Background()
+	t.Cleanup(func() {
+		client.Del(context.Background(), backend.FenceKey(key), backend.ValueKey(key))
+	})
+
+	read, err := b.Read(ctx, key)
+	if err != nil || read.Found || read.FenceFound {
+		t.Fatalf("Read of an unknown key = %+v, %v; want a miss without a fence", read, err)
+	}
+
+	fence, err := b.Ensure(ctx, key, backend.NewFence())
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err = b.Read(ctx, key)
+	if err != nil || read.Found || !read.FenceFound || !read.Fence.Equal(fence) {
+		t.Fatalf("Read = %+v, %v; want a miss that reports %v", read, err, fence)
+	}
+
+	if err := client.Set(ctx, backend.FenceKey(key), "malformed", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	read, err = b.Read(ctx, key)
+	if err != nil || read.Found || read.FenceFound {
+		t.Fatalf("Read with a malformed fence = %+v, %v; want a plain miss", read, err)
+	}
+	if _, err := b.Ensure(ctx, key, backend.NewFence()); !errors.Is(err, redis.ErrFenceParse) {
+		t.Fatalf("Ensure with a malformed fence = %v, want ErrFenceParse", err)
+	}
+}
+
 // Losing fence state must not make a retired value current again.
 func TestExpiredFenceCannotResurrectAValue(t *testing.T) {
 	client := dial(t)

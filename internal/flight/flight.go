@@ -4,10 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+const clockSlots = 256
+
+var clockSeed = maphash.MakeSeed()
 
 var (
 	ErrGoexit = errors.New("flight: call exited without returning")
@@ -63,6 +69,15 @@ type Group[V any] struct {
 
 	mu    sync.Mutex
 	calls map[string]*call[V]
+
+	clocks [clockSlots]slotClock
+}
+
+// Group.mu serializes updates to returned and detached.
+type slotClock struct {
+	now      atomic.Uint64
+	returned atomic.Uint64
+	detached atomic.Int32 // Calls removed from the group but still running.
 }
 
 type call[V any] struct {
@@ -93,14 +108,17 @@ func (g *Group[V]) Do(
 	}
 
 	g.mu.Lock()
-	if c, ok := g.calls[key]; ok && c.ctx.Err() == nil {
-		c.waiters++
-		g.mu.Unlock()
+	if c, ok := g.calls[key]; ok {
+		if c.ctx.Err() == nil {
+			c.waiters++
+			g.mu.Unlock()
 
-		if g.OnJoin != nil {
-			g.OnJoin(key)
+			if g.OnJoin != nil {
+				g.OnJoin(key)
+			}
+			return g.wait(ctx, key, c)
 		}
-		return g.wait(ctx, key, c)
+		g.clockOf(key).detached.Add(1)
 	}
 
 	callCtx, cancel := g.callContext(ctx)
@@ -114,6 +132,27 @@ func (g *Group[V]) Do(
 	go g.run(key, c, fn)
 
 	return g.wait(ctx, key, c)
+}
+
+// Stamp orders events for one key within a Group.
+type Stamp uint64
+
+// Now returns the key's current stamp without advancing it.
+func (g *Group[V]) Now(key string) Stamp { return Stamp(g.clockOf(key).now.Load()) }
+
+// Tick advances the key's stamp and returns it.
+func (g *Group[V]) Tick(key string) Stamp { return Stamp(g.clockOf(key).now.Add(1)) }
+
+// EndedSince reports whether a call for key returned after s or is still
+// running outside the group. Shared clocks can cause false positives.
+func (g *Group[V]) EndedSince(key string, s Stamp) bool {
+	c := g.clockOf(key)
+	// Read detached first; run updates returned before decrementing it.
+	return c.detached.Load() > 0 || Stamp(c.returned.Load()) > s
+}
+
+func (g *Group[V]) clockOf(key string) *slotClock {
+	return &g.clocks[maphash.String(clockSeed, key)%clockSlots]
 }
 
 func (g *Group[V]) Len() int {
@@ -167,6 +206,7 @@ func (g *Group[V]) abandon(key string, c *call[V]) {
 	if last && g.calls[key] == c {
 		// Let new callers start before canceling the old call.
 		delete(g.calls, key)
+		g.clockOf(key).detached.Add(1)
 	}
 	g.mu.Unlock()
 
@@ -194,8 +234,13 @@ func (g *Group[V]) run(key string, c *call[V], fn func(context.Context) (V, erro
 		}
 
 		g.mu.Lock()
+		clk := g.clockOf(key)
+		// mu orders the stores, so returned only grows.
+		clk.returned.Store(clk.now.Add(1))
 		if g.calls[key] == c {
 			delete(g.calls, key)
+		} else {
+			clk.detached.Add(-1)
 		}
 		g.mu.Unlock()
 
