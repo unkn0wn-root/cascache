@@ -11,19 +11,21 @@ func readResult(values []any) (backend.ReadResult, error) {
 		return backend.ReadResult{}, errReplyLength
 	}
 
+	v, f := values[0], values[1]
+
 	var out backend.ReadResult
-	if values[0] != nil {
-		value, ok := asBytes(values[0])
+	if v != nil {
+		value, ok := asBytes(v)
 		if !ok {
 			return backend.ReadResult{}, errReplyType
 		}
 		out.Value, out.Found = value, true
 	}
 
-	if values[1] == nil {
+	if f == nil {
 		return out, nil
 	}
-	fence, err := parseFence(values[1])
+	fence, err := parseFence(f)
 	if err != nil {
 		if out.Found {
 			return backend.ReadResult{}, err
