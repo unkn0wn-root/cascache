@@ -10,6 +10,9 @@
 // Concurrent calls for the same key share one loader run. A later load cannot
 // undo an invalidation. Without invalidation, old values can stay until expiry.
 //
+// When data changes, write it to the source first, then call [Cache.Invalidate].
+// Retry it if it returns an error.
+//
 // For manual writes, take a [Cache.Snapshot] before reading the source, then
 // pass it to [Cache.Set]. An invalidation between those calls blocks the write.
 //
@@ -21,4 +24,7 @@
 // Redis reads must reach the primary: a replica can return an old value with
 // its matching old fence. The Redis backend rejects known replica reads unless
 // explicitly allowed.
+//
+// The cache never closes what you pass to it. Close the backend if it has a
+// Close method, and close the store or Redis client yourself.
 package cascache

@@ -3,120 +3,124 @@ package cascache_test
 import (
 	"context"
 	"fmt"
-	"sync"
-	"time"
+	"log"
 
 	"github.com/unkn0wn-root/cascache/v4"
 	"github.com/unkn0wn-root/cascache/v4/backend"
 	"github.com/unkn0wn-root/cascache/v4/codec"
-	"github.com/unkn0wn-root/cascache/v4/provider"
+	"github.com/unkn0wn-root/cascache/v4/provider/ristretto"
 )
-
-type memoryStore struct {
-	mu      sync.Mutex
-	entries map[string][]byte
-}
-
-var _ provider.Store = (*memoryStore)(nil)
-
-func newMemoryStore() *memoryStore {
-	return &memoryStore{entries: make(map[string][]byte)}
-}
-
-func (s *memoryStore) Get(_ context.Context, key string) ([]byte, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v, ok := s.entries[key]
-	return v, ok, nil
-}
-
-func (s *memoryStore) Set(_ context.Context, key string, value []byte, _ int64, _ time.Duration) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.entries[key] = value
-	return true, nil
-}
-
-func (s *memoryStore) Del(_ context.Context, key string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.entries, key)
-	return nil
-}
-
-type person struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
-
-func newExampleCache() (*cascache.Cache[person], *backend.Local) {
-	b, err := backend.NewLocal(newMemoryStore(), backend.LocalOptions{})
-	if err != nil {
-		panic(err)
-	}
-	cache, err := cascache.New(cascache.Options[person]{
-		Namespace:  "person",
-		Backend:    b,
-		Codec:      codec.JSON[person]{},
-		DefaultTTL: 5 * time.Minute,
-	})
-	if err != nil {
-		panic(err)
-	}
-	return cache, b
-}
-
-func Example() {
-	ctx := context.Background()
-	cache, b := newExampleCache()
-	defer b.Close()
-
-	reads := 0
-	load := func(context.Context) (person, error) {
-		reads++
-		return person{ID: "42", Name: "Ada"}, nil
-	}
-
-	// Only the first load reads from the source.
-	for range 3 {
-		p, err := cache.Load(ctx, "42", load)
-		if err != nil {
-			panic(err)
-		}
-		fmt.Println(p.Name)
-	}
-	fmt.Println("source reads:", reads)
-
-	// Output:
-	// Ada
-	// Ada
-	// Ada
-	// source reads: 1
-}
 
 func ExampleCache_Invalidate() {
 	ctx := context.Background()
-	cache, b := newExampleCache()
+
+	store, err := ristretto.New(ristretto.Config{
+		NumCounters: 200_000,
+		MaxCost:     1 << 20,
+		BufferItems: 64,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer store.Close(ctx)
+
+	b, err := backend.NewLocal(store, backend.LocalOptions{})
+	if err != nil {
+		log.Fatal(err)
+	}
 	defer b.Close()
 
-	names := []string{"Ada", "Grace"}
-	load := func(context.Context) (person, error) {
-		name := names[0]
-		names = names[1:]
-		return person{ID: "42", Name: name}, nil
+	cache, err := cascache.New(cascache.Options[string]{
+		Namespace: "names",
+		Backend:   b,
+		Codec:     codec.String{},
+	})
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	first, _ := cache.Load(ctx, "42", load)
-	fmt.Println(first.Name)
+	db := map[string]string{"42": "Ada"} // stands in for your database
+	load := func(context.Context) (string, error) { return db["42"], nil }
+
+	name, err := cache.Load(ctx, "42", load)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(name)
+
+	// Ristretto applies writes in the background
+	store.Wait()
+
+	db["42"] = "Grace"
+	name, err = cache.Load(ctx, "42", load)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(name) // still cached
 
 	if err := cache.Invalidate(ctx, "42"); err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 
-	second, _ := cache.Load(ctx, "42", load)
-	fmt.Println(second.Name)
+	name, err = cache.Load(ctx, "42", load)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(name)
 
 	// Output:
 	// Ada
+	// Ada
 	// Grace
+}
+
+// A key invalidated between Snapshot and Set is not written. The value read
+// under the old snapshot may be out of date, so Set reports a conflict.
+func ExampleCache_Set() {
+	ctx := context.Background()
+
+	store, err := ristretto.New(ristretto.Config{
+		NumCounters: 200_000,
+		MaxCost:     1 << 20,
+		BufferItems: 64,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer store.Close(ctx)
+
+	b, err := backend.NewLocal(store, backend.LocalOptions{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer b.Close()
+
+	cache, err := cascache.New(cascache.Options[string]{
+		Namespace: "names",
+		Backend:   b,
+		Codec:     codec.String{},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Take the snapshot before reading the source.
+	snapshot, err := cache.Snapshot(ctx, "42")
+	if err != nil {
+		log.Fatal(err)
+	}
+	name := "Ada" // read from the source
+
+	// Another request changes the source and invalidates the key.
+	if err := cache.Invalidate(ctx, "42"); err != nil {
+		log.Fatal(err)
+	}
+
+	res, err := cache.Set(ctx, "42", name, snapshot)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(res.Outcome)
+
+	// Output: conflict
 }
