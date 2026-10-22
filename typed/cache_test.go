@@ -3,6 +3,7 @@ package typed_test
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -412,18 +413,42 @@ func TestLoadRecordsMissThenHitAndFillsInRange(t *testing.T) {
 }
 
 func TestLoadRecordsAFailedRunOnce(t *testing.T) {
-	ctx := context.Background()
-	cache, c, _ := newCache(t, nil)
 	failure := errors.New("source is down")
-
-	if _, err := cache.Load(ctx, "42", func(context.Context) (user, error) {
-		return user{}, failure
-	}); !errors.Is(err, failure) {
-		t.Fatalf("Load = %v, want %v", err, failure)
+	tests := []struct {
+		name string
+		load cascache.Loader[user]
+		want error
+	}{
+		{
+			name: "error",
+			load: func(context.Context) (user, error) { return user{}, failure },
+			want: failure,
+		},
+		{
+			name: "panic",
+			load: func(context.Context) (user, error) { panic("boom") },
+			want: cascache.ErrLoaderPanic,
+		},
+		{
+			name: "goexit",
+			load: func(context.Context) (user, error) {
+				runtime.Goexit()
+				return ada, nil
+			},
+			want: cascache.ErrLoaderGoexit,
+		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache, c, _ := newCache(t, nil)
 
-	if got := c.snapshot(); got.loadFailed != 1 {
-		t.Fatalf("loadFailed = %d, want 1", got.loadFailed)
+			if _, err := cache.Load(context.Background(), "42", tt.load); !errors.Is(err, tt.want) {
+				t.Fatalf("Load = %v, want %v", err, tt.want)
+			}
+			if got := c.snapshot(); got.loads != 1 || got.loadFailed != 1 {
+				t.Fatalf("loads = %d, loadFailed = %d; want 1 and 1", got.loads, got.loadFailed)
+			}
+		})
 	}
 }
 
