@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strconv"
 	"sync/atomic"
 	"testing"
 
@@ -154,6 +155,31 @@ func BenchmarkLocalLoadHit(b *testing.B) {
 		}
 	}
 	benchmarkSink = got
+}
+
+func BenchmarkLocalParallelLoadMiss(b *testing.B) {
+	ctx := context.Background()
+	cache := newLocalCache(b, "benchmark:local:parallel-miss")
+
+	load := func(context.Context) ([]byte, error) {
+		return benchmarkValue, nil
+	}
+
+	b.SetBytes(int64(len(benchmarkValue)))
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	// Each worker uses its own keys, so every Load misses.
+	var workers atomic.Int64
+	b.RunParallel(func(pb *testing.PB) {
+		prefix := strconv.FormatInt(workers.Add(1), 10) + ":"
+		for i := 0; pb.Next(); i++ {
+			if _, err := cache.Load(ctx, prefix+strconv.Itoa(i), load); err != nil {
+				b.Error(err)
+				return
+			}
+		}
+	})
 }
 
 func BenchmarkLocalReload(b *testing.B) {
