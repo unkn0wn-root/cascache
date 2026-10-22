@@ -1,50 +1,29 @@
 # cascache
 
-`cascache` is a Go cache that keeps an older in-flight load from restoring
-invalidated data. After an invalidation succeeds, cached copies written under
-the previous state are no longer returned.
+cascache is a Go cache for values you load from a database or another slow
+source. When you invalidate a key, cascache stops serving the old value from the
+cache, and a load that was already running cannot put it back. This works
+inside one process and across several processes that share their invalidation
+state through Redis.
 
-Values can live in the current process, in Redis, or in local stores that share
-invalidation state through Redis.
+A plain cache can put old data back. Request A reads user 42 from the database.
+Request B updates user 42 and deletes the cached copy. Request A then writes the
+user it read, which is now out of date, into the cache. That copy is served
+until it expires. cascache turns down request A's write, because the key was
+invalidated while A was reading.
 
-Each key has an invalidation token. A cached value records the token that was
-current when it was written and is returned only while that token still
-matches. The `backend` package calls this token a fence.
-
-## Installation
+## Install
 
 ```sh
 go get github.com/unkn0wn-root/cascache/v4
 ```
 
-Import the package as:
-
-```go
-import "github.com/unkn0wn-root/cascache/v4"
-```
-
-Version 4 uses a new module path, API, storage key layout, and wire format. See
-the [changelog](CHANGELOG.md) when upgrading from version 3.
-
-## Why
-
-A normal cache-aside write can restore old data after an invalidation:
-
-1. Request A starts reading a value from the source.
-2. Request B updates the source and invalidates the cache.
-3. Request A finishes later and writes its older value into the cache.
-
-With a normal cache `SET`, the last write wins. CASCache takes a snapshot of the
-key's invalidation state before reading the source and checks it again before
-storing the result. If the key was invalidated during the read, the cache
-refuses the write.
-
-A completed invalidation also makes existing copies unusable, including copies
-held by other processes that share the same invalidation state.
+cascache needs Go 1.23.1 or later. Version 4 changed the module path, API and
+storage format, so it does not share cached data or invalidations with v3.
 
 ## Quick start
 
-This example creates a process-local cache backed by Ristretto:
+This program caches users in a Ristretto store inside the process:
 
 ```go
 package main
@@ -76,8 +55,8 @@ func run() error {
 	ctx := context.Background()
 
 	store, err := ristretto.New(ristretto.Config{
-		NumCounters: 10_000,
-		MaxCost:     64 << 20,
+		NumCounters: 200_000, // about 10 times the entries it holds
+		MaxCost:     1 << 20, // about 18,000 entries: Ristretto adds 56 to each entry's cost of 1
 		BufferItems: 64,
 	})
 	if err != nil {
@@ -102,7 +81,7 @@ func run() error {
 	}
 
 	user, err := cache.Load(ctx, "42", func(context.Context) (User, error) {
-		return User{ID: "42", Name: "Ada"}, nil
+		return User{ID: "42", Name: "Ada"}, nil // read your database here
 	})
 	if err != nil {
 		return err
@@ -113,182 +92,100 @@ func run() error {
 }
 ```
 
-`Load` is the normal read path. Concurrent calls for the same missing key share
-one loader run. Cache read and write errors do not hide a value returned by the
-loader; use `Options.OnLoad` or an observer to record them.
+`Load` returns the cached value or, on a miss, calls your loader and caches the
+result. Concurrent calls for the same missing key share one loader run. If the
+cache read or write fails, you still get the loaded value, and the error goes to
+`Options.OnLoad` and `Options.Observer`.
 
-See [EXAMPLE.md](EXAMPLE.md) for a complete repository example with reads,
-updates, and invalidation.
+## Updating data
 
-## Updating and invalidating
-
-Update the source first, then invalidate the cached value:
+Change the source first, then call `Invalidate`. In the other order, a load
+that starts in between can read the old data and cache it again.
 
 ```go
 if err := db.UpdateUser(ctx, user); err != nil {
 	return err
 }
-return cache.Invalidate(ctx, user.ID)
+if err := cache.Invalidate(ctx, user.ID); err != nil {
+	return err
+}
 ```
 
-`Invalidate` changes the key's invalidation state before removing the stored
-value. A load already in progress cannot write an older value back and have it
-served.
+If `Invalidate` returns an error, the old value may still be served, so retry
+it. A service that changes the data but never reads the cache can use
+`cascache.NewInvalidator` with the same namespace and a Redis backend on the
+same server. It needs no value type or codec.
 
-Retry an `Invalidate` error because the invalidation may not have taken effect.
-If invalidation succeeds but cleanup fails, the old value is already unusable.
-The cleanup failure is reported as `EventCleanupFailed`.
+## Sharing a cache across processes
 
-A service that only invalidates values does not need their type or codec:
-
-```go
-inv, err := cascache.NewInvalidator(cascache.InvalidatorOptions{
-	Namespace: "users",
-	Backend:   b,
-})
-```
-
-`Cache.Invalidator` returns the same kind of handle for an existing cache.
-
-## Manual fills
-
-Use `Load` for the usual cache-aside flow. If you need to manage the read
-yourself, take the snapshot before reading the source:
+`backend/redis` has two backends. `New` keeps values and invalidation state in
+Redis, so a value one process loads is served to all of them. `NewShared` keeps
+values in each process's own store and only the invalidation state in Redis, so
+each process loads and holds its own copy. `backend/redis` and go-redis are both
+named `redis`, so rename them on import:
 
 ```go
-snapshot, err := cache.Snapshot(ctx, key)
+import (
+	goredis "github.com/redis/go-redis/v9"
+	redisbackend "github.com/unkn0wn-root/cascache/v4/backend/redis"
+)
+
+client := goredis.NewClient(&goredis.Options{Addr: "localhost:6379"})
+defer client.Close()
+
+b, err := redisbackend.NewShared(store, client, redisbackend.Options{})
 if err != nil {
 	return err
 }
-
-value, err := loadFromSource(ctx, key)
-if err != nil {
-	return err
-}
-
-res, err := cache.Set(ctx, key, value, snapshot)
 ```
 
-If the key is invalidated between `Snapshot` and `Set`, the write returns
-`SetOutcomeConflict`. This is not an error; the value was already stale and was
-not cached.
+The Redis backends have no `Close` method, so drop `defer b.Close()` from the
+quick start.
 
-## Backend choices
+Point the client at the Redis primary. A replica that lags behind may not have
+an invalidation yet, and cascache would then serve the old value as current.
+`New` and `NewShared` return `ErrReplicaReads` for a Cluster client with
+`ReadOnly` set, but they do not detect a Sentinel client with `ReplicaOnly` set.
+The [package docs](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/backend/redis)
+list the go-redis settings to leave off.
 
-The cache stores values and invalidation state through a `backend.Backend`.
+Redis copies writes to replicas in the background, and cascache does not wait
+for them. If the primary fails right after an invalidation, the new primary may
+not have it, and the old value can be served again until it expires.
 
-| Setup | Constructor | Values | Invalidation state |
-| --- | --- | --- | --- |
-| One process | `backend.NewLocal` | Caller-owned store | Process memory |
-| Shared Redis | `backend/redis.New` | Redis | Redis |
-| Local values across replicas | `backend/redis.NewShared` | Caller-owned store | Redis |
+## Typed keys
 
-Use `backend/redis.New` when values and invalidation state belong in the same
-Redis instance. It updates them atomically and needs fewer round trips.
-
-Use `backend/redis.NewShared` when each replica keeps values locally but all
-replicas must observe the same invalidations. Each process removes its own
-outdated values when they are read.
-
-The `provider` packages adapt BigCache, Redis, and Ristretto as value stores.
-`provider/redis` stores values only; it is not the same as the Redis backend.
-
-## Redis reads must use the primary
-
-> [!WARNING]
-> The Redis client used by a CASCache backend must route reads to the current
-> primary.
-
-Replication lag can return an old value together with its matching old fence.
-The fence check then succeeds even though the data is outdated. A read from a
-lagging replica is therefore unsafe.
-
-Use a primary or writer endpoint. With go-redis:
-
-- leave `ReplicaOnly` false for Sentinel clients;
-- leave `ReadOnly`, `RouteByLatency`, and `RouteRandomly` false for Cluster and
-  Universal clients;
-- treat `backend/redis.ErrReplicaReads` as a startup configuration error.
-
-Replication can still be used for availability and failover. Cache operations
-must use whichever node is the current primary.
-
-The Redis backend rejects replica-read settings it can detect unless
-`AllowReplicaReads` is set. It cannot detect every managed-service reader
-endpoint, proxy, or custom client. Enabling replica reads gives up the guarantee
-that later reads observe a completed invalidation.
-
-## Failure behavior
-
-If the cache cannot prove that a value is current, it returns a miss instead of
-the value. Missing, expired, or evicted invalidation state therefore lowers the
-hit rate but does not make an old value current again.
-
-Fences have no valid zero value and are never reused. Losing fence state cannot
-make an older value current.
-
-Invalidation state must live at least as long as its cached values. Built-in
-backends shorten value TTLs when needed and report the applied TTL through
-`SetResult.EffectiveTTL`. Frequent `RejectStateMissing` events usually mean the
-invalidation lifetime is too short.
-
-CASCache only knows about changes followed by a successful `Invalidate` call.
-Changes made without invalidation are governed by the value's TTL.
-
-## Loader behavior
-
-Canceling one caller does not cancel a loader run that still has other callers.
-A run ends when no callers remain or `Options.LoadTimeout` expires. Loaders must
-honor their context.
-
-A loader that ignores cancellation may overlap a later run for the same key. A
-late result can still be returned to callers waiting for it, but it is not given
-a new cache lifetime. Loader panics return a `*PanicError`.
-
-## Typed keys and metrics
-
-The `typed` package adds typed keys, TTL jitter, and metric callbacks:
+The `typed` package lets you use keys of any comparable type, such as an `int64`
+ID. It can also pick a random TTL in a range for each cached value, so entries
+written together do not all expire at once:
 
 ```go
-cache, err := typed.NewRedis(client, typed.Options[uuid.UUID, Frame]{
+users, err := typed.New(typed.Options[int64, User]{
 	Config: typed.Config{
-		Namespace: "gw:users",
+		Namespace: "users",
 		MaxTTL:    10 * time.Minute,
 		MinTTL:    8 * time.Minute,
-		Jitter:    0.2,
-		Metrics:   metrics,
+		Jitter:    1, // pick each TTL at random between MinTTL and MaxTTL
 	},
-	KeyFunc: func(id uuid.UUID) string { return id.String() },
-	Codec:   codec.JSON[Frame]{},
+	KeyFunc: func(id int64) string { return strconv.FormatInt(id, 10) },
+	Codec:   codec.JSON[User]{},
+	Backend: b,
 })
 ```
 
-Jitter spreads expiration times so entries written together do not all reload
-at once.
+## Documentation
 
-Core cache events are sent to an `Observer`. The `hooks/slog` package logs them,
-`hooks/async` moves observation to a bounded background queue, and
-`MultiObserver` combines observers. Observers should ignore event types they do
-not recognize.
+The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4). It also covers:
 
-## Ownership
+- [Cache.Snapshot](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4#Cache.Snapshot) and [Cache.Set](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4#Cache.Set) to fill the cache yourself
+- [Options.LoadTimeout](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4#Options.LoadTimeout) to limit how long a loader runs
+- [Observer](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4#Observer) for cache events, with [hooks/slog](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/hooks/slog) to log them and [hooks/async](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/hooks/async) to handle them in the background
+- [backend.Backend](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/backend#Backend) and [backend/backendtest](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/backend/backendtest) to write and test your own backend
+- Value stores for [Ristretto](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/provider/ristretto), [BigCache](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/provider/bigcache) and [Redis](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/provider/redis). The Redis store holds values only and does not share invalidations the way `backend/redis` does.
 
-The cache does not close dependencies supplied by the caller. Close backends,
-stores, and Redis clients you own. In particular, close `backend.Local` to stop
-its cleanup goroutine; closing it does not close the value store.
+[_benchmarks/README.md](_benchmarks/README.md) explains how to run the
+benchmarks, and [CHANGELOG.md](CHANGELOG.md) lists the changes in each release.
 
-## Custom backends
+## License
 
-Implement `backend.Backend` to add another storage arrangement. The interface
-documents its ordering, concurrency, and ownership requirements. Use
-`backendtest.TestBackend` to run the shared conformance suite.
-
-`backend.FenceStore` and `backend.NewComposite` are available when values and
-invalidation state need separate stores. Most cache users do not need them.
-
-## Further reading
-
-- [Complete example](EXAMPLE.md)
-- [Benchmarks](_benchmarks/README.md)
-- [Changelog](CHANGELOG.md)
-- [Package documentation](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4)
+Apache 2.0. See [LICENSE](LICENSE).
