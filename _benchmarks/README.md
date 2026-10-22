@@ -27,5 +27,10 @@ included only as a reference.
 Reload benchmarks measure invalidation followed by a cache miss and fill.
 Redis results include round trips per cycle; plain Redis uses `DEL`, `GET`, and `SET`.
 
+The parallel load miss benchmarks give each worker its own keys, so every Load
+misses and fills the cache. The Redis version also reports round trips and
+backend reads per Load. More than 1 read per Load means some fills read the key
+a second time before loading.
+
 Use a quiet machine and run the command several times when comparing changes.
 Redis results also depend on the server, network, and Docker setup.
