@@ -47,3 +47,6 @@ jobs:
 
     - name: Run tests
       run: go test -v -race -timeout 1m ./...
+
+    - name: Run allocation tests
+      run: go test -v -run Allocs -timeout 1m ./...

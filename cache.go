@@ -80,15 +80,14 @@ func (c *Cache[V]) Get(ctx context.Context, key string) (V, bool, error) {
 		return zero, false, nil
 	}
 
-	e, _, err := c.get(ctx, key)
+	e, _, err := c.get(ctx, key, c.inv.space.Key(key))
 	if err != nil {
 		return zero, false, err
 	}
 	return e.val, e.ok, nil
 }
 
-func (c *Cache[V]) get(ctx context.Context, key string) (entry[V], backend.Fence, error) {
-	bkey := c.inv.space.Key(key)
+func (c *Cache[V]) get(ctx context.Context, key string, bkey backend.Key) (entry[V], backend.Fence, error) {
 	r, err := c.inv.backend.Read(ctx, bkey)
 	if err != nil {
 		return entry[V]{}, backend.Fence{}, c.opErr(OpGet, key, err)
@@ -106,8 +105,11 @@ func (c *Cache[V]) Snapshot(ctx context.Context, key string) (Snapshot, error) {
 	if c.inv.disabled {
 		return Snapshot{}, nil
 	}
+	return c.snapshot(ctx, key, c.inv.space.Key(key))
+}
 
-	fence, err := c.inv.backend.Ensure(ctx, c.inv.space.Key(key), backend.NewFence())
+func (c *Cache[V]) snapshot(ctx context.Context, key string, bkey backend.Key) (Snapshot, error) {
+	fence, err := c.inv.backend.Ensure(ctx, bkey, backend.NewFence())
 	if err != nil {
 		return Snapshot{}, c.opErr(OpSnapshot, key, err)
 	}
@@ -149,8 +151,18 @@ func (c *Cache[V]) SetWithTTL(
 	if c.inv.disabled {
 		return SetResult{Outcome: SetOutcomeDisabled}, nil
 	}
+	return c.set(ctx, key, c.inv.space.Key(key), value, snapshot, ttl)
+}
 
-	req, err := c.prepareWrite(key, value, snapshot, ttl)
+func (c *Cache[V]) set(
+	ctx context.Context,
+	key string,
+	bkey backend.Key,
+	value V,
+	snapshot Snapshot,
+	ttl time.Duration,
+) (SetResult, error) {
+	req, err := c.prepareWrite(key, bkey, value, snapshot, ttl)
 	if err != nil {
 		return SetResult{}, c.opErr(OpSet, key, err)
 	}

@@ -113,6 +113,7 @@ func (c *Cache[V]) Load(ctx context.Context, key string, load Loader[V]) (V, err
 type loadCall[V any] struct {
 	cache *Cache[V]
 	key   string
+	bkey  backend.Key
 	load  Loader[V]
 
 	start time.Time
@@ -140,6 +141,7 @@ func (l *loadCall[V]) run(ctx context.Context) (V, error) {
 		return l.load(ctx)
 	}
 
+	l.bkey = l.cache.inv.space.Key(l.key)
 	l.since = l.cache.fills.Now(l.key)
 	v, seen, ok := l.lookup(ctx)
 	if ok {
@@ -166,7 +168,7 @@ func (l *loadCall[V]) run(ctx context.Context) (V, error) {
 }
 
 func (l *loadCall[V]) attempt(ctx context.Context, seen miss) (fillResult[V], error) {
-	res, role, err := l.cache.fills.Do(ctx, l.key, l.cache.fill(l.key, l.load, seen))
+	res, role, err := l.cache.fills.Do(ctx, l.key, l.cache.fill(l.key, l.bkey, l.load, seen))
 
 	// Classify errors too, so only one caller accounts for a failed run.
 	switch role {
@@ -191,7 +193,7 @@ func (l *loadCall[V]) attempt(ctx context.Context, seen miss) (fillResult[V], er
 
 func (l *loadCall[V]) lookup(ctx context.Context) (V, miss, bool) {
 	var seen miss
-	switch e, fence, err := l.cache.get(ctx, l.key); {
+	switch e, fence, err := l.cache.get(ctx, l.key, l.bkey); {
 	case err != nil:
 		l.noteLookupErr(ctx, err)
 	case e.ok:
@@ -211,7 +213,8 @@ func (l *loadCall[V]) adopt(ctx context.Context, res fillResult[V]) {
 	if res.lookupErr != nil {
 		l.noteLookupErr(ctx, res.lookupErr)
 	}
-	if res.fill.Outcome != SetOutcomeUnknown || res.fillErr != nil {
+	// Fills is only reported to OnLoad.
+	if l.cache.onLoad != nil && (res.fill.Outcome != SetOutcomeUnknown || res.fillErr != nil) {
 		l.info.Fills = append(l.info.Fills, LoadFill{Result: res.fill, Err: res.fillErr})
 	}
 }
@@ -248,7 +251,12 @@ type fillResult[V any] struct {
 
 // fill must not capture a loadCall: another caller may report this shared run,
 // causing concurrent writes to LoadInfo. Return a fillResult for adopt to copy.
-func (c *Cache[V]) fill(key string, load Loader[V], seen miss) func(context.Context) (fillResult[V], error) {
+func (c *Cache[V]) fill(
+	key string,
+	bkey backend.Key,
+	load Loader[V],
+	seen miss,
+) func(context.Context) (fillResult[V], error) {
 	return func(ctx context.Context) (fillResult[V], error) {
 		var res fillResult[V]
 		if err := ctx.Err(); err != nil {
@@ -259,7 +267,7 @@ func (c *Cache[V]) fill(key string, load Loader[V], seen miss) func(context.Cont
 		// Reuse the miss unless an earlier fill in this Cache may have written.
 		if !seen.ok || c.fills.EndedSince(key, seen.since) {
 			res.current = c.fills.Tick(key)
-			e, f, err := c.get(ctx, key)
+			e, f, err := c.get(ctx, key, bkey)
 			if e.ok {
 				res.value = e.val
 				return res, nil
@@ -273,7 +281,7 @@ func (c *Cache[V]) fill(key string, load Loader[V], seen miss) func(context.Cont
 		snapshot := Snapshot{fence: fence}
 		var snapshotErr error
 		if !fence.Valid() {
-			snapshot, snapshotErr = c.Snapshot(ctx, key)
+			snapshot, snapshotErr = c.snapshot(ctx, key, bkey)
 		}
 		if err := ctx.Err(); err != nil {
 			return res, err
@@ -305,7 +313,7 @@ func (c *Cache[V]) fill(key string, load Loader[V], seen miss) func(context.Cont
 		}
 
 		attempted := c.fills.Tick(key)
-		res.fill, res.fillErr = c.SetWithTTL(ctx, key, v, snapshot, ttl)
+		res.fill, res.fillErr = c.set(ctx, key, bkey, v, snapshot, ttl)
 		if provenCurrent(res.fill.Outcome) {
 			res.current = attempted
 		}
