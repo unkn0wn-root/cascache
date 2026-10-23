@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -46,6 +47,19 @@ func (lh *loadHarness) outcomes() []cascache.LoadOutcome {
 	var out []cascache.LoadOutcome
 	for _, info := range lh.reports() {
 		out = append(out, info.Outcome)
+	}
+	return out
+}
+
+type account struct {
+	Outcome cascache.LoadOutcome
+	Runs    int
+}
+
+func (lh *loadHarness) accounts() []account {
+	var out []account
+	for _, info := range lh.reports() {
+		out = append(out, account{info.Outcome, info.Runs})
 	}
 	return out
 }
@@ -331,6 +345,255 @@ func TestLoadReportsALoaderThatExitsItsGoroutine(t *testing.T) {
 	e, found := lh.events.find(cascache.EventLoaderPanic)
 	if !found || e.Key != "42" || !errors.Is(e.Err, cascache.ErrLoaderGoexit) {
 		t.Fatalf("events = %+v, want a loader_panic with ErrLoaderGoexit for key 42", lh.events.all())
+	}
+}
+
+func TestLoadCountsTheLoaderRun(t *testing.T) {
+	tests := []struct {
+		name     string
+		disabled bool
+		cached   bool
+		load     cascache.Loader[user]
+		want     account
+	}{
+		{name: "hit", cached: true, load: loaderFor(ada, nil), want: account{cascache.LoadOutcomeHit, 0}},
+		{name: "value", load: loaderFor(ada, nil), want: account{cascache.LoadOutcomeLoaded, 1}},
+		{
+			name: "error",
+			load: func(context.Context) (user, error) { return user{}, errors.New("source is down") },
+			want: account{cascache.LoadOutcomeLoaded, 1},
+		},
+		{
+			name: "panic",
+			load: func(context.Context) (user, error) { panic("boom") },
+			want: account{cascache.LoadOutcomeLoaded, 1},
+		},
+		{
+			name: "goexit",
+			load: func(context.Context) (user, error) {
+				runtime.Goexit()
+				return ada, nil
+			},
+			want: account{cascache.LoadOutcomeLoaded, 1},
+		},
+		{
+			name:     "disabled cache",
+			disabled: true,
+			load:     loaderFor(ada, nil),
+			want:     account{cascache.LoadOutcomeLoaded, 1},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lh := newLoadHarness(t, func(o *cascache.Options[user]) { o.Disabled = tt.disabled })
+			if tt.cached {
+				lh.fill(t, "42", ada)
+			}
+
+			_, _ = lh.cache.Load(context.Background(), "42", tt.load)
+			if got := lh.accounts(); len(got) != 1 || got[0] != tt.want {
+				t.Fatalf("reports = %+v, want [%+v]", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadCountsASharedRunOnce(t *testing.T) {
+	tests := []struct {
+		name    string
+		result  func() (user, error)
+		wantErr error
+	}{
+		{name: "value", result: func() (user, error) { return ada, nil }},
+		{name: "panic", result: func() (user, error) { panic("boom") }, wantErr: cascache.ErrLoaderPanic},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lh := newLoadHarness(t, nil)
+			ctx := context.Background()
+
+			loading := make(chan struct{})
+			release := make(chan struct{})
+			starterDone := make(chan struct{})
+			// The joiner releases the run and waits for the starter to collect it.
+			lh.cache.SetOnJoin(func(string) {
+				close(release)
+				<-starterDone
+			})
+
+			go func() {
+				defer close(starterDone)
+				_, err := lh.cache.Load(ctx, "42", func(context.Context) (user, error) {
+					close(loading)
+					<-release
+					return tt.result()
+				})
+				if !errors.Is(err, tt.wantErr) {
+					t.Errorf("starter Load = %v, want %v", err, tt.wantErr)
+				}
+			}()
+			<-loading
+
+			if _, err := lh.cache.Load(ctx, "42", loaderFor(ada, nil)); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("joiner Load = %v, want %v", err, tt.wantErr)
+			}
+
+			want := []account{{cascache.LoadOutcomeLoaded, 1}, {cascache.LoadOutcomeShared, 0}}
+			if got := lh.accounts(); !slices.Equal(got, want) {
+				t.Fatalf("reports = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+// stallingReads holds reads until their context ends while stall is set.
+type stallingReads struct {
+	backend.Backend
+	stall atomic.Bool
+}
+
+func (b *stallingReads) Read(ctx context.Context, key backend.Key) (backend.ReadResult, error) {
+	if b.stall.Load() {
+		<-ctx.Done()
+		return backend.ReadResult{}, ctx.Err()
+	}
+	return b.Backend.Read(ctx, key)
+}
+
+// A joiner can take over a run its starter left and then reload.
+func TestLoadCountsBothRunsOfAReload(t *testing.T) {
+	tests := []struct {
+		name    string
+		shared  bool
+		leave   bool
+		timeout bool
+		wantErr error
+		calls   int64
+		// In report order: starter, other caller if any, joiner.
+		want []account
+	}{
+		{
+			name:  "the joiner runs the loader again",
+			calls: 2,
+			want:  []account{{cascache.LoadOutcomeUnknown, 0}, {cascache.LoadOutcomeLoaded, 2}},
+		},
+		{
+			name:   "the joiner shares another caller's run",
+			shared: true,
+			calls:  2,
+			want: []account{
+				{cascache.LoadOutcomeUnknown, 0},
+				{cascache.LoadOutcomeLoaded, 1},
+				{cascache.LoadOutcomeShared, 1},
+			},
+		},
+		{
+			name:    "the joiner leaves the second run",
+			leave:   true,
+			wantErr: context.Canceled,
+			calls:   2,
+			want:    []account{{cascache.LoadOutcomeUnknown, 0}, {cascache.LoadOutcomeUnknown, 1}},
+		},
+		{
+			name:    "the second run times out before loading",
+			timeout: true,
+			wantErr: context.DeadlineExceeded,
+			calls:   1,
+			want:    []account{{cascache.LoadOutcomeUnknown, 0}, {cascache.LoadOutcomeUnknown, 1}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reads := &stallingReads{}
+			lh := newLoadHarness(t, func(o *cascache.Options[user]) {
+				reads.Backend = o.Backend
+				o.Backend = reads
+				if tt.timeout {
+					o.LoadTimeout = 100 * time.Millisecond
+				}
+			})
+			ctx := context.Background()
+
+			// Pause each joiner until the test resumes it.
+			joined := make(chan struct{})
+			resume := make(chan struct{})
+			lh.cache.SetOnJoin(func(string) {
+				joined <- struct{}{}
+				<-resume
+			})
+
+			var calls atomic.Int64
+			loading := make(chan struct{})
+			release := make(chan struct{})
+			finished := make(chan struct{})
+			starter, cancel := context.WithCancel(ctx)
+			starterErr := make(chan error, 1)
+			go func() {
+				_, err := lh.cache.Load(starter, "42", func(ctx context.Context) (user, error) {
+					calls.Add(1)
+					context.AfterFunc(ctx, func() { close(finished) })
+					close(loading)
+					<-release
+					return ada, nil
+				})
+				starterErr <- err
+			}()
+			<-loading
+
+			joiner, leave := context.WithCancel(ctx)
+			defer leave()
+			load := loaderFor(ada, &calls)
+			if tt.leave {
+				load = func(ctx context.Context) (user, error) {
+					calls.Add(1)
+					leave()
+					<-ctx.Done()
+					return user{}, ctx.Err()
+				}
+			}
+			joinerErr := make(chan error, 1)
+			go func() {
+				_, err := lh.cache.Load(joiner, "42", load)
+				joinerErr <- err
+			}()
+			<-joined
+
+			// Make run 1 stale and leave the joiner as its only caller.
+			if err := lh.cache.Invalidate(ctx, "42"); err != nil {
+				t.Fatal(err)
+			}
+			cancel()
+			if err := <-starterErr; !errors.Is(err, context.Canceled) {
+				t.Fatalf("starter error = %v, want context.Canceled", err)
+			}
+			close(release)
+			<-finished
+
+			if tt.shared {
+				// Let the joiner collect run 1, and finish run 2 only after it joins.
+				_, err := lh.cache.Load(ctx, "42", func(context.Context) (user, error) {
+					calls.Add(1)
+					resume <- struct{}{}
+					<-joined
+					return ada, nil
+				})
+				if err != nil {
+					t.Fatalf("other caller: %v", err)
+				}
+			}
+			reads.stall.Store(tt.timeout)
+			resume <- struct{}{}
+			if err := <-joinerErr; !errors.Is(err, tt.wantErr) {
+				t.Fatalf("joiner error = %v, want %v", err, tt.wantErr)
+			}
+
+			if n := calls.Load(); n != tt.calls {
+				t.Fatalf("the loader ran %d times, want %d", n, tt.calls)
+			}
+			if got := lh.accounts(); !slices.Equal(got, tt.want) {
+				t.Fatalf("reports = %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -883,6 +1146,10 @@ func TestLoadLateCallerTakesTheValueItJustMissed(t *testing.T) {
 			}
 			if n := p.reads.Load(); n != lookup+1 {
 				t.Fatalf("reads = %d, want %d: the late run must read again", n, lookup+1)
+			}
+			want := []account{{cascache.LoadOutcomeLoaded, 1}, {cascache.LoadOutcomeHit, 0}}
+			if got := lh.accounts(); !slices.Equal(got, want) {
+				t.Fatalf("reports = %+v, want %+v", got, want)
 			}
 		})
 	}

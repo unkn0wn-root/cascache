@@ -18,8 +18,8 @@ const (
 	LoadOutcomeUnknown LoadOutcome = iota
 	// LoadOutcomeHit means the value came from the cache.
 	LoadOutcomeHit
-	// LoadOutcomeLoaded means this call accounts for the shared loader run.
-	// Exactly one caller accounts for each run, even if its starter left early.
+	// LoadOutcomeLoaded means this call accounts for the loader run whose value
+	// or error it returned, even if another caller started it.
 	LoadOutcomeLoaded
 	// LoadOutcomeShared means this call took the result of another call's run.
 	LoadOutcomeShared
@@ -50,6 +50,10 @@ type LoadFill struct {
 type LoadInfo struct {
 	Key     string
 	Outcome LoadOutcome
+
+	// Runs is the number of loader runs this call accounts for. A reloaded call
+	// can count two. A run whose callers all left is not counted.
+	Runs int
 
 	// Missed is false when the cache is disabled or the lookup failed.
 	Missed bool
@@ -137,6 +141,7 @@ func (l *loadCall[V]) run(ctx context.Context) (V, error) {
 
 	if l.cache.inv.disabled {
 		l.info.Outcome = LoadOutcomeLoaded
+		l.info.Runs = 1
 		return l.load(ctx)
 	}
 
@@ -169,6 +174,7 @@ func (l *loadCall[V]) attempt(ctx context.Context, seen miss) (fillResult[V], er
 	res, role, err := l.cache.fills.Do(ctx, l.key, l.cache.fill(l.key, l.load, seen))
 
 	// Classify errors too, so only one caller accounts for a failed run.
+	l.info.Outcome = LoadOutcomeUnknown
 	switch role {
 	case flight.Abandoned:
 	case flight.Shared:
@@ -176,8 +182,10 @@ func (l *loadCall[V]) attempt(ctx context.Context, seen miss) (fillResult[V], er
 	case flight.Owned:
 		l.adopt(ctx, res)
 		switch {
-		case res.ranLoader:
+		// A panic or Goexit counts as a loader run.
+		case res.ranLoader, errors.Is(err, flight.ErrPanic), errors.Is(err, flight.ErrGoexit):
 			l.info.Outcome = LoadOutcomeLoaded
+			l.info.Runs++
 		case err == nil:
 			l.info.Outcome = LoadOutcomeHit
 		}
