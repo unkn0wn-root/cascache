@@ -121,19 +121,13 @@ type loadCall[V any] struct {
 	load  Loader[V]
 
 	start time.Time
-
-	// Shared results must be newer than since.
-	since flight.Stamp
-
-	info LoadInfo
+	since flight.Stamp // Shared results must be newer than this.
+	info  LoadInfo
 }
 
 type miss struct {
-	ok bool
-
-	// since was taken before the lookup.
-	since flight.Stamp
-
+	ok    bool
+	since flight.Stamp // Taken before the lookup.
 	fence backend.Fence
 }
 
@@ -243,13 +237,12 @@ func (l *loadCall[V]) report(ctx context.Context, err error) {
 }
 
 type fillResult[V any] struct {
-	value V
-
-	// Stamp before the read, load, or fence check. Zero forces a retry.
+	// current is taken before the read, load or fence check that value relies
+	// on. Zero forces a retry.
+	value   V
 	current flight.Stamp
 
 	ranLoader bool
-
 	missed    bool
 	lookupErr error
 	fill      SetResult

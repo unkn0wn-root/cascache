@@ -94,12 +94,15 @@ type call[V any] struct {
 	ctx    context.Context
 	done   chan struct{}
 	cancel context.CancelFunc
+
 	// Guarded by shard.mu. The call is canceled when waiters reaches zero.
 	waiters int
+
 	// The first caller to collect the result accounts for the call.
 	accounted atomic.Bool
-	val       V
-	err       error
+
+	val V
+	err error
 }
 
 // Do runs fn once per key and shares the value fn stores through its pointer,
