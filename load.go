@@ -74,6 +74,8 @@ type LoadInfo struct {
 
 	// Canceled reports that this caller's context ended the call.
 	Canceled bool
+
+	// Duration is how long Load took.
 	Duration time.Duration
 }
 
@@ -121,19 +123,13 @@ type loadCall[V any] struct {
 	load  Loader[V]
 
 	start time.Time
-
-	// Shared results must be newer than since.
-	since flight.Stamp
-
-	info LoadInfo
+	since flight.Stamp // Shared results must be newer than this.
+	info  LoadInfo
 }
 
 type miss struct {
-	ok bool
-
-	// since was taken before the lookup.
-	since flight.Stamp
-
+	ok    bool
+	since flight.Stamp // Taken before the lookup.
 	fence backend.Fence
 }
 
@@ -175,22 +171,22 @@ func (l *loadCall[V]) run(ctx context.Context) (V, error) {
 func (l *loadCall[V]) attempt(ctx context.Context, seen miss) (fillResult[V], error) {
 	res, role, err := l.cache.fills.Do(ctx, l.key, l.cache.fill(l.key, l.bkey, l.load, seen))
 
-	l.info.Outcome = LoadOutcomeUnknown
-
+	outcome := LoadOutcomeUnknown
 	switch role {
 	case flight.Abandoned:
 	case flight.Shared:
-		l.info.Outcome = LoadOutcomeShared
+		outcome = LoadOutcomeShared
 	case flight.Owned:
 		l.adopt(ctx, res)
 		switch {
 		case res.ranLoader:
-			l.info.Outcome = LoadOutcomeLoaded
+			outcome = LoadOutcomeLoaded
 			l.info.Runs++
 		case err == nil:
-			l.info.Outcome = LoadOutcomeHit
+			outcome = LoadOutcomeHit
 		}
 	}
+	l.info.Outcome = outcome
 
 	if err != nil {
 		return res, l.cache.loaderError(err)
@@ -243,13 +239,12 @@ func (l *loadCall[V]) report(ctx context.Context, err error) {
 }
 
 type fillResult[V any] struct {
-	value V
-
-	// Stamp before the read, load, or fence check. Zero forces a retry.
+	// current is taken before the read, load or fence check that value relies
+	// on. Zero forces a retry.
+	value   V
 	current flight.Stamp
 
 	ranLoader bool
-
 	missed    bool
 	lookupErr error
 	fill      SetResult
@@ -307,7 +302,7 @@ func (c *Cache[V]) fill(
 		res.value = v
 
 		// Skip late fills and report cancellation through LoadInfo.
-		if err := ctx.Err(); err != nil {
+		if err = ctx.Err(); err != nil {
 			res.fillErr = &OpError{Op: OpSet, Key: key, Err: err}
 			return nil //nolint:nilerr // the loader succeeded; only the fill did not
 		}

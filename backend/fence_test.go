@@ -180,7 +180,7 @@ func TestFenceMarshalRoundTrip(t *testing.T) {
 		t.Fatalf("Marshal: %v", err)
 	}
 	var got envelope
-	if err := json.Unmarshal(raw, &got); err != nil {
+	if err = json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("Unmarshal(%s): %v", raw, err)
 	}
 	if !got.Fence.Equal(want.Fence) {

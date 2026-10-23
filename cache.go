@@ -169,7 +169,7 @@ func (c *Cache[V]) set(
 
 	// The codec and cost function run before the backend call. Once
 	// CompareAndStore starts, the backend does not promise a rollback.
-	if err := ctx.Err(); err != nil {
+	if err = ctx.Err(); err != nil {
 		return SetResult{}, c.opErr(OpSet, key, err)
 	}
 

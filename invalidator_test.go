@@ -58,7 +58,7 @@ func TestStandaloneInvalidatorRetiresACacheEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cache.Set(ctx, "42", ada, fence); err != nil {
+	if _, err = cache.Set(ctx, "42", ada, fence); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, _ := cache.Get(ctx, "42"); !ok {
@@ -101,7 +101,7 @@ func TestInvalidatorNamespaceMustMatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cache.Set(ctx, "42", ada, fence); err != nil {
+	if _, err = cache.Set(ctx, "42", ada, fence); err != nil {
 		t.Fatal(err)
 	}
 
