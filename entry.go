@@ -31,6 +31,7 @@ func (c *Cache[V]) resolveTTL(ttl time.Duration) (time.Duration, error) {
 
 func (c *Cache[V]) prepareWrite(
 	key string,
+	bkey backend.Key,
 	val V,
 	snapshot Snapshot,
 	ttl time.Duration,
@@ -58,7 +59,7 @@ func (c *Cache[V]) prepareWrite(
 	}
 
 	return backend.StoreRequest{
-		Key:      c.inv.space.Key(key),
+		Key:      bkey,
 		Expected: snapshot.fence,
 		Value:    raw,
 		Cost:     cost,
