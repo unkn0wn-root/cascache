@@ -1,16 +1,71 @@
 # cascache
 
-cascache is a Go cache for values you load from a database or another slow
-source. When you invalidate a key, cascache stops serving the old value from the
-cache, and a load that was already running cannot put it back. This works
-inside one process and across several processes that share their invalidation
-state through Redis.
+cascache is a read-through cache for Go. It caches values loaded from a
+database or another slow source. Once you invalidate a key, a load that was
+already running cannot put the old value back. It works in one process, or
+across processes that share invalidations through Redis.
 
-A plain cache can put old data back. Request A reads user 42 from the database.
-Request B updates user 42 and deletes the cached copy. Request A then writes the
-user it read, which is now out of date, into the cache. That copy is served
-until it expires. cascache turns down request A's write, because the key was
-invalidated while A was reading.
+## Why
+
+With a plain cache, a read that misses loads the value from the database and
+writes it to the cache. An update writes the database and deletes the cached
+key. If a slow read loads the old value before an update and writes it after
+the delete, the cache serves that stale value until its TTL ends.
+
+cascache gives each key a token called a fence. `Load` reads the fence before
+it calls your loader and stores the result only if the fence is unchanged.
+`Invalidate` replaces the fence. Values stored under the old fence are no longer
+served, and loads that started earlier cannot store their results.
+
+With a plain cache:
+
+```mermaid
+sequenceDiagram
+    participant A as Request A
+    participant B as Request B
+    participant C as Cache
+    participant D as Database
+    A->>C: get user 42
+    C-->>A: miss
+    A->>D: read user 42
+    D-->>A: Ada
+    B->>D: rename user 42 to Grace
+    B->>C: delete user 42
+    A->>C: set user 42 to Ada
+    Note over A,D: Readers get Ada until the TTL ends
+```
+
+With cascache:
+
+```mermaid
+sequenceDiagram
+    participant A as Request A
+    participant B as Request B
+    participant C as Cache
+    participant D as Database
+    A->>C: Load user 42
+    C-->>A: miss, fence is f1
+    A->>D: read user 42
+    D-->>A: Ada
+    B->>D: rename user 42 to Grace
+    B->>C: Invalidate user 42
+    Note over C: fence is now f2
+    A->>C: set user 42 to Ada if fence is f1
+    C-->>A: refused, fence is f2
+    Note over A,D: The next Load misses and reads Grace
+```
+
+## Features
+
+- Concurrent `Load` calls for the same key in one process share a single loader
+  run.
+- `Load` returns the loaded value even when a cache read or write fails.
+- Backends for one process, for Redis, and for values kept in each process with
+  invalidations shared through Redis.
+- Value stores for Ristretto, BigCache and Redis.
+- Codecs for JSON, CBOR, msgpack and protobuf.
+- Typed keys, randomized TTLs and metrics callbacks in the `typed` package.
+- Load timeouts, loader panic recovery and an `Observer` for cache events.
 
 ## Install
 
@@ -92,15 +147,15 @@ func run() error {
 }
 ```
 
-`Load` returns the cached value or, on a miss, calls your loader and caches the
-result. Concurrent calls for the same missing key share one loader run. If the
-cache read or write fails, you still get the loaded value, and the error goes to
-`Options.OnLoad` and `Options.Observer`.
+On a hit, `Load` returns the cached value. On a miss, it calls your loader and
+caches the result. If the cache read or write fails, you still get the loaded
+value, and the error goes to `Options.OnLoad` and `Options.Observer`.
 
 ## Updating data
 
-Change the source first, then call `Invalidate`. In the other order, a load
-that starts in between can read the old data and cache it again.
+Write the change to the source first, then call `Invalidate`. In the other
+order, a load that starts between the two calls can read the old data and cache
+it again.
 
 ```go
 if err := db.UpdateUser(ctx, user); err != nil {
@@ -112,17 +167,20 @@ if err := cache.Invalidate(ctx, user.ID); err != nil {
 ```
 
 If `Invalidate` returns an error, the old value may still be served, so retry
-it. A service that changes the data but never reads the cache can use
-`cascache.NewInvalidator` with the same namespace and a Redis backend on the
-same server. It needs no value type or codec.
+it. A service that writes the data but never reads the cache can use
+`cascache.NewInvalidator` with the same namespace and a `redisbackend.New`
+backend on the same Redis. It needs no value type or codec.
 
 ## Sharing a cache across processes
 
-`backend/redis` has two backends. `New` keeps values and invalidation state in
-Redis, so a value one process loads is served to all of them. `NewShared` keeps
-values in each process's own store and only the invalidation state in Redis, so
-each process loads and holds its own copy. `backend/redis` and go-redis are both
-named `redis`, so rename them on import:
+`backend/redis` has two backends:
+
+- `New` keeps values and invalidations in Redis. A value one process loads is
+  served to all of them.
+- `NewShared` keeps values in each process's own store and only invalidations
+  in Redis. Each process loads and holds its own copy.
+
+go-redis and `backend/redis` are both named `redis`, so rename them on import:
 
 ```go
 import (
@@ -143,10 +201,11 @@ The Redis backends have no `Close` method, so drop `defer b.Close()` from the
 quick start.
 
 Point the client at the Redis primary. A replica that lags behind may not have
-an invalidation yet, and cascache would then serve the old value as current.
-`New` and `NewShared` return `ErrReplicaReads` for a Cluster client with
-`ReadOnly` set, but they do not detect a Sentinel client with `ReplicaOnly` set.
-The [package docs](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/backend/redis)
+an invalidation yet, and cascache would serve the old value as current. `New`
+and `NewShared` return `ErrReplicaReads` for a Cluster client with `ReadOnly`
+set. They do not detect a Sentinel client with `ReplicaOnly` set, or other
+clients that read from replicas. The
+[package docs](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/backend/redis)
 list the go-redis settings to leave off.
 
 Redis copies writes to replicas in the background, and cascache does not wait
@@ -155,9 +214,9 @@ not have it, and the old value can be served again until it expires.
 
 ## Typed keys
 
-The `typed` package lets you use keys of any comparable type, such as an `int64`
-ID. It can also pick a random TTL in a range for each cached value, so entries
-written together do not all expire at once:
+The `typed` package takes keys of any comparable type, such as an `int64` ID.
+It can also give each value a random TTL within a range, so entries written
+together do not all expire at once:
 
 ```go
 users, err := typed.New(typed.Options[int64, User]{
