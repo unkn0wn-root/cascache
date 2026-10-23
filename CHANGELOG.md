@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [4.3.0](https://github.com/unkn0wn-root/cascache/compare/v4.2.0...v4.3.0) (2026-10-23)
+
+
+### Features
+
+* **load:** count loader runs in LoadInfo ([cc1107f](https://github.com/unkn0wn-root/cascache/commit/cc1107f39504a8d360923eca33c56fa603d7d200))
+
+
+### Bug Fixes
+
+* **load:** count a run only when the loader started ([#34](https://github.com/unkn0wn-root/cascache/issues/34)) ([cc9a557](https://github.com/unkn0wn-root/cascache/commit/cc9a557172dcab71f572afb79ba56ec81767d12d))
+
+
+### Performance Improvements
+
+* **flight:** shard the call lock ([e77a44f](https://github.com/unkn0wn-root/cascache/commit/e77a44fc9fce37670a676a53935c48fcc226417e))
+* **load:** build the backend key once per call ([bd1ce92](https://github.com/unkn0wn-root/cascache/commit/bd1ce92edc54faf703aade8b89b3c8d9a06dbcea))
+
 ## [4.2.0](https://github.com/unkn0wn-root/cascache/compare/v4.1.0...v4.2.0) (2026-10-15)
 
 
