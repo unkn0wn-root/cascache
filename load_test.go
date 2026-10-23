@@ -398,6 +398,81 @@ func TestLoadCountsTheLoaderRun(t *testing.T) {
 	}
 }
 
+// exiting calls exit in the backend call for op.
+type exiting struct {
+	backend.Backend
+	op    cascache.Op
+	exit  func()
+	reads atomic.Int64
+}
+
+func (b *exiting) Read(ctx context.Context, key backend.Key) (backend.ReadResult, error) {
+	if b.op == cascache.OpGet {
+		// A failed lookup makes the run read again.
+		if b.reads.Add(1) == 1 {
+			return backend.ReadResult{}, errors.New("cache is down")
+		}
+		b.exit()
+	}
+	return b.Backend.Read(ctx, key)
+}
+
+func (b *exiting) Ensure(ctx context.Context, key backend.Key, candidate backend.Fence) (backend.Fence, error) {
+	if b.op == cascache.OpSnapshot {
+		b.exit()
+	}
+	return b.Backend.Ensure(ctx, key, candidate)
+}
+
+func (b *exiting) CompareAndStore(ctx context.Context, req backend.StoreRequest) (backend.StoreResult, error) {
+	if b.op == cascache.OpSet {
+		b.exit()
+	}
+	return b.Backend.CompareAndStore(ctx, req)
+}
+
+func TestLoadCountsABackendExitOnlyAfterTheLoaderRan(t *testing.T) {
+	exits := []struct {
+		name string
+		exit func()
+		err  error
+	}{
+		{name: "panic", exit: func() { panic("backend") }, err: cascache.ErrLoaderPanic},
+		{name: "goexit", exit: runtime.Goexit, err: cascache.ErrLoaderGoexit},
+	}
+	tests := []struct {
+		name  string
+		op    cascache.Op
+		calls int64
+		want  account
+	}{
+		{name: "read", op: cascache.OpGet, want: account{cascache.LoadOutcomeUnknown, 0}},
+		{name: "snapshot", op: cascache.OpSnapshot, want: account{cascache.LoadOutcomeUnknown, 0}},
+		{name: "store", op: cascache.OpSet, calls: 1, want: account{cascache.LoadOutcomeLoaded, 1}},
+	}
+	for _, e := range exits {
+		for _, tt := range tests {
+			t.Run(e.name+"/"+tt.name, func(t *testing.T) {
+				lh := newLoadHarness(t, func(o *cascache.Options[user]) {
+					o.Backend = &exiting{Backend: o.Backend, op: tt.op, exit: e.exit}
+				})
+
+				var calls atomic.Int64
+				_, err := lh.cache.Load(context.Background(), "42", loaderFor(ada, &calls))
+				if !errors.Is(err, e.err) {
+					t.Fatalf("Load error = %v, want %v", err, e.err)
+				}
+				if n := calls.Load(); n != tt.calls {
+					t.Fatalf("the loader ran %d times, want %d", n, tt.calls)
+				}
+				if got := lh.accounts(); len(got) != 1 || got[0] != tt.want {
+					t.Fatalf("reports = %+v, want [%+v]", got, tt.want)
+				}
+			})
+		}
+	}
+}
+
 func TestLoadCountsASharedRunOnce(t *testing.T) {
 	tests := []struct {
 		name    string

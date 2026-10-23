@@ -184,8 +184,7 @@ func (l *loadCall[V]) attempt(ctx context.Context, seen miss) (fillResult[V], er
 	case flight.Owned:
 		l.adopt(ctx, res)
 		switch {
-		// A panic or Goexit counts as a loader run.
-		case res.ranLoader, errors.Is(err, flight.ErrPanic), errors.Is(err, flight.ErrGoexit):
+		case res.ranLoader:
 			l.info.Outcome = LoadOutcomeLoaded
 			l.info.Runs++
 		case err == nil:
@@ -258,17 +257,16 @@ type fillResult[V any] struct {
 }
 
 // fill must not capture a loadCall: another caller may report this shared run,
-// causing concurrent writes to LoadInfo. Return a fillResult for adopt to copy.
+// causing concurrent writes to LoadInfo. Write a fillResult for adopt to copy.
 func (c *Cache[V]) fill(
 	key string,
 	bkey backend.Key,
 	load Loader[V],
 	seen miss,
-) func(context.Context) (fillResult[V], error) {
-	return func(ctx context.Context) (fillResult[V], error) {
-		var res fillResult[V]
+) func(context.Context, *fillResult[V]) error {
+	return func(ctx context.Context, res *fillResult[V]) error {
 		if err := ctx.Err(); err != nil {
-			return res, err
+			return err
 		}
 
 		fence := seen.fence
@@ -278,7 +276,7 @@ func (c *Cache[V]) fill(
 			e, f, err := c.get(ctx, key, bkey)
 			if e.ok {
 				res.value = e.val
-				return res, nil
+				return nil
 			}
 			fence, res.lookupErr = f, err
 		}
@@ -292,32 +290,33 @@ func (c *Cache[V]) fill(
 			snapshot, snapshotErr = c.snapshot(ctx, key, bkey)
 		}
 		if err := ctx.Err(); err != nil {
-			return res, err
+			return err
 		}
 
+		// Set before load so a loader panic or Goexit still counts as a run.
 		res.ranLoader = true
 		res.current = c.fills.Tick(key)
 		v, err := load(ctx)
 		if err != nil {
-			return res, err
+			return err
 		}
 		res.value = v
 
 		// Skip late fills and report cancellation through LoadInfo.
 		if err := ctx.Err(); err != nil {
 			res.fillErr = &OpError{Op: OpSet, Key: key, Err: err}
-			return res, nil //nolint:nilerr // the loader succeeded; only the fill did not
+			return nil //nolint:nilerr // the loader succeeded; only the fill did not
 		}
 
 		if snapshotErr != nil {
 			res.fillErr = snapshotErr
-			return res, nil //nolint:nilerr // the loader succeeded; only the fill did not
+			return nil //nolint:nilerr // the loader succeeded; only the fill did not
 		}
 
 		ttl, err := c.computeTTL()
 		if err != nil {
 			res.fillErr = c.opErr(OpComputeTTL, key, wrapComputeTTL(err))
-			return res, nil
+			return nil
 		}
 
 		attempted := c.fills.Tick(key)
@@ -325,7 +324,7 @@ func (c *Cache[V]) fill(
 		if provenCurrent(res.fill.Outcome) {
 			res.current = attempted
 		}
-		return res, nil
+		return nil
 	}
 }
 

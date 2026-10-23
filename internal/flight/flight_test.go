@@ -18,8 +18,9 @@ func joinRecorder[V any](buf int) (*Group[V], <-chan string) {
 
 func TestZeroGroupIsUsable(t *testing.T) {
 	var g Group[int]
-	v, role, err := g.Do(context.Background(), "k", func(context.Context) (int, error) {
-		return 7, nil
+	v, role, err := g.Do(context.Background(), "k", func(_ context.Context, v *int) error {
+		*v = 7
+		return nil
 	})
 	if err != nil || role != Owned || v != 7 {
 		t.Fatalf("Do = (%d, %v, %v), want (7, Owned, nil)", v, role, err)
@@ -42,12 +43,13 @@ func TestDoCoalescesConcurrentCalls(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			v, role, err := g.Do(context.Background(), "k", func(context.Context) (int, error) {
+			v, role, err := g.Do(context.Background(), "k", func(_ context.Context, v *int) error {
 				if calls.Add(1) == 1 {
 					close(started)
 				}
 				<-release
-				return 42, nil
+				*v = 42
+				return nil
 			})
 			switch {
 			case err != nil:
@@ -82,9 +84,10 @@ func TestDoAfterCompletionRunsAgain(t *testing.T) {
 	var g Group[int]
 	var calls int
 	for i := range 3 {
-		v, role, err := g.Do(context.Background(), "k", func(context.Context) (int, error) {
+		v, role, err := g.Do(context.Background(), "k", func(_ context.Context, v *int) error {
 			calls++
-			return calls, nil
+			*v = calls
+			return nil
 		})
 		if err != nil || role != Owned || v != i+1 {
 			t.Fatalf("call %d = (%d, %v, %v)", i, v, role, err)
@@ -98,8 +101,8 @@ func TestDoAfterCompletionRunsAgain(t *testing.T) {
 func TestDoPropagatesError(t *testing.T) {
 	var g Group[int]
 	sentinel := errors.New("boom")
-	_, _, err := g.Do(context.Background(), "k", func(context.Context) (int, error) {
-		return 0, sentinel
+	_, _, err := g.Do(context.Background(), "k", func(context.Context, *int) error {
+		return sentinel
 	})
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("err = %v, want %v", err, sentinel)
@@ -113,10 +116,10 @@ func TestWaiterHonorsItsOwnContext(t *testing.T) {
 	defer close(release)
 
 	go func() {
-		_, _, _ = g.Do(context.Background(), "k", func(context.Context) (int, error) {
+		_, _, _ = g.Do(context.Background(), "k", func(context.Context, *int) error {
 			close(started)
 			<-release
-			return 1, nil
+			return nil
 		})
 	}()
 	<-started
@@ -124,9 +127,9 @@ func TestWaiterHonorsItsOwnContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, role, err := g.Do(ctx, "k", func(context.Context) (int, error) {
+	_, role, err := g.Do(ctx, "k", func(context.Context, *int) error {
 		t.Error("waiter ran its own execution")
-		return 0, nil
+		return nil
 	})
 	if role != Abandoned {
 		t.Fatalf("role = %v, want Abandoned", role)
@@ -143,9 +146,9 @@ func TestCanceledContextDoesNotStartACall(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, role, err := g.Do(ctx, "k", func(context.Context) (int, error) {
+	_, role, err := g.Do(ctx, "k", func(context.Context, *int) error {
 		called.Store(true)
-		return 1, nil
+		return nil
 	})
 	if role != Abandoned {
 		t.Fatalf("role = %v, want Abandoned", role)
@@ -178,11 +181,11 @@ func TestCallThatOutlivesItsTimeoutDoesNotHoldTheKey(t *testing.T) {
 
 	go func() {
 		defer close(stuck)
-		_, _, _ = g.Do(context.Background(), "k", func(ctx context.Context) (int, error) {
+		_, _, _ = g.Do(context.Background(), "k", func(ctx context.Context, _ *int) error {
 			<-ctx.Done()
 			close(expired)
 			<-release
-			return 1, nil
+			return nil
 		})
 	}()
 	<-expired
@@ -191,9 +194,10 @@ func TestCallThatOutlivesItsTimeoutDoesNotHoldTheKey(t *testing.T) {
 	defer cancel()
 
 	var ran atomic.Bool
-	v, role, err := g.Do(ctx, "k", func(context.Context) (int, error) {
+	v, role, err := g.Do(ctx, "k", func(_ context.Context, v *int) error {
 		ran.Store(true)
-		return 2, nil
+		*v = 2
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("Do = %v, %v, %v; want a fresh call", v, role, err)
@@ -219,10 +223,11 @@ func TestAbandonedCallDoesNotEndItForRemainingCallers(t *testing.T) {
 	initiatorCtx, cancelInitiator := context.WithCancel(context.Background())
 	initiatorDone := make(chan error, 1)
 	go func() {
-		_, _, err := g.Do(initiatorCtx, "k", func(context.Context) (int, error) {
+		_, _, err := g.Do(initiatorCtx, "k", func(_ context.Context, v *int) error {
 			close(started)
 			<-release
-			return 42, nil
+			*v = 42
+			return nil
 		})
 		initiatorDone <- err
 	}()
@@ -230,9 +235,9 @@ func TestAbandonedCallDoesNotEndItForRemainingCallers(t *testing.T) {
 
 	waiterDone := make(chan int, 1)
 	go func() {
-		v, role, err := g.Do(context.Background(), "k", func(context.Context) (int, error) {
+		v, role, err := g.Do(context.Background(), "k", func(context.Context, *int) error {
 			t.Error("waiter ran its own execution")
-			return 0, nil
+			return nil
 		})
 		if err != nil || role != Owned {
 			t.Errorf("waiter = (%d, %v, %v), want (42, Owned, nil)", v, role, err)
@@ -261,11 +266,11 @@ func TestCallIsCanceledWhenEveryCallerLeaves(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _, _ = g.Do(ctx, "k", func(callCtx context.Context) (int, error) {
+		_, _, _ = g.Do(ctx, "k", func(callCtx context.Context, _ *int) error {
 			close(started)
 			<-callCtx.Done()
 			close(callCanceled)
-			return 0, callCtx.Err()
+			return callCtx.Err()
 		})
 	}()
 	<-started
@@ -287,7 +292,7 @@ func TestPanicReachesEveryCallerWithoutStranding(t *testing.T) {
 
 	initiatorErr := make(chan error, 1)
 	go func() {
-		_, _, err := g.Do(context.Background(), "k", func(context.Context) (int, error) {
+		_, _, err := g.Do(context.Background(), "k", func(context.Context, *int) error {
 			close(started)
 			<-release
 			panic("boom")
@@ -298,8 +303,8 @@ func TestPanicReachesEveryCallerWithoutStranding(t *testing.T) {
 
 	waiterErr := make(chan error, 1)
 	go func() {
-		_, _, err := g.Do(context.Background(), "k", func(context.Context) (int, error) {
-			return 0, errors.New("waiter must not execute")
+		_, _, err := g.Do(context.Background(), "k", func(context.Context, *int) error {
+			return errors.New("waiter must not execute")
 		})
 		waiterErr <- err
 	}()
@@ -317,8 +322,8 @@ func TestPanicReachesEveryCallerWithoutStranding(t *testing.T) {
 		}
 	}
 
-	if _, _, err := g.Do(context.Background(), "k", func(context.Context) (int, error) {
-		return 7, nil
+	if _, _, err := g.Do(context.Background(), "k", func(context.Context, *int) error {
+		return nil
 	}); err != nil {
 		t.Fatalf("Do after panic: %v", err)
 	}
@@ -335,10 +340,10 @@ func TestGoexitDoesNotStrandCallers(t *testing.T) {
 	go func() {
 		var err error
 		defer func() { initiatorErr <- err }()
-		_, _, err = g.Do(context.Background(), "k", func(context.Context) (int, error) {
+		_, _, err = g.Do(context.Background(), "k", func(context.Context, *int) error {
 			close(entered)
 			runtime.Goexit()
-			return 0, nil
+			return nil
 		})
 	}()
 	<-entered
@@ -354,8 +359,8 @@ func TestGoexitDoesNotStrandCallers(t *testing.T) {
 
 	next := make(chan error, 1)
 	go func() {
-		_, _, err := g.Do(context.Background(), "k", func(context.Context) (int, error) {
-			return 7, nil
+		_, _, err := g.Do(context.Background(), "k", func(context.Context, *int) error {
+			return nil
 		})
 		next <- err
 	}()
@@ -366,6 +371,30 @@ func TestGoexitDoesNotStrandCallers(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("the key stayed poisoned; Len = %d", g.Len())
+	}
+}
+
+func TestDoReturnsWhatTheCallStoredBeforeItFailed(t *testing.T) {
+	tests := []struct {
+		name string
+		exit func()
+		want error
+	}{
+		{name: "panic", exit: func() { panic("boom") }, want: ErrPanic},
+		{name: "goexit", exit: runtime.Goexit, want: ErrGoexit},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var g Group[int]
+			v, _, err := g.Do(context.Background(), "k", func(_ context.Context, v *int) error {
+				*v = 7
+				tt.exit()
+				return nil
+			})
+			if v != 7 || !errors.Is(err, tt.want) {
+				t.Fatalf("Do = (%d, %v), want (7, %v)", v, err, tt.want)
+			}
+		})
 	}
 }
 
@@ -383,10 +412,10 @@ func TestExactlyOneCallerIsAccountable(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, role, _ := g.Do(context.Background(), "k", func(context.Context) (int, error) {
+			_, role, _ := g.Do(context.Background(), "k", func(context.Context, *int) error {
 				once.Do(func() { close(started) })
 				<-release
-				return 1, nil
+				return nil
 			})
 			if role == Owned {
 				owned.Add(1)
@@ -412,10 +441,10 @@ func TestNobodyIsAccountableWhenEveryCallerLeaves(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan Role, 1)
 	go func() {
-		_, role, _ := g.Do(ctx, "k", func(callCtx context.Context) (int, error) {
+		_, role, _ := g.Do(ctx, "k", func(callCtx context.Context, _ *int) error {
 			close(started)
 			<-callCtx.Done()
-			return 0, callCtx.Err()
+			return callCtx.Err()
 		})
 		done <- role
 	}()
@@ -430,9 +459,9 @@ func TestNobodyIsAccountableWhenEveryCallerLeaves(t *testing.T) {
 func TestTimeoutBoundsTheCall(t *testing.T) {
 	g := &Group[int]{Timeout: 20 * time.Millisecond}
 
-	_, _, err := g.Do(context.Background(), "k", func(callCtx context.Context) (int, error) {
+	_, _, err := g.Do(context.Background(), "k", func(callCtx context.Context, _ *int) error {
 		<-callCtx.Done()
-		return 0, callCtx.Err()
+		return callCtx.Err()
 	})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
@@ -449,10 +478,10 @@ func TestDifferentKeysRunConcurrently(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _, _ = g.Do(context.Background(), k, func(context.Context) (int, error) {
+			_, _, _ = g.Do(context.Background(), k, func(context.Context, *int) error {
 				both <- struct{}{}
 				<-release
-				return 0, nil
+				return nil
 			})
 		}()
 	}
@@ -504,8 +533,8 @@ func TestEndedSinceReportsAReturnedCall(t *testing.T) {
 	var g Group[int]
 	before := g.Now("k")
 
-	if _, _, err := g.Do(context.Background(), "k", func(context.Context) (int, error) {
-		return 1, nil
+	if _, _, err := g.Do(context.Background(), "k", func(context.Context, *int) error {
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -530,11 +559,11 @@ func TestEndedSinceReportsAnAbandonedCallUntilItReturns(t *testing.T) {
 		<-started
 		cancel()
 	}()
-	_, role, err := g.Do(ctx, "k", func(context.Context) (int, error) {
+	_, role, err := g.Do(ctx, "k", func(context.Context, *int) error {
 		defer close(returned)
 		close(started)
 		<-release
-		return 1, nil
+		return nil
 	})
 	if role != Abandoned || !errors.Is(err, context.Canceled) {
 		t.Fatalf("Do = %v, %v; want Abandoned, context.Canceled", role, err)
@@ -557,11 +586,11 @@ func TestEndedSinceReportsAReplacedCallUntilItReturns(t *testing.T) {
 	stuck := make(chan struct{})
 	go func() {
 		defer close(stuck)
-		_, _, _ = g.Do(context.Background(), "k", func(ctx context.Context) (int, error) {
+		_, _, _ = g.Do(context.Background(), "k", func(ctx context.Context, _ *int) error {
 			<-ctx.Done()
 			close(expired)
 			<-release
-			return 0, ctx.Err()
+			return ctx.Err()
 		})
 	}()
 	<-expired
@@ -570,11 +599,11 @@ func TestEndedSinceReportsAReplacedCallUntilItReturns(t *testing.T) {
 		t.Fatal("reported a call that is still in the group")
 	}
 
-	if _, _, err := g.Do(context.Background(), "k", func(context.Context) (int, error) {
+	if _, _, err := g.Do(context.Background(), "k", func(context.Context, *int) error {
 		if !g.EndedSince("k", g.Now("k")) {
 			t.Error("the replaced call was not reported while it still runs")
 		}
-		return 1, nil
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
