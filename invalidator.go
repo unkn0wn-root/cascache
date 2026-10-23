@@ -15,6 +15,9 @@ type InvalidatorOptions struct {
 
 	// Disabled makes every call a no-op.
 	Disabled bool
+
+	// Observer receives [EventOperationFailed] when Invalidate fails and
+	// [EventCleanupFailed] when it cannot delete the old value.
 	Observer Observer
 }
 

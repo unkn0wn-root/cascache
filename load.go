@@ -74,6 +74,8 @@ type LoadInfo struct {
 
 	// Canceled reports that this caller's context ended the call.
 	Canceled bool
+
+	// Duration is how long Load took.
 	Duration time.Duration
 }
 
