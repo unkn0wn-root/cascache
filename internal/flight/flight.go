@@ -102,16 +102,18 @@ type call[V any] struct {
 	err       error
 }
 
-// Do shares fn's result among concurrent calls for the same key. Canceling one
-// caller leaves fn running for others. Panics and Goexit become errors; exactly
-// one caller receives [Owned] to report a completed call.
+// Do runs fn once per key and shares the value fn stores through its pointer,
+// and the error it returns, among concurrent callers. Canceling one caller
+// leaves fn running for others. Panics and Goexit become errors, and a value
+// stored before them is still returned. Exactly one caller receives [Owned] to
+// report a completed call.
 //
 // Finished calls leave the group before waiters wake, so retries join newer calls.
 // New callers never join a call whose context has ended, including on timeout.
 func (g *Group[V]) Do(
 	ctx context.Context,
 	key string,
-	fn func(context.Context) (V, error),
+	fn func(context.Context, *V) error,
 ) (v V, role Role, err error) {
 	if err := ctx.Err(); err != nil {
 		return v, Abandoned, err
@@ -236,7 +238,7 @@ func (g *Group[V]) abandon(key string, c *call[V]) {
 	}
 }
 
-func (g *Group[V]) run(key string, c *call[V], fn func(context.Context) (V, error)) {
+func (g *Group[V]) run(key string, c *call[V], fn func(context.Context, *V) error) {
 	returned := false
 	defer func() {
 		switch r := recover(); {
@@ -270,6 +272,6 @@ func (g *Group[V]) run(key string, c *call[V], fn func(context.Context) (V, erro
 		c.cancel()
 	}()
 
-	c.val, c.err = fn(c.ctx)
+	c.err = fn(c.ctx, &c.val)
 	returned = true
 }

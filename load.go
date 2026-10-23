@@ -162,8 +162,8 @@ func (l *loadCall[V]) run(ctx context.Context) (V, error) {
 		return res.value, nil
 	}
 
-	// This result may predate an invalidation. Retry without reusing the miss;
-	// the old run has already left the group.
+	// This result may predate an invalidation.
+	// Retry without reusing the miss; the old run has already left the group.
 	l.info.Reloaded = true
 	res, err = l.attempt(ctx, miss{})
 	if err != nil {
@@ -175,8 +175,8 @@ func (l *loadCall[V]) run(ctx context.Context) (V, error) {
 func (l *loadCall[V]) attempt(ctx context.Context, seen miss) (fillResult[V], error) {
 	res, role, err := l.cache.fills.Do(ctx, l.key, l.cache.fill(l.key, l.bkey, l.load, seen))
 
-	// Classify errors too, so only one caller accounts for a failed run.
 	l.info.Outcome = LoadOutcomeUnknown
+
 	switch role {
 	case flight.Abandoned:
 	case flight.Shared:
@@ -184,8 +184,7 @@ func (l *loadCall[V]) attempt(ctx context.Context, seen miss) (fillResult[V], er
 	case flight.Owned:
 		l.adopt(ctx, res)
 		switch {
-		// A panic or Goexit counts as a loader run.
-		case res.ranLoader, errors.Is(err, flight.ErrPanic), errors.Is(err, flight.ErrGoexit):
+		case res.ranLoader:
 			l.info.Outcome = LoadOutcomeLoaded
 			l.info.Runs++
 		case err == nil:
@@ -258,17 +257,20 @@ type fillResult[V any] struct {
 }
 
 // fill must not capture a loadCall: another caller may report this shared run,
-// causing concurrent writes to LoadInfo. Return a fillResult for adopt to copy.
+// causing concurrent writes to LoadInfo. Write a fillResult for adopt to copy.
 func (c *Cache[V]) fill(
 	key string,
 	bkey backend.Key,
 	load Loader[V],
 	seen miss,
-) func(context.Context) (fillResult[V], error) {
-	return func(ctx context.Context) (fillResult[V], error) {
+) func(context.Context, *fillResult[V]) error {
+	return func(ctx context.Context, dst *fillResult[V]) error {
+		// Copy res to dst once, even on panic or Goexit.
+		// Writing each field through dst is slower.
 		var res fillResult[V]
+		defer func() { *dst = res }()
 		if err := ctx.Err(); err != nil {
-			return res, err
+			return err
 		}
 
 		fence := seen.fence
@@ -278,46 +280,47 @@ func (c *Cache[V]) fill(
 			e, f, err := c.get(ctx, key, bkey)
 			if e.ok {
 				res.value = e.val
-				return res, nil
+				return nil
 			}
 			fence, res.lookupErr = f, err
 		}
 		res.missed = res.lookupErr == nil
 
-		// Reusing the read's fence skips the TTL refresh. Expiry during the load
-		// will reject the fill.
+		// Reusing the read's fence skips the TTL refresh.
+		// Expiry during the load will reject the fill.
 		snapshot := Snapshot{fence: fence}
 		var snapshotErr error
 		if !fence.Valid() {
 			snapshot, snapshotErr = c.snapshot(ctx, key, bkey)
 		}
 		if err := ctx.Err(); err != nil {
-			return res, err
+			return err
 		}
 
+		// Set before load so a loader panic or Goexit still counts as a run.
 		res.ranLoader = true
 		res.current = c.fills.Tick(key)
 		v, err := load(ctx)
 		if err != nil {
-			return res, err
+			return err
 		}
 		res.value = v
 
 		// Skip late fills and report cancellation through LoadInfo.
 		if err := ctx.Err(); err != nil {
 			res.fillErr = &OpError{Op: OpSet, Key: key, Err: err}
-			return res, nil //nolint:nilerr // the loader succeeded; only the fill did not
+			return nil //nolint:nilerr // the loader succeeded; only the fill did not
 		}
 
 		if snapshotErr != nil {
 			res.fillErr = snapshotErr
-			return res, nil //nolint:nilerr // the loader succeeded; only the fill did not
+			return nil //nolint:nilerr // the loader succeeded; only the fill did not
 		}
 
 		ttl, err := c.computeTTL()
 		if err != nil {
 			res.fillErr = c.opErr(OpComputeTTL, key, wrapComputeTTL(err))
-			return res, nil
+			return nil
 		}
 
 		attempted := c.fills.Tick(key)
@@ -325,7 +328,7 @@ func (c *Cache[V]) fill(
 		if provenCurrent(res.fill.Outcome) {
 			res.current = attempted
 		}
-		return res, nil
+		return nil
 	}
 }
 

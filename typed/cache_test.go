@@ -452,6 +452,56 @@ func TestLoadRecordsAFailedRunOnce(t *testing.T) {
 	}
 }
 
+// panicking panics in the backend call for op.
+type panicking struct {
+	backend.Backend
+	op cascache.Op
+}
+
+func (b panicking) Ensure(
+	ctx context.Context, key backend.Key, candidate backend.Fence,
+) (backend.Fence, error) {
+	if b.op == cascache.OpSnapshot {
+		panic("ensure")
+	}
+	return b.Backend.Ensure(ctx, key, candidate)
+}
+
+func (b panicking) CompareAndStore(
+	ctx context.Context, req backend.StoreRequest,
+) (backend.StoreResult, error) {
+	if b.op == cascache.OpSet {
+		panic("store")
+	}
+	return b.Backend.CompareAndStore(ctx, req)
+}
+
+func TestLoadRecordsABackendPanicAsAFailedRunOnlyAfterTheLoader(t *testing.T) {
+	tests := []struct {
+		name string
+		op   cascache.Op
+		runs int
+	}{
+		{name: "snapshot", op: cascache.OpSnapshot},
+		{name: "store", op: cascache.OpSet, runs: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache, c, _ := newCache(t, func(o *typed.Options[string, user]) {
+				o.Backend = panicking{Backend: o.Backend, op: tt.op}
+			})
+
+			load := func(context.Context) (user, error) { return ada, nil }
+			if _, err := cache.Load(context.Background(), "42", load); !errors.Is(err, cascache.ErrLoaderPanic) {
+				t.Fatalf("Load = %v, want ErrLoaderPanic", err)
+			}
+			if got := c.snapshot(); got.loads != tt.runs || got.loadFailed != tt.runs {
+				t.Fatalf("loads = %d, loadFailed = %d; want %d and %d", got.loads, got.loadFailed, tt.runs, tt.runs)
+			}
+		})
+	}
+}
+
 func TestMetricsSeeRejectedEntries(t *testing.T) {
 	ctx := context.Background()
 	cache, c, store := newCache(t, nil)
