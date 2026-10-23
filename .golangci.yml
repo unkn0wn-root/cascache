@@ -20,6 +20,9 @@ linters:
     - usestdlibvars
 
   settings:
+    govet:
+      enable:
+        - shadow
     exhaustive:
       default-signifies-exhaustive: true
     errorlint:
