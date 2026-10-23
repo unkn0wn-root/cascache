@@ -169,22 +169,22 @@ func (l *loadCall[V]) run(ctx context.Context) (V, error) {
 func (l *loadCall[V]) attempt(ctx context.Context, seen miss) (fillResult[V], error) {
 	res, role, err := l.cache.fills.Do(ctx, l.key, l.cache.fill(l.key, l.bkey, l.load, seen))
 
-	l.info.Outcome = LoadOutcomeUnknown
-
+	outcome := LoadOutcomeUnknown
 	switch role {
 	case flight.Abandoned:
 	case flight.Shared:
-		l.info.Outcome = LoadOutcomeShared
+		outcome = LoadOutcomeShared
 	case flight.Owned:
 		l.adopt(ctx, res)
 		switch {
 		case res.ranLoader:
-			l.info.Outcome = LoadOutcomeLoaded
+			outcome = LoadOutcomeLoaded
 			l.info.Runs++
 		case err == nil:
-			l.info.Outcome = LoadOutcomeHit
+			outcome = LoadOutcomeHit
 		}
 	}
+	l.info.Outcome = outcome
 
 	if err != nil {
 		return res, l.cache.loaderError(err)
