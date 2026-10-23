@@ -162,8 +162,8 @@ func (l *loadCall[V]) run(ctx context.Context) (V, error) {
 		return res.value, nil
 	}
 
-	// This result may predate an invalidation. Retry without reusing the miss;
-	// the old run has already left the group.
+	// This result may predate an invalidation.
+	// Retry without reusing the miss; the old run has already left the group.
 	l.info.Reloaded = true
 	res, err = l.attempt(ctx, miss{})
 	if err != nil {
@@ -175,8 +175,8 @@ func (l *loadCall[V]) run(ctx context.Context) (V, error) {
 func (l *loadCall[V]) attempt(ctx context.Context, seen miss) (fillResult[V], error) {
 	res, role, err := l.cache.fills.Do(ctx, l.key, l.cache.fill(l.key, l.bkey, l.load, seen))
 
-	// Classify errors too, so only one caller accounts for a failed run.
 	l.info.Outcome = LoadOutcomeUnknown
+
 	switch role {
 	case flight.Abandoned:
 	case flight.Shared:
@@ -264,7 +264,11 @@ func (c *Cache[V]) fill(
 	load Loader[V],
 	seen miss,
 ) func(context.Context, *fillResult[V]) error {
-	return func(ctx context.Context, res *fillResult[V]) error {
+	return func(ctx context.Context, dst *fillResult[V]) error {
+		// Copy res to dst once, even on panic or Goexit.
+		// Writing each field through dst is slower.
+		var res fillResult[V]
+		defer func() { *dst = res }()
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -282,8 +286,8 @@ func (c *Cache[V]) fill(
 		}
 		res.missed = res.lookupErr == nil
 
-		// Reusing the read's fence skips the TTL refresh. Expiry during the load
-		// will reject the fill.
+		// Reusing the read's fence skips the TTL refresh.
+		// Expiry during the load will reject the fill.
 		snapshot := Snapshot{fence: fence}
 		var snapshotErr error
 		if !fence.Valid() {
