@@ -87,7 +87,7 @@ func TestReadReportsTheFenceOnAMiss(t *testing.T) {
 		t.Fatalf("Read = %+v, %v; want a miss that reports %v", read, err, fence)
 	}
 
-	if err := client.Set(ctx, backend.FenceKey(key), "malformed", 0).Err(); err != nil {
+	if err = client.Set(ctx, backend.FenceKey(key), "malformed", 0).Err(); err != nil {
 		t.Fatal(err)
 	}
 	read, err = b.Read(ctx, key)
@@ -110,19 +110,19 @@ func TestExpiredFenceCannotResurrectAValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.CompareAndStore(ctx, backend.StoreRequest{
+	if _, err = b.CompareAndStore(ctx, backend.StoreRequest{
 		Key: key, Expected: first, Value: []byte("retired"), Cost: 1, TTL: time.Hour,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.Invalidate(ctx, key, backend.NewFence()); err != nil {
+	if _, err = b.Invalidate(ctx, key, backend.NewFence()); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := client.Del(ctx, backend.FenceKey(key)).Err(); err != nil {
+	if err = client.Del(ctx, backend.FenceKey(key)).Err(); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.Set(ctx, backend.ValueKey(key), []byte("retired"), time.Hour).Err(); err != nil {
+	if err = client.Set(ctx, backend.ValueKey(key), []byte("retired"), time.Hour).Err(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -157,7 +157,7 @@ func TestInvalidationTTL(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := b.CompareAndStore(ctx, backend.StoreRequest{
+		if _, err = b.CompareAndStore(ctx, backend.StoreRequest{
 			Key: key, Expected: fence, Value: []byte("v"), Cost: 1, TTL: time.Hour,
 		}); err != nil {
 			t.Fatal(err)

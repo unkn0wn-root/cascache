@@ -307,7 +307,7 @@ func (c *Cache[V]) fill(
 		res.value = v
 
 		// Skip late fills and report cancellation through LoadInfo.
-		if err := ctx.Err(); err != nil {
+		if err = ctx.Err(); err != nil {
 			res.fillErr = &OpError{Op: OpSet, Key: key, Err: err}
 			return nil //nolint:nilerr // the loader succeeded; only the fill did not
 		}

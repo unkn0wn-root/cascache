@@ -58,7 +58,7 @@ func ExampleCache_Invalidate() {
 	}
 	fmt.Println(name) // still cached
 
-	if err := cache.Invalidate(ctx, "42"); err != nil {
+	if err = cache.Invalidate(ctx, "42"); err != nil {
 		log.Fatal(err)
 	}
 
@@ -112,7 +112,7 @@ func ExampleCache_Set() {
 	name := "Ada" // read from the source
 
 	// Another request changes the source and invalidates the key.
-	if err := cache.Invalidate(ctx, "42"); err != nil {
+	if err = cache.Invalidate(ctx, "42"); err != nil {
 		log.Fatal(err)
 	}
 

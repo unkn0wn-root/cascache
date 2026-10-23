@@ -115,7 +115,7 @@ func (g *Group[V]) Do(
 	key string,
 	fn func(context.Context, *V) error,
 ) (v V, role Role, err error) {
-	if err := ctx.Err(); err != nil {
+	if err = ctx.Err(); err != nil {
 		return v, Abandoned, err
 	}
 

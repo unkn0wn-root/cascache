@@ -183,7 +183,7 @@ func TestCompositeReportsAMissingFence(t *testing.T) {
 	}
 	key := backendtest.Key(t, "orphan")
 
-	if _, err := store.Set(context.Background(), backend.ValueKey(key), []byte("orphaned"), 1, time.Hour); err != nil {
+	if _, err = store.Set(context.Background(), backend.ValueKey(key), []byte("orphaned"), 1, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 

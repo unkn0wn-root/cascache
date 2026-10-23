@@ -303,14 +303,15 @@ func TestSnapshotRemainsCurrentUntilInvalidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var res cascache.SetResult
 	for _, snapshot := range []cascache.Snapshot{first, second} {
-		res, err := h.cache.Set(ctx, "42", ada, snapshot)
+		res, err = h.cache.Set(ctx, "42", ada, snapshot)
 		if err != nil || res.Outcome != cascache.SetOutcomeStored {
 			t.Fatalf("Set before invalidation = %v, %v; want stored", res.Outcome, err)
 		}
 	}
 
-	if err := h.cache.Invalidate(ctx, "42"); err != nil {
+	if err = h.cache.Invalidate(ctx, "42"); err != nil {
 		t.Fatal(err)
 	}
 	third, err := h.cache.Snapshot(ctx, "42")
@@ -318,12 +319,12 @@ func TestSnapshotRemainsCurrentUntilInvalidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, snapshot := range []cascache.Snapshot{first, second} {
-		res, err := h.cache.Set(ctx, "42", ada, snapshot)
+		res, err = h.cache.Set(ctx, "42", ada, snapshot)
 		if err != nil || res.Outcome != cascache.SetOutcomeConflict {
 			t.Fatalf("Set with old snapshot = %v, %v; want conflict", res.Outcome, err)
 		}
 	}
-	res, err := h.cache.Set(ctx, "42", ada, third)
+	res, err = h.cache.Set(ctx, "42", ada, third)
 	if err != nil || res.Outcome != cascache.SetOutcomeStored {
 		t.Fatalf("Set with new snapshot = %v, %v; want stored", res.Outcome, err)
 	}
@@ -338,7 +339,7 @@ func TestInvalidationDuringALoadRefusesTheWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := h.cache.Invalidate(ctx, "42"); err != nil {
+	if err = h.cache.Invalidate(ctx, "42"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -493,7 +494,7 @@ func TestRejectionOnlyRemovesTheBytesItJudged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cache.Set(ctx, "42", ada, fence); err != nil {
+	if _, err = cache.Set(ctx, "42", ada, fence); err != nil {
 		t.Fatal(err)
 	}
 
@@ -505,12 +506,13 @@ func TestRejectionOnlyRemovesTheBytesItJudged(t *testing.T) {
 
 	damaged := append([]byte(nil), good...)
 	damaged[len(damaged)-1]++
-	if _, err := store.Set(ctx, key, damaged, 1, time.Hour); err != nil {
+	if _, err = store.Set(ctx, key, damaged, 1, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 
 	armed = true
-	if _, ok, err := cache.Get(ctx, "42"); ok || err != nil {
+	_, ok, err := cache.Get(ctx, "42")
+	if ok || err != nil {
 		t.Fatalf("Get of a damaged frame = %v, %v; want a miss", ok, err)
 	}
 	armed = false
@@ -800,20 +802,20 @@ func TestNamespacesDoNotCollide(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	newCache := func(namespace string) *cascache.Cache[user] {
-		t.Helper()
-		c, err := cascache.New(cascache.Options[user]{
-			Namespace: namespace, Backend: b, Codec: codec.JSON[user]{},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return c
-	}
-
 	ctx := context.Background()
 
-	a, bb := newCache("user"), newCache("user:u")
+	a, err := cascache.New(cascache.Options[user]{
+		Namespace: "user", Backend: b, Codec: codec.JSON[user]{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bb, err := cascache.New(cascache.Options[user]{
+		Namespace: "user:u", Backend: b, Codec: codec.JSON[user]{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	fenceA, err := a.Snapshot(ctx, "u:1")
 	if err != nil {
@@ -1118,7 +1120,7 @@ func TestARetiredValueCannotComeBack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := h.cache.Invalidate(ctx, "42"); err != nil {
+	if err = h.cache.Invalidate(ctx, "42"); err != nil {
 		t.Fatal(err)
 	}
 

@@ -276,7 +276,8 @@ func TestGetRecordsHitMissAndError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, ok, err := cache.Get(ctx, "42"); ok || err != nil {
+	_, ok, err := cache.Get(ctx, "42")
+	if ok || err != nil {
 		t.Fatalf("Get = %v, %v; want a miss", ok, err)
 	}
 
@@ -320,7 +321,7 @@ func TestSetRecordsAFillOnlyWhenStored(t *testing.T) {
 	}
 
 	stale := fence
-	if err := cache.Invalidate(ctx, "42"); err != nil {
+	if err = cache.Invalidate(ctx, "42"); err != nil {
 		t.Fatal(err)
 	}
 	res, err = cache.Set(ctx, "42", ada, stale)
