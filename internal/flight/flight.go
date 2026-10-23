@@ -11,7 +11,13 @@ import (
 	"time"
 )
 
-const clockSlots = 256
+// Keys hash to a clock slot, and each lock shard owns a run of slots.
+// Fewer slots save memory but make EndedSince report more false positives.
+const (
+	clockSlots = 256
+	shardCount = 8
+	shardSlots = clockSlots / shardCount
+)
 
 var clockSeed = maphash.MakeSeed()
 
@@ -56,8 +62,8 @@ func (r Role) String() string {
 }
 
 // Group runs one call per key and shares its result with the other callers.
-// Timeout and the hooks are read without holding the lock, so set them before
-// the first Do.
+// Timeout and the hooks are read without locking, so set them before the
+// first Do.
 type Group[V any] struct {
 	// Timeout bounds one call's context. Zero means no timeout. It does not stop
 	// a call that ignores its context, but such a call no longer takes joiners.
@@ -67,13 +73,17 @@ type Group[V any] struct {
 	OnPanic  func(key string, value any, stack []byte)
 	OnGoexit func(key string)
 
+	shards [shardCount]shard[V]
+}
+
+type shard[V any] struct {
 	mu    sync.Mutex
 	calls map[string]*call[V]
 
-	clocks [clockSlots]slotClock
+	clocks [shardSlots]slotClock
 }
 
-// Group.mu serializes updates to returned and detached.
+// shard.mu serializes updates to returned and detached.
 type slotClock struct {
 	now      atomic.Uint64
 	returned atomic.Uint64
@@ -84,10 +94,10 @@ type call[V any] struct {
 	ctx    context.Context
 	done   chan struct{}
 	cancel context.CancelFunc
-	// Guarded by Group.mu. The call is canceled when waiters reaches zero.
+	// Guarded by shard.mu. The call is canceled when waiters reaches zero.
 	waiters int
 	// The first caller to collect the result accounts for the call.
-	accounted bool
+	accounted atomic.Bool
 	val       V
 	err       error
 }
@@ -107,27 +117,28 @@ func (g *Group[V]) Do(
 		return v, Abandoned, err
 	}
 
-	g.mu.Lock()
-	if c, ok := g.calls[key]; ok {
+	sh, clk := g.slotOf(key)
+	sh.mu.Lock()
+	if c, ok := sh.calls[key]; ok {
 		if c.ctx.Err() == nil {
 			c.waiters++
-			g.mu.Unlock()
+			sh.mu.Unlock()
 
 			if g.OnJoin != nil {
 				g.OnJoin(key)
 			}
 			return g.wait(ctx, key, c)
 		}
-		g.clockOf(key).detached.Add(1)
+		clk.detached.Add(1)
 	}
 
 	callCtx, cancel := g.callContext(ctx)
 	c := &call[V]{ctx: callCtx, done: make(chan struct{}), cancel: cancel, waiters: 1}
-	if g.calls == nil {
-		g.calls = make(map[string]*call[V])
+	if sh.calls == nil {
+		sh.calls = make(map[string]*call[V])
 	}
-	g.calls[key] = c
-	g.mu.Unlock()
+	sh.calls[key] = c
+	sh.mu.Unlock()
 
 	go g.run(key, c, fn)
 
@@ -138,27 +149,40 @@ func (g *Group[V]) Do(
 type Stamp uint64
 
 // Now returns the key's current stamp without advancing it.
-func (g *Group[V]) Now(key string) Stamp { return Stamp(g.clockOf(key).now.Load()) }
+func (g *Group[V]) Now(key string) Stamp {
+	_, c := g.slotOf(key)
+	return Stamp(c.now.Load())
+}
 
 // Tick advances the key's stamp and returns it.
-func (g *Group[V]) Tick(key string) Stamp { return Stamp(g.clockOf(key).now.Add(1)) }
+func (g *Group[V]) Tick(key string) Stamp {
+	_, c := g.slotOf(key)
+	return Stamp(c.now.Add(1))
+}
 
 // EndedSince reports whether a call for key returned after s or is still
 // running outside the group. Shared clocks can cause false positives.
 func (g *Group[V]) EndedSince(key string, s Stamp) bool {
-	c := g.clockOf(key)
+	_, c := g.slotOf(key)
 	// Read detached first; run updates returned before decrementing it.
 	return c.detached.Load() > 0 || Stamp(c.returned.Load()) > s
 }
 
-func (g *Group[V]) clockOf(key string) *slotClock {
-	return &g.clocks[maphash.String(clockSeed, key)%clockSlots]
+func (g *Group[V]) slotOf(key string) (*shard[V], *slotClock) {
+	i := maphash.String(clockSeed, key) % clockSlots
+	sh := &g.shards[i/shardSlots]
+	return sh, &sh.clocks[i%shardSlots]
 }
 
 func (g *Group[V]) Len() int {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return len(g.calls)
+	n := 0
+	for i := range g.shards {
+		sh := &g.shards[i]
+		sh.mu.Lock()
+		n += len(sh.calls)
+		sh.mu.Unlock()
+	}
+	return n
 }
 
 func (g *Group[V]) callContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -189,26 +213,23 @@ func (g *Group[V]) wait(ctx context.Context, key string, c *call[V]) (V, Role, e
 }
 
 func (g *Group[V]) settle(c *call[V]) Role {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	if c.accounted {
-		return Shared
+	if c.accounted.CompareAndSwap(false, true) {
+		return Owned
 	}
-	c.accounted = true
-	return Owned
+	return Shared
 }
 
 func (g *Group[V]) abandon(key string, c *call[V]) {
-	g.mu.Lock()
+	sh, clk := g.slotOf(key)
+	sh.mu.Lock()
 	c.waiters--
 	last := c.waiters == 0
-	if last && g.calls[key] == c {
+	if last && sh.calls[key] == c {
 		// Let new callers start before canceling the old call.
-		delete(g.calls, key)
-		g.clockOf(key).detached.Add(1)
+		delete(sh.calls, key)
+		clk.detached.Add(1)
 	}
-	g.mu.Unlock()
+	sh.mu.Unlock()
 
 	if last {
 		c.cancel()
@@ -233,16 +254,16 @@ func (g *Group[V]) run(key string, c *call[V], fn func(context.Context) (V, erro
 			}
 		}
 
-		g.mu.Lock()
-		clk := g.clockOf(key)
-		// mu orders the stores, so returned only grows.
+		sh, clk := g.slotOf(key)
+		sh.mu.Lock()
+		// sh.mu orders the stores, so returned only grows.
 		clk.returned.Store(clk.now.Add(1))
-		if g.calls[key] == c {
-			delete(g.calls, key)
+		if sh.calls[key] == c {
+			delete(sh.calls, key)
 		} else {
 			clk.detached.Add(-1)
 		}
-		g.mu.Unlock()
+		sh.mu.Unlock()
 
 		// Remove before waking waiters so new callers cannot join this call.
 		close(c.done)

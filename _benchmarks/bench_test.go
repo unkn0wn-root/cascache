@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
+	"strconv"
 	"sync/atomic"
 	"testing"
 
@@ -154,6 +156,87 @@ func BenchmarkLocalLoadHit(b *testing.B) {
 		}
 	}
 	benchmarkSink = got
+}
+
+func BenchmarkLocalParallelLoadMiss(b *testing.B) {
+	ctx := context.Background()
+	cache := newLocalCache(b, "benchmark:local:parallel-miss")
+
+	load := func(context.Context) ([]byte, error) {
+		return benchmarkValue, nil
+	}
+
+	b.SetBytes(int64(len(benchmarkValue)))
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	// Each worker uses its own keys, so every Load misses.
+	var workers atomic.Int64
+	b.RunParallel(func(pb *testing.PB) {
+		prefix := strconv.FormatInt(workers.Add(1), 10) + ":"
+		for i := 0; pb.Next(); i++ {
+			if _, err := cache.Load(ctx, prefix+strconv.Itoa(i), load); err != nil {
+				b.Error(err)
+				return
+			}
+		}
+	})
+}
+
+func BenchmarkRedisParallelLoadMiss(b *testing.B) {
+	for _, p := range []int{1, 16} {
+		b.Run("parallelism="+strconv.Itoa(p), func(b *testing.B) {
+			ctx := context.Background()
+			client := newRedisClient(b, ctx)
+			const namespace = "benchmark:redis:parallel-miss"
+			// Keys left by earlier runs would turn misses into hits.
+			deleteKeys(b, ctx, client, "*"+namespace+":*")
+			trips := countRoundTrips(client)
+
+			cacheBackend, err := redisbackend.New(client, redisbackend.Options{
+				InvalidationTTL: backend.NoExpiration,
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+			reads := &readCounter{Backend: cacheBackend}
+			cache := newCache(b, reads, namespace)
+
+			var loads atomic.Int64
+			load := func(context.Context) ([]byte, error) {
+				loads.Add(1)
+				return benchmarkValue, nil
+			}
+			// Warm up Lua scripts.
+			if _, err := cache.Load(ctx, "warmup", load); err != nil {
+				b.Fatal(err)
+			}
+
+			b.SetParallelism(p)
+			b.SetBytes(int64(len(benchmarkValue)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			trips.Store(0)
+			reads.n.Store(0)
+			loads.Store(0)
+
+			var workers atomic.Int64
+			b.RunParallel(func(pb *testing.PB) {
+				prefix := strconv.FormatInt(workers.Add(1), 10) + ":"
+				for i := 0; pb.Next(); i++ {
+					if _, err := cache.Load(ctx, prefix+strconv.Itoa(i), load); err != nil {
+						b.Error(err)
+						return
+					}
+				}
+			})
+			if n := loads.Load(); n != int64(b.N) {
+				b.Fatalf("the loader ran %d times in %d loads", n, b.N)
+			}
+			b.ReportMetric(float64(trips.Load())/float64(b.N), "round-trips/op")
+			b.ReportMetric(float64(reads.n.Load())/float64(b.N), "reads/op")
+		})
+	}
 }
 
 func BenchmarkLocalReload(b *testing.B) {
@@ -390,6 +473,16 @@ func (h *roundTripHook) ProcessPipelineHook(next goredis.ProcessPipelineHook) go
 	}
 }
 
+type readCounter struct {
+	backend.Backend
+	n atomic.Int64
+}
+
+func (r *readCounter) Read(ctx context.Context, key backend.Key) (backend.ReadResult, error) {
+	r.n.Add(1)
+	return r.Backend.Read(ctx, key)
+}
+
 func newRedisClient(b *testing.B, ctx context.Context) *goredis.Client {
 	b.Helper()
 
@@ -404,4 +497,22 @@ func newRedisClient(b *testing.B, ctx context.Context) *goredis.Client {
 		b.Fatal(err)
 	}
 	return client
+}
+
+func deleteKeys(b *testing.B, ctx context.Context, client *goredis.Client, pattern string) {
+	b.Helper()
+
+	var keys []string
+	iter := client.Scan(ctx, 0, pattern, 1000).Iterator()
+	for iter.Next(ctx) {
+		keys = append(keys, iter.Val())
+	}
+	if err := iter.Err(); err != nil {
+		b.Fatal(err)
+	}
+	for chunk := range slices.Chunk(keys, 1000) {
+		if err := client.Unlink(ctx, chunk...).Err(); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
