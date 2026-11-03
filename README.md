@@ -1,21 +1,17 @@
 # cascache
 
-cascache is a read-through cache for Go. It caches values loaded from a
-database or another slow source. Once you invalidate a key, a load that was
-already running cannot put the old value back. It works in one process, or
-across processes that share invalidations through Redis.
+cascache is a read-through cache for Go. It caches values loaded from a database or another *slow* source.
+Once you invalidate a key, a load that was already running cannot put the old value back.
+It works in one process, or across processes that share invalidations through Redis.
 
 ## Why
 
-With a plain cache, a read that misses loads the value from the database and
-writes it to the cache. An update writes the database and deletes the cached
-key. If a slow read loads the old value before an update and writes it after
-the delete, the cache serves that stale value until its TTL ends.
+With a plain cache, a read that misses loads the value from the database and writes it to the cache.
+An update writes the database and deletes the cached key.
+If a slow read loads the old value before an update and writes it after the delete, the cache serves that stale value until its TTL ends.
 
-cascache gives each key a token called a fence. `Load` reads the fence before
-it calls your loader and stores the result only if the fence is unchanged.
-`Invalidate` replaces the fence. Values stored under the old fence are no longer
-served, and loads that started earlier cannot store their results.
+cascache gives each key a token called a fence. `Load` reads the fence before it calls your loader and stores the result only if the fence is unchanged.
+`Invalidate` replaces the fence. Values stored under the old fence are no longer served, and loads that started earlier cannot store their results.
 
 With a plain cache:
 
@@ -57,11 +53,9 @@ sequenceDiagram
 
 ## Features
 
-- Concurrent `Load` calls for the same key in one process share a single loader
-  run.
+- Concurrent `Load` calls for the same key in one process share a single loader run.
 - `Load` returns the loaded value even when a cache read or write fails.
-- Backends for one process, for Redis, and for values kept in each process with
-  invalidations shared through Redis.
+- Backends for one process, for Redis, and for values kept in each process with invalidations shared through Redis.
 - Value stores for Ristretto, BigCache and Redis.
 - Codecs for JSON, CBOR, msgpack and protobuf.
 - Typed keys, randomized TTLs and metrics callbacks in the `typed` package.
@@ -72,9 +66,6 @@ sequenceDiagram
 ```sh
 go get github.com/unkn0wn-root/cascache/v4
 ```
-
-cascache needs Go 1.23.1 or later. Version 4 changed the module path, API and
-storage format, so it does not share cached data or invalidations with v3.
 
 ## Quick start
 
@@ -197,26 +188,19 @@ if err != nil {
 }
 ```
 
-The Redis backends have no `Close` method, so drop `defer b.Close()` from the
-quick start.
+The Redis backends have no `Close` method, so drop `defer b.Close()` from the quick start.
 
-Point the client at the Redis primary. A replica that lags behind may not have
-an invalidation yet, and cascache would serve the old value as current. `New`
-and `NewShared` return `ErrReplicaReads` for a Cluster client with `ReadOnly`
-set. They do not detect a Sentinel client with `ReplicaOnly` set, or other
-clients that read from replicas. The
-[package docs](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/backend/redis)
-list the go-redis settings to leave off.
+Point the client at the Redis primary. A replica that lags behind may not have an invalidation yet, and cascache would serve the old value as current.
+`New` and `NewShared` return `ErrReplicaReads` for a Cluster client with `ReadOnly` set.
+They do not detect a Sentinel client with `ReplicaOnly` set, or other clients that read from replicas.
 
-Redis copies writes to replicas in the background, and cascache does not wait
-for them. If the primary fails right after an invalidation, the new primary may
-not have it, and the old value can be served again until it expires.
+Redis copies writes to replicas in the background, and cascache does not wait for them.
+If the primary fails right after an invalidation, the new primary may not have it, and the old value can be served again until it expires.
 
 ## Typed keys
 
 The `typed` package takes keys of any comparable type, such as an `int64` ID.
-It can also give each value a random TTL within a range, so entries written
-together do not all expire at once:
+It can also give each value a random TTL within a range, so entries written together do not all expire at once:
 
 ```go
 users, err := typed.New(typed.Options[int64, User]{
@@ -234,16 +218,13 @@ users, err := typed.New(typed.Options[int64, User]{
 
 ## Documentation
 
-The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4). It also covers:
+Full reference: [pkg.go.dev](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4).
 
 - [Cache.Snapshot](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4#Cache.Snapshot) and [Cache.Set](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4#Cache.Set) to fill the cache yourself
 - [Options.LoadTimeout](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4#Options.LoadTimeout) to limit how long a loader runs
 - [Observer](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4#Observer) for cache events, with [hooks/slog](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/hooks/slog) to log them and [hooks/async](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/hooks/async) to handle them in the background
 - [backend.Backend](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/backend#Backend) and [backend/backendtest](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/backend/backendtest) to write and test your own backend
 - Value stores for [Ristretto](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/provider/ristretto), [BigCache](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/provider/bigcache) and [Redis](https://pkg.go.dev/github.com/unkn0wn-root/cascache/v4/provider/redis). The Redis store holds values only and does not share invalidations the way `backend/redis` does.
-
-[_benchmarks/README.md](_benchmarks/README.md) explains how to run the
-benchmarks, and [CHANGELOG.md](CHANGELOG.md) lists the changes in each release.
 
 ## License
 
